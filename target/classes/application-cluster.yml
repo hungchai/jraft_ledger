@@ -1,0 +1,41 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: jraft-ledger-cluster
+  
+  datasource:
+    url: jdbc:h2:file:/app/raft_data/ledger;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: 
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+# JRaft 集群配置
+raft:
+  node:
+    id: ${RAFT_NODE_ID:ledger-node1:8081}
+    port: ${RAFT_NODE_PORT:8081}
+  group:
+    id: ${RAFT_GROUP_ID:ledger_cluster}
+  data:
+    path: ${RAFT_DATA_PATH:/app/raft_data}
+  cluster:
+    config: ${RAFT_CLUSTER_CONFIG:ledger-node1:8081,ledger-node2:8081,ledger-node3:8081}
+
+# 日誌配置
+logging:
+  level:
+    com.example.ledger: INFO
+    com.alipay.sofa.jraft: WARN
+    org.springframework: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{nodeId}] %logger{36} - %msg%n" 
