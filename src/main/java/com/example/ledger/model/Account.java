@@ -1,62 +1,56 @@
 package com.example.ledger.model;
 
-import jakarta.persistence.*;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import lombok.AllArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-@Entity
-@Table(name = "accounts")
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
+@TableName("account")
 public class Account {
-    
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-    
-    @Column(unique = true, nullable = false)
-    private String accountNumber;
-    
-    @Column(nullable = false)
-    private String accountName;
-    
-    @Column(nullable = false, precision = 19, scale = 2)
-    private BigDecimal balance;
-    
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @TableId
+    private String accountId;
+
+    private String userId;
     private AccountType accountType;
-    
-    @Column(nullable = false)
+    private BigDecimal balance;
     private LocalDateTime createdAt;
-    
-    @Column(nullable = false)
     private LocalDateTime updatedAt;
     
-    @Version
-    private Long version;
-    
+    // 账户类型枚举
     public enum AccountType {
-        ASSET,      // 資產
-        LIABILITY,  // 負債  
-        EQUITY,     // 權益
-        REVENUE,    // 收入
-        EXPENSE     // 支出
+        BROKERAGE("brokerage"),
+        EXCHANGE("exchange"), 
+        AVAILABLE("available");
+        
+        private final String value;
+        
+        AccountType(String value) {
+            this.value = value;
+        }
+        
+        public String getValue() {
+            return value;
+        }
+        
+        public static AccountType fromValue(String value) {
+            for (AccountType type : AccountType.values()) {
+                if (type.value.equals(value)) {
+                    return type;
+                }
+            }
+            throw new IllegalArgumentException("Unknown account type: " + value);
+        }
     }
     
-    @PrePersist
-    protected void onCreate() {
-        createdAt = LocalDateTime.now();
-        updatedAt = LocalDateTime.now();
+    // 生成账户ID的工具方法
+    public static String generateAccountId(String userId, AccountType accountType) {
+        return userId + ":" + accountType.getValue();
     }
-    
-    @PreUpdate
-    protected void onUpdate() {
-        updatedAt = LocalDateTime.now();
-    }
-} 
+}

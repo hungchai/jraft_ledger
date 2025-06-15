@@ -1,0 +1,716 @@
+# ============================================================================
+# JRaft Ledger System - Comprehensive REST API Test Suite
+# Application: http://localhost:8090
+# Swagger UI: http://localhost:8090/swagger-ui.html
+# API Docs: http://localhost:8090/api-docs
+# 
+# NEW FEATURES:
+# - Account Existence Validation for Transfers
+# - Account Creation Idempotency (returns 200 for existing accounts)
+# - Transfer Idempotency Support (prevents duplicate transfers)
+# - Comprehensive Error Handling and Monitoring
+# ============================================================================
+
+### Environment Variables
+@baseUrl = http://localhost:8090
+@contentType = application/json
+
+# ============================================================================
+# HEALTH & MONITORING ENDPOINTS
+# ============================================================================
+
+### Health Check - Overall Application Health
+GET {{baseUrl}}/actuator/health
+Accept: {{contentType}}
+
+### Application Info
+GET {{baseUrl}}/actuator/info
+Accept: {{contentType}}
+
+### Metrics Overview
+GET {{baseUrl}}/actuator/metrics
+Accept: {{contentType}}
+
+### Database Health Check
+GET {{baseUrl}}/actuator/health/db
+Accept: {{contentType}}
+
+### Raft Node Status
+GET {{baseUrl}}/api/raft/status
+Accept: {{contentType}}
+
+### Raft Configuration
+GET {{baseUrl}}/api/raft/config
+Accept: {{contentType}}
+
+### Swagger UI (Open in Browser)
+GET {{baseUrl}}/swagger-ui.html
+
+### API Documentation JSON
+GET {{baseUrl}}/api-docs
+Accept: {{contentType}}
+
+# ============================================================================
+# ADMIN & MONITORING ENDPOINTS
+# ============================================================================
+
+### MySQL Batch Writer Metrics
+GET {{baseUrl}}/api/admin/metrics/mysql-writer
+Accept: {{contentType}}
+
+### Idempotency Cache Statistics
+GET {{baseUrl}}/api/admin/idempotency/stats
+Accept: {{contentType}}
+
+# ============================================================================
+# DATA MANAGEMENT ENDPOINTS (/api/data)
+# ============================================================================
+
+### Get Data Initialization Status
+GET {{baseUrl}}/api/data/status
+Accept: {{contentType}}
+
+### Force Re-initialize RocksDB from MySQL
+POST {{baseUrl}}/api/data/reinitialize
+Content-Type: {{contentType}}
+
+# ============================================================================
+# BALANCE CONTROLLER ENDPOINTS (/api/balance)
+# ============================================================================
+
+### Get User All Account Balances
+GET {{baseUrl}}/api/balance/user/UserA
+Accept: {{contentType}}
+
+### Get Specific Account Balance - UserA Available
+GET {{baseUrl}}/api/balance/account/UserA/available
+Accept: {{contentType}}
+
+### Get Specific Account Balance - UserA Brokerage
+GET {{baseUrl}}/api/balance/account/UserA/brokerage
+Accept: {{contentType}}
+
+### Get Specific Account Balance - UserA Exchange
+GET {{baseUrl}}/api/balance/account/UserA/exchange
+Accept: {{contentType}}
+
+### Get User All Account Balances - UserB
+GET {{baseUrl}}/api/balance/user/UserB
+Accept: {{contentType}}
+
+### Get Specific Account Balance - UserB Available
+GET {{baseUrl}}/api/balance/account/UserB/available
+Accept: {{contentType}}
+
+### Create New Account - UserC Available
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "UserC",
+  "accountType": "AVAILABLE"
+}
+
+### Create Existing Account - UserC Available (Should return 200 with "Account already exists")
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "UserC",
+  "accountType": "AVAILABLE"
+}
+
+### Create New Account - UserC Brokerage
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "UserC",
+  "accountType": "BROKERAGE"
+}
+
+### Create New Account - UserC Exchange
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "UserC",
+  "accountType": "EXCHANGE"
+}
+
+# ============================================================================
+# TRANSFER CONTROLLER ENDPOINTS (/api/transfer)
+# ============================================================================
+
+### Single Transfer - UserA to UserB (Available Accounts)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 50.00,
+  "description": "Test transfer from UserA to UserB"
+}
+
+### Single Transfer - UserA to Bank (Available Accounts)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "Bank",
+  "toType": "AVAILABLE",
+  "amount": 25.00,
+  "description": "Test transfer from UserA to Bank"
+}
+
+### Single Transfer - Brokerage to Exchange
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "BROKERAGE",
+  "toUserId": "UserB",
+  "toType": "EXCHANGE",
+  "amount": 100.00,
+  "description": "Cross-account type transfer"
+}
+
+### Batch Transfer - Multiple Atomic Transfers
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: {{contentType}}
+
+{
+  "transfers": [
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 10.00,
+      "description": "Batch transfer 1"
+    },
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "Bank",
+      "toType": "AVAILABLE",
+      "amount": 20.00,
+      "description": "Batch transfer 2"
+    },
+    {
+      "fromUserId": "UserB",
+      "fromType": "BROKERAGE",
+      "toUserId": "Exchange",
+      "toType": "BROKERAGE",
+      "amount": 15.00,
+      "description": "Batch transfer 3"
+    }
+  ]
+}
+
+### Demo Transfer - Predefined Demo Scenario
+POST {{baseUrl}}/api/transfer/demo
+Content-Type: {{contentType}}
+
+# ============================================================================
+# IDEMPOTENCY TESTING - NEW FEATURE
+# ============================================================================
+
+### Idempotent Transfer Test 1: With Custom Idempotency Key
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+Idempotency-Key: test-transfer-001
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 25.00,
+  "description": "Idempotent transfer test 1"
+}
+
+### Idempotent Transfer Test 2: Repeat Same Request (Should return cached result)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+Idempotency-Key: test-transfer-001
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 25.00,
+  "description": "Idempotent transfer test 1"
+}
+
+### Idempotent Transfer Test 3: Auto-generated Idempotency Key (Same request content)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 15.00,
+  "description": "Auto idempotency test"
+}
+
+### Idempotent Transfer Test 4: Repeat Same Content (Should return cached result)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 15.00,
+  "description": "Auto idempotency test"
+}
+
+### Idempotent Transfer Test 5: Different Content (Should process normally)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 35.00,
+  "description": "Different amount - should process"
+}
+
+# ============================================================================
+# COMPREHENSIVE TEST SCENARIOS
+# ============================================================================
+
+### Scenario 1: Complete User Setup and Transfer Flow
+# Step 1: Create all account types for TestUser
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "TestUser",
+  "accountType": "AVAILABLE"
+}
+
+###
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "TestUser",
+  "accountType": "BROKERAGE"
+}
+
+###
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "TestUser",
+  "accountType": "EXCHANGE"
+}
+
+### Step 2: Check initial balances
+GET {{baseUrl}}/api/balance/user/TestUser
+Accept: {{contentType}}
+
+### Step 3: Fund the account (from Bank to TestUser)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "Bank",
+  "fromType": "AVAILABLE",
+  "toUserId": "TestUser",
+  "toType": "AVAILABLE",
+  "amount": 1000.00,
+  "description": "Initial funding for TestUser"
+}
+
+### Step 4: Verify funded balance
+GET {{baseUrl}}/api/balance/account/TestUser/available
+Accept: {{contentType}}
+
+### Step 5: Internal transfer (Available to Brokerage)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "TestUser",
+  "fromType": "AVAILABLE",
+  "toUserId": "TestUser",
+  "toType": "BROKERAGE",
+  "amount": 300.00,
+  "description": "Move funds to brokerage account"
+}
+
+### Step 6: Check all balances after internal transfer
+GET {{baseUrl}}/api/balance/user/TestUser
+Accept: {{contentType}}
+
+# ============================================================================
+# ERROR TESTING SCENARIOS
+# ============================================================================
+
+### Error Test 1: Insufficient Funds
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 999999.00,
+  "description": "Test insufficient funds error"
+}
+
+### Error Test 2: Invalid Account Type
+GET {{baseUrl}}/api/balance/account/UserA/invalid_type
+Accept: {{contentType}}
+
+### Error Test 3: Non-existent User
+GET {{baseUrl}}/api/balance/user/NonExistentUser
+Accept: {{contentType}}
+
+### Error Test 4: Same Account Transfer (Should Fail)
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserA",
+  "toType": "AVAILABLE",
+  "amount": 10.00,
+  "description": "Same account transfer test"
+}
+
+### Error Test 5: Negative Amount Transfer
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": -50.00,
+  "description": "Negative amount test"
+}
+
+### Error Test 6: Zero Amount Transfer
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 0.00,
+  "description": "Zero amount test"
+}
+
+### Error Test 7: Transfer with Non-existent Source Account
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "NonExistentUser",
+  "fromType": "AVAILABLE",
+  "toUserId": "UserB",
+  "toType": "AVAILABLE",
+  "amount": 50.00,
+  "description": "Test transfer with non-existent source account"
+}
+
+### Error Test 8: Transfer with Non-existent Destination Account
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "AVAILABLE",
+  "toUserId": "NonExistentUser",
+  "toType": "AVAILABLE",
+  "amount": 50.00,
+  "description": "Test transfer with non-existent destination account"
+}
+
+# ============================================================================
+# PERFORMANCE & STRESS TESTING
+# ============================================================================
+
+### Performance Test 1: Rapid Sequential Transfers
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "BROKERAGE",
+  "toUserId": "UserB",
+  "toType": "BROKERAGE",
+  "amount": 1.00,
+  "description": "Performance test 1"
+}
+
+###
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "BROKERAGE",
+  "toUserId": "UserB",
+  "toType": "BROKERAGE",
+  "amount": 1.00,
+  "description": "Performance test 2"
+}
+
+###
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "UserA",
+  "fromType": "BROKERAGE",
+  "toUserId": "UserB",
+  "toType": "BROKERAGE",
+  "amount": 1.00,
+  "description": "Performance test 3"
+}
+
+### Performance Test 2: Large Batch Transfer
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: {{contentType}}
+
+{
+  "transfers": [
+    {
+      "fromUserId": "Bank",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserA",
+      "toType": "AVAILABLE",
+      "amount": 1.00,
+      "description": "Batch perf test 1"
+    },
+    {
+      "fromUserId": "Bank",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 1.00,
+      "description": "Batch perf test 2"
+    },
+    {
+      "fromUserId": "Bank",
+      "fromType": "AVAILABLE",
+      "toUserId": "Exchange",
+      "toType": "AVAILABLE",
+      "amount": 1.00,
+      "description": "Batch perf test 3"
+    },
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 0.50,
+      "description": "Batch perf test 4"
+    },
+    {
+      "fromUserId": "UserB",
+      "fromType": "AVAILABLE",
+      "toUserId": "Exchange",
+      "toType": "AVAILABLE",
+      "amount": 0.25,
+      "description": "Batch perf test 5"
+    }
+  ]
+}
+
+# ============================================================================
+# BUSINESS LOGIC TESTING
+# ============================================================================
+
+### Business Test 1: Multi-Account Type Operations
+# Create accounts for business testing
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "Trader1",
+  "accountType": "AVAILABLE"
+}
+
+###
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "Trader1",
+  "accountType": "BROKERAGE"
+}
+
+###
+POST {{baseUrl}}/api/balance/create
+Content-Type: {{contentType}}
+
+{
+  "userId": "Trader1",
+  "accountType": "EXCHANGE"
+}
+
+### Fund trader account
+POST {{baseUrl}}/api/transfer/single
+Content-Type: {{contentType}}
+
+{
+  "fromUserId": "Bank",
+  "fromType": "AVAILABLE",
+  "toUserId": "Trader1",
+  "toType": "AVAILABLE",
+  "amount": 5000.00,
+  "description": "Initial trader funding"
+}
+
+### Simulate trading workflow: Available -> Brokerage -> Exchange
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: {{contentType}}
+
+{
+  "transfers": [
+    {
+      "fromUserId": "Trader1",
+      "fromType": "AVAILABLE",
+      "toUserId": "Trader1",
+      "toType": "BROKERAGE",
+      "amount": 2000.00,
+      "description": "Move funds to brokerage for trading"
+    },
+    {
+      "fromUserId": "Trader1",
+      "fromType": "BROKERAGE",
+      "toUserId": "Trader1",
+      "toType": "EXCHANGE",
+      "amount": 1000.00,
+      "description": "Move funds to exchange for execution"
+    }
+  ]
+}
+
+### Check final trader balances
+GET {{baseUrl}}/api/balance/user/Trader1
+Accept: {{contentType}}
+
+# ============================================================================
+# RAFT CLUSTER TESTING
+# ============================================================================
+
+### Get Raft Status - Should show DISABLED currently
+GET {{baseUrl}}/api/raft/status
+Accept: {{contentType}}
+
+### Get Raft Configuration
+GET {{baseUrl}}/api/raft/config
+Accept: {{contentType}}
+
+# ============================================================================
+# SYSTEM STATE VERIFICATION
+# ============================================================================
+
+### Verify All System Accounts
+GET {{baseUrl}}/api/balance/user/UserA
+Accept: {{contentType}}
+
+###
+GET {{baseUrl}}/api/balance/user/UserB
+Accept: {{contentType}}
+
+###
+GET {{baseUrl}}/api/balance/user/Bank
+Accept: {{contentType}}
+
+###
+GET {{baseUrl}}/api/balance/user/Exchange
+Accept: {{contentType}}
+
+### Final Health Check
+GET {{baseUrl}}/actuator/health
+Accept: {{contentType}}
+
+### Final Metrics Check
+GET {{baseUrl}}/actuator/metrics
+Accept: {{contentType}}
+
+# ============================================================================
+# NOTES & DOCUMENTATION
+# ============================================================================
+
+# NEW FEATURES ADDED:
+# 1. IDEMPOTENCY SUPPORT:
+#    - Custom idempotency keys via "Idempotency-Key" header
+#    - Auto-generated keys based on request content (SHA-256)
+#    - 60-minute cache duration with automatic cleanup
+#    - Prevents duplicate transfers from network retries
+#
+# 2. ACCOUNT EXISTENCE VALIDATION:
+#    - Transfer endpoints validate account existence before processing
+#    - Returns 404 Not Found for non-existent accounts
+#    - Fails fast to improve user experience
+#
+# 3. ENHANCED ACCOUNT CREATION:
+#    - Returns 200 OK with "Account already exists" message for existing accounts
+#    - Maintains backward compatibility with success/failure responses
+#
+# 4. MONITORING & ADMINISTRATION:
+#    - /api/admin/idempotency/stats - View idempotency cache statistics
+#    - /api/admin/metrics/mysql-writer - MySQL batch writer performance metrics
+
+# Account Types:
+# - AVAILABLE: General available funds
+# - BROKERAGE: Funds allocated for brokerage operations
+# - EXCHANGE: Funds allocated for exchange operations
+
+# Account ID Format: userId:accountType (e.g., "UserA:available")
+
+# Sample Users in System:
+# - UserA: Test user with initial balances
+# - UserB: Test user with initial balances  
+# - Bank: System account for funding operations
+# - Exchange: System account for exchange operations
+
+# Error Codes to Expect:
+# - 200: OK (successful operation or idempotent response)
+# - 400: Bad Request (invalid parameters, insufficient funds)
+# - 404: Not Found (non-existent accounts/users)
+# - 500: Internal Server Error (system issues)
+
+# Performance Notes:
+# - Single transfers are processed asynchronously with idempotency support
+# - Batch transfers are atomic (all succeed or all fail)
+# - RocksDB provides fast local state storage
+# - MySQL provides persistent audit trail
+# - Idempotency cache uses in-memory ConcurrentHashMap for high performance
+
+# Idempotency Usage:
+# - Include "Idempotency-Key: your-unique-key" header for custom keys
+# - Omit header to use auto-generated content-based keys
+# - Identical requests return cached responses without processing
+# - Cache automatically expires after 60 minutes
+
+# ============================================================================
+# END OF TEST SUITE
+# ============================================================================
