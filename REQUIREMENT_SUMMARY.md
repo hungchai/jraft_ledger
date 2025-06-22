@@ -50,14 +50,6 @@ The API follows standard REST conventions, returns JSON, and uses appropriate HT
 
 ---
 
-## 5. Schema and Data Initialization
-
-- The database schema is initialized automatically on startup using Spring Boot's standard mechanism (`schema.sql`).
-- Business data initialization (e.g., creating default accounts) is decoupled from schema setup and only runs after the application is fully started and connected to the database.
-- This is achieved by listening for the `ApplicationReadyEvent` in the `DataInitializationService`.
-
----
-
 ## 6. Maintainability and Standardization
 
 - The solution relies on standard Spring Boot features and configuration for lifecycle, health checks, and shutdown logic.

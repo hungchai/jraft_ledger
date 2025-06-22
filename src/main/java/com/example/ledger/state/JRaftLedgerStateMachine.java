@@ -7,9 +7,11 @@ import com.alipay.sofa.jraft.core.StateMachineAdapter;
 import com.alipay.sofa.jraft.error.RaftError;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
+import com.example.ledger.config.DataInitializationConfig;
 import com.example.ledger.config.RocksDBService;
 import com.example.ledger.model.Account;
 import com.example.ledger.model.ProcessedTransaction;
+import com.example.ledger.raft.RaftNodeManager;
 import com.example.ledger.service.AsyncMySQLBatchWriter;
 import com.example.ledger.service.WriteEvent;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +29,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * JRaft-enabled Ledger State Machine
  * This state machine handles distributed consensus for ledger operations
  * Only active when raft.enabled=true
+ * 
+ * IMPORTANT: Only the LEADER writes to MySQL, all nodes update RocksDB
  */
 @Slf4j
 @Component
@@ -35,13 +39,27 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
     
     private final RocksDBService rocksDBService;
     private final AtomicLong appliedIndex = new AtomicLong(0);
+    private volatile boolean isLeader = false;
     
     @Autowired
     private AsyncMySQLBatchWriter asyncMySQLBatchWriter;
     
+    @Autowired
+    private RaftNodeManager raftNodeManager;
+    
+    @Autowired
+    private DataInitializationConfig dataInitializationConfig;
+    
     public JRaftLedgerStateMachine(RocksDBService rocksDBService) {
         this.rocksDBService = rocksDBService;
         log.info("JRaftLedgerStateMachine initialized with JRaft consensus enabled");
+    }
+    
+    /**
+     * Check if current node is the leader
+     */
+    private boolean isCurrentNodeLeader() {
+        return isLeader && raftNodeManager.getNode() != null && raftNodeManager.getNode().isLeader();
     }
     
     @Override
@@ -105,6 +123,7 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
     
     /**
      * Handle account creation through JRaft consensus
+     * ALL nodes update RocksDB, ONLY leader writes to MySQL
      */
     private boolean handleCreateAccount(String[] parts) {
         if (parts.length < 3) {
@@ -126,13 +145,17 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
                 return true;
             }
             
-            // Create account with zero balance
+            // ALL nodes update RocksDB for fast local reads
             rocksDBService.put(accountId, "0.0000");
             
-            // Enqueue for async MySQL write
-            asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(accountId, BigDecimal.ZERO));
+            // ONLY LEADER writes to MySQL for persistence
+            if (isCurrentNodeLeader()) {
+                asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(accountId, BigDecimal.ZERO));
+                log.info("LEADER created account and queued MySQL write: {}", accountId);
+            } else {
+                log.info("FOLLOWER created account in RocksDB only: {}", accountId);
+            }
             
-            log.info("Created account through JRaft consensus: {}", accountId);
             return true;
             
         } catch (Exception e) {
@@ -143,6 +166,7 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
     
     /**
      * Handle transfer through JRaft consensus
+     * ALL nodes update RocksDB, ONLY leader writes to MySQL
      */
     private boolean handleTransfer(String[] parts) {
         if (parts.length < 7) {
@@ -185,29 +209,36 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
             BigDecimal newFromBalance = fromBalance.subtract(amount);
             BigDecimal newToBalance = toBalance.add(amount);
             
-            // Update RocksDB (fast local storage)
+            // ALL nodes update RocksDB for consistency and fast reads
             rocksDBService.put(fromAccountId, newFromBalance.toString());
             rocksDBService.put(toAccountId, newToBalance.toString());
             
-            // Enqueue balance updates for async MySQL write
-            asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(fromAccountId, newFromBalance));
-            asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(toAccountId, newToBalance));
+            // ONLY LEADER writes to MySQL for persistence
+            if (isCurrentNodeLeader()) {
+                // Enqueue balance updates for async MySQL write
+                asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(fromAccountId, newFromBalance));
+                asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(toAccountId, newToBalance));
+                
+                // Create and enqueue transaction record
+                ProcessedTransaction transaction = new ProcessedTransaction();
+                transaction.setTransactionId(UUID.randomUUID().toString());
+                transaction.setFromAccountId(fromAccountId);
+                transaction.setToAccountId(toAccountId);
+                transaction.setAmount(amount);
+                transaction.setDescription(description);
+                transaction.setIdempotentId(idempotentId);
+                transaction.setProcessedAt(LocalDateTime.now());
+                transaction.setStatus("COMMITTED");
+                
+                asyncMySQLBatchWriter.enqueue(WriteEvent.forTransaction(transaction));
+                
+                log.info("LEADER completed transfer and queued MySQL writes: {} -> {}, amount: {}", 
+                    fromAccountId, toAccountId, amount);
+            } else {
+                log.info("FOLLOWER completed transfer in RocksDB only: {} -> {}, amount: {}", 
+                    fromAccountId, toAccountId, amount);
+            }
             
-            // Create and enqueue transaction record
-            ProcessedTransaction transaction = new ProcessedTransaction();
-            transaction.setTransactionId(UUID.randomUUID().toString());
-            transaction.setFromAccountId(fromAccountId);
-            transaction.setToAccountId(toAccountId);
-            transaction.setAmount(amount);
-            transaction.setDescription(description);
-            transaction.setIdempotentId(idempotentId);
-            transaction.setProcessedAt(LocalDateTime.now());
-            transaction.setStatus("COMMITTED");
-            
-            asyncMySQLBatchWriter.enqueue(WriteEvent.forTransaction(transaction));
-            
-            log.info("JRaft transfer completed: {} -> {}, amount: {}", 
-                fromAccountId, toAccountId, amount);
             return true;
             
         } catch (Exception e) {
@@ -260,13 +291,23 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
     
     @Override
     public void onLeaderStart(long term) {
-        log.info("JRaft node became LEADER at term: {}", term);
+        log.info("🎖️  JRaft node became LEADER at term: {} - Now responsible for MySQL writes", term);
+        this.isLeader = true;
+        
+        // Trigger leader-only data initialization if needed
+        try {
+            dataInitializationConfig.initializeAsLeader();
+        } catch (Exception e) {
+            log.error("❌ Failed to initialize data as leader", e);
+        }
+        
         super.onLeaderStart(term);
     }
     
     @Override
     public void onLeaderStop(Status status) {
-        log.info("JRaft node stopped being LEADER, status: {}", status);
+        log.info("📉 JRaft node stopped being LEADER, status: {} - No longer writing to MySQL", status);
+        this.isLeader = false;
         super.onLeaderStop(status);
     }
     
