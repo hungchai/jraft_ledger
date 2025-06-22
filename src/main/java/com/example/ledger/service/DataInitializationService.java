@@ -8,7 +8,9 @@ import com.example.ledger.model.ProcessedTransaction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
 
@@ -22,7 +24,11 @@ import java.util.List;
 @Slf4j
 @Service
 @Order(1) // Execute early in startup process
+@ConditionalOnProperty(name = "app.data-initialization.enabled", havingValue = "true", matchIfMissing = true)
 public class DataInitializationService implements CommandLineRunner {
+
+    @Value("${app.data-initialization.enabled:true}")
+    private boolean dataInitializationEnabled;
 
     @Autowired
     private RocksDBService rocksDBService;
@@ -46,6 +52,11 @@ public class DataInitializationService implements CommandLineRunner {
 
     @Override
     public void run(String... args) throws Exception {
+        if (!dataInitializationEnabled) {
+            log.info("Data initialization is disabled via configuration");
+            return;
+        }
+        
         log.info("Forcing RocksDB initialization from MySQL on every startup");
         try {
             // Always initialize accounts and transactions from MySQL

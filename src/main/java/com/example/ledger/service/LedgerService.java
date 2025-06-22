@@ -34,7 +34,7 @@ public class LedgerService {
     @Autowired(required = false)
     private JRaftLedgerStateMachine jraftLedgerStateMachine;
     
-    @Autowired
+    @Autowired(required = false)
     private DataInitializationService dataInitializationService;
     
     @Autowired
@@ -61,8 +61,10 @@ public class LedgerService {
         } else {
             // Use direct call for standalone mode
             ledgerStateMachine.createAccountIfNotExists(userId, accountType);
-            // Persist to RocksDB and enqueue for MySQL
-            dataInitializationService.updateAccountBalance(accountId, BigDecimal.ZERO);
+            // Persist to RocksDB and enqueue for MySQL (if service is available)
+            if (dataInitializationService != null) {
+                dataInitializationService.updateAccountBalance(accountId, BigDecimal.ZERO);
+            }
             return CompletableFuture.completedFuture(true);
         }
     }
@@ -140,6 +142,14 @@ public class LedgerService {
             BigDecimal balance = accountBusinessService.getAccountBalance(accountId);
             if (balance != null && balance.compareTo(BigDecimal.ZERO) >= 0) {
                 return balance;
+            }
+            
+            // Try DataInitializationService if available
+            if (dataInitializationService != null) {
+                balance = dataInitializationService.getAccountBalance(accountId);
+                if (balance != null && balance.compareTo(BigDecimal.ZERO) >= 0) {
+                    return balance;
+                }
             }
             
             // Fallback to state machine

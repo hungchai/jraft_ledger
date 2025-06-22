@@ -17,7 +17,7 @@ import java.util.Map;
 @Tag(name = "Data Management API", description = "数据管理相关接口")
 public class DataController {
 
-    @Autowired
+    @Autowired(required = false)
     private DataInitializationService dataInitializationService;
 
     @PostMapping("/reinitialize")
@@ -26,6 +26,13 @@ public class DataController {
         log.info("Manual re-initialization requested");
         
         Map<String, Object> response = new HashMap<>();
+        
+        if (dataInitializationService == null) {
+            response.put("success", false);
+            response.put("message", "DataInitializationService is not available (disabled for tests)");
+            response.put("timestamp", System.currentTimeMillis());
+            return ResponseEntity.status(503).body(response);
+        }
         
         try {
             dataInitializationService.forceReinitialize();

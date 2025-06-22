@@ -92,12 +92,7 @@ public class SimpleLedgerStateMachine {
             if (parts.length >= 3) {
                 String userId = parts[1];
                 Account.AccountType accountType = Account.AccountType.fromValue(parts[2]);
-                String accountId = Account.generateAccountId(userId, accountType);
-                
-                if (rocksDBService.get(accountId) == null) {
-                    rocksDBService.put(accountId, "0.00");
-                    log.info("Created account: {}", accountId);
-                }
+                createAccountIfNotExists(userId, accountType);
             }
         } catch (Exception e) {
             log.error("Failed to create account: {}", data, e);
@@ -112,7 +107,26 @@ public class SimpleLedgerStateMachine {
     public void createAccountIfNotExists(String userId, Account.AccountType accountType) {
         String accountId = Account.generateAccountId(userId, accountType);
         if (rocksDBService.get(accountId) == null) {
+            // Store balance
             rocksDBService.put(accountId, "0.00");
+            
+            // Also store account object for existence checks
+            try {
+                Account account = new Account();
+                account.setAccountId(accountId);
+                account.setUserId(userId);
+                account.setAccountType(accountType);
+                account.setBalance(BigDecimal.ZERO);
+                account.setCreatedAt(LocalDateTime.now());
+                account.setUpdatedAt(LocalDateTime.now());
+                
+                String accountKey = "account:" + accountId;
+                String accountJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(account);
+                rocksDBService.put(accountKey, accountJson);
+            } catch (Exception e) {
+                log.error("Failed to store account object for {}", accountId, e);
+            }
+            
             log.info("Created account: {}", accountId);
         }
     }
