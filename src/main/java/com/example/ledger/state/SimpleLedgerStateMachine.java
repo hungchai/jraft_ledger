@@ -38,7 +38,13 @@ public class SimpleLedgerStateMachine {
                 Account.AccountType toType = Account.AccountType.fromValue(parts[4]);
                 BigDecimal amount = new BigDecimal(parts[5]);
                 String description = parts[6];
-                String idempotentId = parts.length > 7 ? parts[7] : null;
+                String idempotentId = (parts.length > 7 && parts[7] != null && !parts[7].isEmpty()) ? parts[7] : null;
+                
+                // Idempotency check using RocksDB (idem:ID)
+                if (idempotentId != null && rocksDBService.get("idem:" + idempotentId) != null) {
+                    log.info("[Standalone] Duplicate idempotent key detected, skipping: {}", idempotentId);
+                    return;
+                }
                 
                 String fromAccountId = Account.generateAccountId(fromUserId, fromType);
                 String toAccountId = Account.generateAccountId(toUserId, toType);
@@ -77,6 +83,15 @@ public class SimpleLedgerStateMachine {
                 
                 asyncMySQLBatchWriter.enqueue(WriteEvent.forTransaction(transaction));
                 
+                // Store idempotency marker after successful commit
+                if (idempotentId != null) {
+                    try {
+                        rocksDBService.put("idem:" + idempotentId, "1");
+                    } catch (Exception e) {
+                        log.error("Failed to store idempotency marker {}", idempotentId, e);
+                    }
+                }
+                
                 log.info("Transfer completed: {} -> {}, amount: {}", 
                     fromAccountId, toAccountId, amount);
             }
@@ -106,9 +121,15 @@ public class SimpleLedgerStateMachine {
     
     public void createAccountIfNotExists(String userId, Account.AccountType accountType) {
         String accountId = Account.generateAccountId(userId, accountType);
+        String accountKey = "account:" + accountId;
+        
+        log.debug("Creating account - userId: {}, accountType: {}, accountId: {}, accountKey: {}", 
+            userId, accountType, accountId, accountKey);
+        
         if (rocksDBService.get(accountId) == null) {
             // Store balance
             rocksDBService.put(accountId, "0.00");
+            log.debug("Stored balance for accountId: {} -> 0.00", accountId);
             
             // Also store account object for existence checks
             try {
@@ -120,14 +141,16 @@ public class SimpleLedgerStateMachine {
                 account.setCreatedAt(LocalDateTime.now());
                 account.setUpdatedAt(LocalDateTime.now());
                 
-                String accountKey = "account:" + accountId;
                 String accountJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(account);
                 rocksDBService.put(accountKey, accountJson);
+                log.debug("Stored account metadata for accountKey: {} -> {}", accountKey, accountJson);
             } catch (Exception e) {
                 log.error("Failed to store account object for {}", accountId, e);
             }
             
-            log.info("Created account: {}", accountId);
+            log.info("Created account: {} with balance key: {} and metadata key: {}", accountId, accountId, accountKey);
+        } else {
+            log.debug("Account already exists: {}", accountId);
         }
     }
 } 

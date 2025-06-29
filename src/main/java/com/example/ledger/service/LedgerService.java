@@ -17,6 +17,12 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 @Slf4j
 @Service
@@ -40,6 +46,99 @@ public class LedgerService {
     @Autowired
     private AccountBusinessService accountBusinessService;
     
+    // FIFO Command Queue for Standalone Mode
+    private final LinkedBlockingQueue<StandaloneCommand> commandQueue = new LinkedBlockingQueue<>();
+    private ExecutorService commandProcessor;
+    private final AtomicBoolean processingEnabled = new AtomicBoolean(true);
+    
+    @PostConstruct
+    public void initializeCommandProcessor() {
+        if (!raftEnabled) {
+            // Initialize FIFO command processor for standalone mode
+            commandProcessor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "ledger-command-processor");
+                t.setDaemon(true);
+                return t;
+            });
+            commandProcessor.submit(this::processCommandsSequentially);
+            log.info("FIFO Command processor initialized for standalone mode");
+        }
+    }
+    
+    @PreDestroy
+    public void shutdown() {
+        processingEnabled.set(false);
+        if (commandProcessor != null) {
+            commandProcessor.shutdown();
+            try {
+                if (!commandProcessor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    commandProcessor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                commandProcessor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+    
+    /**
+     * Sequential command processor for FIFO ordering in standalone mode
+     */
+    private void processCommandsSequentially() {
+        while (processingEnabled.get()) {
+            try {
+                StandaloneCommand command = commandQueue.poll(100, TimeUnit.MILLISECONDS);
+                if (command != null) {
+                    try {
+                        boolean success = executeStandaloneCommand(command);
+                        command.complete(success);
+                    } catch (Exception e) {
+                        log.error("Error processing standalone command: {}", command.getCommandString(), e);
+                        command.completeExceptionally(e);
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+    
+    /**
+     * Execute a standalone command
+     */
+    private boolean executeStandaloneCommand(StandaloneCommand command) {
+        String commandStr = command.getCommandString();
+        String[] parts = commandStr.split(":");
+        String operation = parts[0];
+        
+        switch (operation) {
+            case "CREATE_ACCOUNT":
+                return executeCreateAccount(parts);
+            case "TRANSFER":
+                return executeTransfer(commandStr);
+            default:
+                log.warn("Unknown standalone command operation: {}", operation);
+                return false;
+        }
+    }
+    
+    private boolean executeCreateAccount(String[] parts) {
+        if (parts.length < 3) return false;
+        String userId = parts[1];
+        Account.AccountType accountType = Account.AccountType.valueOf(parts[2].toUpperCase());
+        
+        ledgerStateMachine.createAccountIfNotExists(userId, accountType);
+        String accountId = Account.generateAccountId(userId, accountType);
+        asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(accountId, BigDecimal.ZERO));
+        return true;
+    }
+    
+    private boolean executeTransfer(String commandStr) {
+        ledgerStateMachine.processTransfer(commandStr);
+        return true;
+    }
+
     /**
      * 创建账户
      */
@@ -56,12 +155,9 @@ public class LedgerService {
             String command = String.format("CREATE_ACCOUNT:%s:%s", userId, accountType.getValue());
             return submitToRaft(command);
         } else {
-            // Use direct call for standalone mode
-            ledgerStateMachine.createAccountIfNotExists(userId, accountType);
-            // Persist to RocksDB and enqueue for MySQL (if service is available)
-            accountBusinessService.updateAccountBalance(accountId, BigDecimal.ZERO);
-            asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(accountId, BigDecimal.ZERO));
-            return CompletableFuture.completedFuture(true);
+            // Use FIFO command queue for standalone mode
+            String command = String.format("CREATE_ACCOUNT:%s:%s", userId, accountType.getValue());
+            return submitToStandaloneQueue(command);
         }
     }
     
@@ -100,31 +196,65 @@ public class LedgerService {
             // Use JRaft consensus for distributed environment
             return submitToRaft(command);
         } else {
-            // Use direct call for standalone mode
-            ledgerStateMachine.processTransfer(command);
-            return CompletableFuture.completedFuture(true);
+            // Use FIFO command queue for standalone mode
+            return submitToStandaloneQueue(command);
         }
     }
     
     /**
      * 批量转账（原子性多个复式记账）
+     * Now uses FIFO ordering to ensure proper sequencing
      */
     public CompletableFuture<Boolean> batchTransfer(List<TransferRequest> transfers) {
-        CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
+        if (raftEnabled && raftNodeManager != null) {
+            // In cluster mode, submit each transfer to JRaft which provides ordering
+            CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
+            
+            for (TransferRequest transfer : transfers) {
+                result = result.thenCompose(success -> {
+                    if (success) {
+                        return transfer(transfer.getFromUserId(), transfer.getFromType(),
+                                      transfer.getToUserId(), transfer.getToType(),
+                                      transfer.getAmount(), transfer.getDescription());
+                    } else {
+                        return CompletableFuture.completedFuture(false);
+                    }
+                });
+            }
+            
+            return result;
+        } else {
+            // In standalone mode, submit all transfers to FIFO queue sequentially
+            CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
+            
+            for (TransferRequest transfer : transfers) {
+                result = result.thenCompose(success -> {
+                    if (success) {
+                        return transfer(transfer.getFromUserId(), transfer.getFromType(),
+                                      transfer.getToUserId(), transfer.getToType(),
+                                      transfer.getAmount(), transfer.getDescription());
+                    } else {
+                        return CompletableFuture.completedFuture(false);
+                    }
+                });
+            }
+            
+            return result;
+        }
+    }
+    
+    /**
+     * Submit command to standalone FIFO queue
+     */
+    private CompletableFuture<Boolean> submitToStandaloneQueue(String command) {
+        StandaloneCommand standaloneCommand = new StandaloneCommand(command);
         
-        for (TransferRequest transfer : transfers) {
-            result = result.thenCompose(success -> {
-                if (success) {
-                    return transfer(transfer.getFromUserId(), transfer.getFromType(),
-                                  transfer.getToUserId(), transfer.getToType(),
-                                  transfer.getAmount(), transfer.getDescription());
-                } else {
-                    return CompletableFuture.completedFuture(false);
-                }
-            });
+        if (!commandQueue.offer(standaloneCommand)) {
+            log.error("Failed to enqueue standalone command: {}", command);
+            return CompletableFuture.completedFuture(false);
         }
         
-        return result;
+        return standaloneCommand.getFuture();
     }
     
     /**
@@ -252,5 +382,34 @@ public class LedgerService {
         
         public BigDecimal getAvailableBalance() { return availableBalance; }
         public void setAvailableBalance(BigDecimal availableBalance) { this.availableBalance = availableBalance; }
+    }
+
+    /**
+     * Command wrapper for standalone mode FIFO processing
+     */
+    private static class StandaloneCommand {
+        private final String commandString;
+        private final CompletableFuture<Boolean> future;
+        
+        public StandaloneCommand(String commandString) {
+            this.commandString = commandString;
+            this.future = new CompletableFuture<>();
+        }
+        
+        public String getCommandString() {
+            return commandString;
+        }
+        
+        public CompletableFuture<Boolean> getFuture() {
+            return future;
+        }
+        
+        public void complete(boolean success) {
+            future.complete(success);
+        }
+        
+        public void completeExceptionally(Throwable throwable) {
+            future.completeExceptionally(throwable);
+        }
     }
 } 

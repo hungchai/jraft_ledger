@@ -1,9 +1,12 @@
 package com.example.ledger.service;
 
 import com.example.ledger.controller.TransferController;
+import com.example.ledger.config.RocksDBService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
@@ -20,12 +23,57 @@ public class IdempotencyService {
     private final ConcurrentHashMap<String, IdempotencyResult> idempotencyCache = new ConcurrentHashMap<>();
     private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor();
     
+    @Autowired
+    private RocksDBService rocksDBService;
+    
     // Cache TTL in minutes
     private static final long CACHE_TTL_MINUTES = 60;
     
     public IdempotencyService() {
         // Schedule cleanup task to run every 30 minutes
         cleanupExecutor.scheduleAtFixedRate(this::cleanupExpiredEntries, 30, 30, TimeUnit.MINUTES);
+    }
+    
+    @PostConstruct
+    public void initializeFromRocksDB() {
+        syncIdempotencyMarkersFromRocksDB();
+    }
+    
+    /**
+     * Sync existing idempotency markers from RocksDB to in-memory cache
+     * This provides fast lookup for previously processed requests
+     */
+    public void syncIdempotencyMarkersFromRocksDB() {
+        try {
+            int syncedCount = 0;
+            // Scan RocksDB for all keys starting with "idem:"
+            for (String rocksKey : rocksDBService.getAllKeysWithPrefix("idem:")) {
+                if (rocksKey.startsWith("idem:") && rocksKey.length() > 5) {
+                    String idempotencyKey = rocksKey.substring(5); // Remove "idem:" prefix
+                    
+                    // Create completed idempotency result (assume success since marker exists)
+                    IdempotencyResult result = new IdempotencyResult();
+                    result.setIdempotencyKey(idempotencyKey);
+                    result.setProcessing(false);
+                    result.setSuccess(true);
+                    result.setMessage("Transfer completed successfully (synced from RocksDB)");
+                    result.setStatusCode(200);
+                    result.setCreatedAt(LocalDateTime.now().minus(1, ChronoUnit.HOURS)); // Assume old
+                    result.setCompletedAt(LocalDateTime.now().minus(1, ChronoUnit.HOURS));
+                    
+                    idempotencyCache.put(idempotencyKey, result);
+                    syncedCount++;
+                }
+            }
+            
+            if (syncedCount > 0) {
+                log.info("Synced {} idempotency markers from RocksDB to cache", syncedCount);
+            } else {
+                log.info("No existing idempotency markers found in RocksDB");
+            }
+        } catch (Exception e) {
+            log.warn("Failed to sync idempotency markers from RocksDB: {}", e.getMessage());
+        }
     }
     
     /**

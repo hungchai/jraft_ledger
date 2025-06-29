@@ -148,6 +148,25 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
             // ALL nodes update RocksDB for fast local reads
             rocksDBService.put(accountId, "0.0000");
             
+            // Also store account metadata for existence checks (consistent with SimpleLedgerStateMachine)
+            try {
+                Account account = new Account();
+                account.setAccountId(accountId);
+                account.setUserId(userId);
+                account.setAccountType(accountType);
+                account.setBalance(BigDecimal.ZERO);
+                account.setCreatedAt(LocalDateTime.now());
+                account.setUpdatedAt(LocalDateTime.now());
+                
+                String accountKey = "account:" + accountId;
+                String accountJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(account);
+                rocksDBService.put(accountKey, accountJson);
+                
+                log.debug("Stored account metadata for: {}", accountId);
+            } catch (Exception e) {
+                log.error("Failed to store account metadata for {}", accountId, e);
+            }
+            
             // ONLY LEADER writes to MySQL for persistence
             if (isCurrentNodeLeader()) {
                 asyncMySQLBatchWriter.enqueue(WriteEvent.forBalance(accountId, BigDecimal.ZERO));
@@ -181,7 +200,7 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
             String toTypeStr = parts[4];
             BigDecimal amount = new BigDecimal(parts[5]);
             String description = parts[6];
-            String idempotentId = parts.length > 7 ? parts[7] : null;
+            String idempotentId = (parts.length > 7 && parts[7] != null && !parts[7].isEmpty()) ? parts[7] : null;
             
             Account.AccountType fromType = Account.AccountType.valueOf(fromTypeStr.toUpperCase());
             Account.AccountType toType = Account.AccountType.valueOf(toTypeStr.toUpperCase());
@@ -213,6 +232,17 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
             rocksDBService.put(fromAccountId, newFromBalance.toString());
             rocksDBService.put(toAccountId, newToBalance.toString());
             
+            // ----------------------------------------------------------------
+            // Raft-embedded IDEMPOTENCY CHECK (prefix idem:KEY in RocksDB)
+            // ----------------------------------------------------------------
+            if (idempotentId != null) {
+                String idemKey = "idem:" + idempotentId;
+                if (rocksDBService.get(idemKey) != null) {
+                    log.info("Duplicate idempotent key detected, skipping transfer for key {}", idempotentId);
+                    return true; // already processed earlier
+                }
+            }
+            
             // ONLY LEADER writes to MySQL for persistence
             if (isCurrentNodeLeader()) {
                 // Enqueue balance updates for async MySQL write
@@ -237,6 +267,17 @@ public class JRaftLedgerStateMachine extends StateMachineAdapter {
             } else {
                 log.info("FOLLOWER completed transfer in RocksDB only: {} -> {}, amount: {}", 
                     fromAccountId, toAccountId, amount);
+            }
+            
+            // ----------------------------------------------------------------
+            // Persist idempotency marker AFTER successful execution
+            // ----------------------------------------------------------------
+            if (idempotentId != null) {
+                try {
+                    rocksDBService.put("idem:" + idempotentId, "1");
+                } catch (Exception e) {
+                    log.error("Failed to store idempotency marker for key {}", idempotentId, e);
+                }
             }
             
             return true;

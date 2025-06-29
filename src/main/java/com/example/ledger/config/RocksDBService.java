@@ -79,4 +79,24 @@ public class RocksDBService {
             throw new RuntimeException("Failed to delete key: " + key, e);
         }
     }
+
+    /**
+     * Get all keys that start with given prefix
+     */
+    public java.util.List<String> getAllKeysWithPrefix(String prefix) {
+        java.util.List<String> matchingKeys = new java.util.ArrayList<>();
+        try (RocksIterator iterator = newIterator()) {
+            iterator.seekToFirst();
+            while (iterator.isValid()) {
+                String key = new String(iterator.key());
+                if (key.startsWith(prefix)) {
+                    matchingKeys.add(key);
+                }
+                iterator.next();
+            }
+        } catch (Exception e) {
+            log.error("Failed to scan keys with prefix: " + prefix, e);
+        }
+        return matchingKeys;
+    }
 } 

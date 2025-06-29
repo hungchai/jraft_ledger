@@ -67,6 +67,18 @@ public class AccountBusinessService {
      * Check if account exists in RocksDB
      */
     public boolean accountExists(String accountId) {
-        return getAccount(accountId) != null;
+        String accountKey = ACCOUNT_PREFIX + accountId;
+        log.debug("Checking account existence - accountId: {}, looking for key: {}", accountId, accountKey);
+        
+        Account account = getAccount(accountId);
+        boolean exists = account != null;
+        
+        log.debug("Account existence check result - accountId: {}, exists: {}", accountId, exists);
+        
+        // Also check if balance exists (for debugging)
+        String balanceValue = rocksDBService.get(accountId);
+        log.debug("Balance check - accountId: {}, balance: {}", accountId, balanceValue);
+        
+        return exists;
     }
 } 
