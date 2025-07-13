@@ -35,8 +35,8 @@ sequenceDiagram
     CL->>API: POST /transfer
     API->>IDE: check idempotency
     IDE-->>API: OK / cached
-    API->>SVC: transfer(...)
-    SVC->>QUE: enqueue command (FIFO)
+    API->>SVC: transfer
+    SVC->>QUE: enqueue command
     QUE->>STM: process command
     STM->>RDB: update balances
     STM->>BMW: enqueue write events
@@ -61,9 +61,9 @@ sequenceDiagram
     CL->>API: POST /transfer
     API->>IDE: check idempotency
     IDE-->>API: OK / cached
-    API->>SVC: transfer(...)
-    SVC->>LEADER: node.apply(task)
-    LEADER->>STM: onApply (consensus order)
+    API->>SVC: transfer
+    SVC->>LEADER: node.apply task
+    LEADER->>STM: onApply consensus order
     STM->>RDB: update balances
     STM->>BMW: enqueue write events
     BMW->>SQL: batch insert/update
@@ -74,7 +74,6 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant STM as State_Machine
     participant BMW as AsyncMySQLBatchWriter
     participant RB as RingBuffer_Queue
@@ -82,58 +81,29 @@ sequenceDiagram
     participant MB as MyBatis_Mappers
     participant SQL as MySQL_Database
 
-    STM->>+BMW: enqueue(WriteEvent.BALANCE, accountId, newBalance)
+    STM->>BMW: enqueue BALANCE event
+    BMW->>RB: publish event
+    RB->>EP: process event
+    EP->>MB: batch update
+    MB->>SQL: UPDATE accounts
+    SQL-->>MB: result
+    MB-->>EP: success
+    EP-->>RB: completed
     
-    alt RingBuffer Mode High Performance
-        BMW->>BMW: isRingBufferEnabled()
-        BMW->>+RB: ringBuffer.publishEvent(eventTranslator, writeEvent)
-        RB->>RB: setEventData(writeEvent)
-        RB-->>-BMW: event published
-        
-        Note over RB,EP: Asynchronous Processing
-        RB->>+EP: onEvent(writeEvent, sequence, endOfBatch)
-        EP->>EP: eventBatch.add(writeEvent)
-        
-        alt End of Batch
-            EP->>EP: processBatch(eventBatch)
-            EP->>+MB: accountMapper.batchUpdateBalance(accountUpdates)
-            MB->>+SQL: UPDATE accounts SET balance WHERE account_id
-            SQL-->>-MB: batch update result
-            MB-->>-EP: update count
-            EP->>EP: eventBatch.clear()
-        end
-        EP-->>-RB: event processed
-        
-    else Traditional Queue Mode
-        BMW->>BMW: eventQueue.offer(writeEvent)
-        BMW->>BMW: batchProcessor.processQueue()
-        BMW->>+MB: accountMapper.batchUpdateBalance(queuedEvents)
-        MB->>+SQL: UPDATE accounts SET balance WHERE account_id
-        SQL-->>-MB: batch update result
-        MB-->>-BMW: update count
-    end
-    
-    BMW-->>-STM: enqueue completed
-
-    STM->>+BMW: enqueue(WriteEvent.TRANSACTION, transactionRecord)
-    BMW->>+RB: ringBuffer.publishEvent(eventTranslator, transactionEvent)
-    RB-->>-BMW: transaction event published
-    
-    RB->>+EP: onEvent(transactionEvent, sequence, endOfBatch)
-    EP->>+MB: txnLogMapper.batchInsert(transactionRecords)
-    MB->>+SQL: INSERT INTO processed_transaction VALUES
-    SQL-->>-MB: insert result
-    MB-->>-EP: insert count
-    EP-->>-RB: transaction processed
-    
-    BMW-->>-STM: transaction enqueue completed
+    STM->>BMW: enqueue TRANSACTION event
+    BMW->>RB: publish transaction
+    RB->>EP: process transaction
+    EP->>MB: batch insert
+    MB->>SQL: INSERT processed_transaction
+    SQL-->>MB: result
+    MB-->>EP: success
+    EP-->>RB: completed
 ```
 
 #### **JRaft Concurrent Operations on Same User - Detailed Flow**
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant C1 as Client_1_Transfer_300
     participant C2 as Client_2_Transfer_400
     participant C3 as Client_3_Withdraw_200
@@ -144,91 +114,66 @@ sequenceDiagram
     participant STM as State_Machine
     participant RDB as RocksDB
 
-    Note over C1,C3: All operations target User A account balance 1000
+    Note over C1,C3: All operations target User A balance 1000
 
-    par Concurrent Requests
-        C1->>+API: POST /transfer A to B 300
-        and C2->>+API: POST /transfer A to C 400
-        and C3->>+API: POST /transfer A to Bank 200
-    end
+    C1->>API: POST /transfer A to B 300
+    C2->>API: POST /transfer A to C 400
+    C3->>API: POST /transfer A to Bank 200
 
-    par Service Layer Processing
-        API->>+SVC: transfer(A, B, 300, desc1)
-        and API->>+SVC: transfer(A, C, 400, desc2)
-        and API->>+SVC: transfer(A, Bank, 200, withdrawal)
-    end
+    API->>SVC: transfer A B 300
+    API->>SVC: transfer A C 400
+    API->>SVC: transfer A Bank 200
 
-    par JRaft Command Submission
-        SVC->>+LEADER: node.apply(Task TRANSFER A B 300)
-        and SVC->>+LEADER: node.apply(Task TRANSFER A C 400)
-        and SVC->>+LEADER: node.apply(Task TRANSFER A Bank 200)
-    end
+    SVC->>LEADER: apply Task TRANSFER A B 300
+    SVC->>LEADER: apply Task TRANSFER A C 400
+    SVC->>LEADER: apply Task TRANSFER A Bank 200
 
     Note over LEADER: Leader determines ordering T1 T2 T3
 
-    LEADER->>+LOG: appendEntry(T1 A to B 300)
-    LOG->>LOG: index=100, committed=false
-    LEADER->>+LOG: appendEntry(T2 A to C 400)
-    LOG->>LOG: index=101, committed=false
-    LEADER->>+LOG: appendEntry(T3 A to Bank 200)
-    LOG->>LOG: index=102, committed=false
+    LEADER->>LOG: appendEntry T1 A to B 300
+    LEADER->>LOG: appendEntry T2 A to C 400
+    LEADER->>LOG: appendEntry T3 A to Bank 200
 
-    Note over LEADER,LOG: Consensus achieved entries committed
+    Note over LOG: Consensus achieved entries committed
 
-    LOG->>LOG: markCommitted(100, 101, 102)
-    LOG->>+STM: onApply(iterator T1 T2 T3)
+    LOG->>STM: onApply T1 T2 T3
 
     Note over STM: Sequential Processing NO CONCURRENCY
 
-    STM->>STM: processCommand(T1 TRANSFER A B 300)
-    STM->>+RDB: getAccountBalance(A)
-    RDB-->>-STM: BigDecimal(1000)
-    STM->>STM: validate(1000 >= 300) SUCCESS
-    STM->>+RDB: put(A, 700)
-    RDB-->>-STM: success
-    STM->>+RDB: put(B, 300)
-    RDB-->>-STM: success
-    STM->>STM: appliedIndex.set(100)
+    STM->>RDB: getAccountBalance A
+    RDB-->>STM: 1000
+    Note over STM: validate 1000 >= 300 SUCCESS
+    STM->>RDB: put A 700
+    STM->>RDB: put B 300
 
-    STM->>STM: processCommand(T2 TRANSFER A C 400)
-    STM->>+RDB: getAccountBalance(A)
-    RDB-->>-STM: BigDecimal(700)
-    STM->>STM: validate(700 >= 400) SUCCESS
-    STM->>+RDB: put(A, 300)
-    RDB-->>-STM: success
-    STM->>+RDB: put(C, 400)
-    RDB-->>-STM: success
-    STM->>STM: appliedIndex.set(101)
+    STM->>RDB: getAccountBalance A
+    RDB-->>STM: 700
+    Note over STM: validate 700 >= 400 SUCCESS
+    STM->>RDB: put A 300
+    STM->>RDB: put C 400
 
-    STM->>STM: processCommand(T3 TRANSFER A Bank 200)
-    STM->>+RDB: getAccountBalance(A)
-    RDB-->>-STM: BigDecimal(300)
-    STM->>STM: validate(300 >= 200) SUCCESS
-    STM->>+RDB: put(A, 100)
-    RDB-->>-STM: success
-    STM->>+RDB: put(Bank, 200)
-    RDB-->>-STM: success
-    STM->>STM: appliedIndex.set(102)
+    STM->>RDB: getAccountBalance A
+    RDB-->>STM: 300
+    Note over STM: validate 300 >= 200 SUCCESS
+    STM->>RDB: put A 100
+    STM->>RDB: put Bank 200
 
-    STM-->>-LOG: onApply completed
-    LOG-->>-LEADER: all entries applied successfully
+    STM-->>LOG: onApply completed
+    LOG-->>LEADER: all entries applied
 
-    par Response Propagation
-        LEADER-->>-SVC: T1 callback Status.OK()
-        and LEADER-->>-SVC: T2 callback Status.OK()
-        and LEADER-->>-SVC: T3 callback Status.OK()
-    end
+    LEADER-->>SVC: T1 callback OK
+    LEADER-->>SVC: T2 callback OK
+    LEADER-->>SVC: T3 callback OK
 
-    par Client Responses
-        SVC-->>-API: CompletableFuture(true)
-        API-->>-C1: HTTP 200 success true
-        and SVC-->>-API: CompletableFuture(true)
-        API-->>-C2: HTTP 200 success true
-        and SVC-->>-API: CompletableFuture(true)
-        API-->>-C3: HTTP 200 success true
-    end
+    SVC-->>API: CompletableFuture true
+    SVC-->>API: CompletableFuture true
+    SVC-->>API: CompletableFuture true
 
-    Note over C1,RDB: Final State A=100 B=300 C=400 Bank=200 Total Transferred 900 All Operations Succeeded
+    API-->>C1: HTTP 200 success
+    API-->>C2: HTTP 200 success
+    API-->>C3: HTTP 200 success
+
+    Note over C1,RDB: Final State A=100 B=300 C=400 Bank=200
 ```
 
 ## Components & Responsibilities
@@ -263,26 +208,22 @@ graph TD
 
 ```mermaid
 graph TD
-    subgraph "Standalone Mode (raft.enabled=false)"
-        HTTP1[HTTP Request 1] --> SVC1[LedgerService]
-        HTTP2[HTTP Request 2] --> SVC1
-        HTTP3[HTTP Request 3] --> SVC1
-        SVC1 --> FIFO[FIFO Command Queue]
-        FIFO --> PROC[Single Command Processor]
-        PROC --> SM1[SimpleLedgerStateMachine]
-        SM1 --> RDB1[RocksDB]
-        SM1 --> BMW1[AsyncMySQLBatchWriter]
-    end
+    HTTP1[HTTP Request 1] --> SVC1[LedgerService Standalone]
+    HTTP2[HTTP Request 2] --> SVC1
+    HTTP3[HTTP Request 3] --> SVC1
+    SVC1 --> FIFO[FIFO Command Queue]
+    FIFO --> PROC[Single Command Processor]
+    PROC --> SM1[SimpleLedgerStateMachine]
+    SM1 --> RDB1[RocksDB]
+    SM1 --> BMW1[AsyncMySQLBatchWriter]
     
-    subgraph "Cluster Mode (raft.enabled=true)"
-        HTTP4[HTTP Request 1] --> SVC2[LedgerService]
-        HTTP5[HTTP Request 2] --> SVC2
-        HTTP6[HTTP Request 3] --> SVC2
-        SVC2 --> RAFT[JRaft Consensus]
-        RAFT --> SM2[JRaftLedgerStateMachine]
-        SM2 --> RDB2[RocksDB]
-        SM2 --> BMW2[AsyncMySQLBatchWriter]
-    end
+    HTTP4[HTTP Request A] --> SVC2[LedgerService Cluster]
+    HTTP5[HTTP Request B] --> SVC2
+    HTTP6[HTTP Request C] --> SVC2
+    SVC2 --> RAFT[JRaft Consensus]
+    RAFT --> SM2[JRaftLedgerStateMachine]
+    SM2 --> RDB2[RocksDB]
+    SM2 --> BMW2[AsyncMySQLBatchWriter]
 ```
 
 ## Happy-Path Transfer
@@ -351,22 +292,18 @@ All operations are processed sequentially by the JRaft state machine, eliminatin
 
 ```mermaid
 graph TD
-    subgraph "JRaft Cluster Concurrency Model"
-        HTTP1[Concurrent Request 1<br/>Transfer $300] --> LEADER[Leader Node]
-        HTTP2[Concurrent Request 2<br/>Transfer $400] --> LEADER
-        HTTP3[Concurrent Request 3<br/>Withdraw $200] --> LEADER
-        
-        LEADER --> LOG[Raft Log<br/>Sequential Ordering]
-        LOG --> |Entry 1| SM[State Machine]
-        LOG --> |Entry 2| SM
-        LOG --> |Entry 3| SM
-        
-        SM --> |Atomic Read-Modify-Write| RDB[RocksDB<br/>Account Balance]
-        
-        SM --> R1[Response 1: Success/Fail]
-        SM --> R2[Response 2: Success/Fail]
-        SM --> R3[Response 3: Success/Fail]
-    end
+    HTTP1[Concurrent Request 1 Transfer $300] --> LEADER[Leader Node]
+    HTTP2[Concurrent Request 2 Transfer $400] --> LEADER
+    HTTP3[Concurrent Request 3 Withdraw $200] --> LEADER
+    
+    LEADER --> LOG[Raft Log Sequential Ordering]
+    LOG --> SM[State Machine]
+    
+    SM --> RDB[RocksDB Account Balance]
+    
+    SM --> R1[Response 1 Success/Fail]
+    SM --> R2[Response 2 Success/Fail]
+    SM --> R3[Response 3 Success/Fail]
 ```
 
 #### **2. Atomic Balance Operations**
