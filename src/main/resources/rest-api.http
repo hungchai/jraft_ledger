@@ -4,10 +4,17 @@
 # Swagger UI: http://localhost:8090/swagger-ui.html
 # API Docs: http://localhost:8090/api-docs
 # 
+# ⚠️  IMPORTANT: MANDATORY IDEMPOTENCY REQUIREMENTS:
+# - /api/transfer/batch: MUST include "Idempotency-Key" header (400 Bad Request if missing)
+# - /api/transfer/demo: MUST include "Idempotency-Key" header (400 Bad Request if missing)
+# - /api/transfer/single: Optional "Idempotency-Key" header (auto-generated if omitted)
+# 
 # NEW FEATURES:
 # - Account Existence Validation for Transfers
 # - Account Creation Idempotency (returns 200 for existing accounts)
 # - Transfer Idempotency Support (prevents duplicate transfers)
+# - Batch-Level Mandatory Idempotency (one key protects entire batch)
+# - RocksDB-based Persistent Idempotency Storage
 # - Comprehensive Error Handling and Monitoring
 # ============================================================================
 
@@ -181,9 +188,10 @@ Content-Type: {{contentType}}
   "description": "Cross-account type transfer"
 }
 
-### Batch Transfer - Multiple Atomic Transfers
+### Batch Transfer - Multiple Atomic Transfers (MANDATORY IDEMPOTENCY)
 POST {{baseUrl}}/api/transfer/batch
 Content-Type: {{contentType}}
+Idempotency-Key: batch-transfer-example-001
 
 {
   "transfers": [
@@ -214,9 +222,10 @@ Content-Type: {{contentType}}
   ]
 }
 
-### Demo Transfer - Predefined Demo Scenario
+### Demo Transfer - Predefined Demo Scenario (MANDATORY IDEMPOTENCY)
 POST {{baseUrl}}/api/transfer/demo
 Content-Type: {{contentType}}
+Idempotency-Key: demo-transfer-example-001
 
 # ============================================================================
 # IDEMPOTENCY TESTING - NEW FEATURE
@@ -449,6 +458,27 @@ Content-Type: {{contentType}}
   "description": "Test transfer with non-existent destination account"
 }
 
+### Error Test 9: Batch Transfer without Mandatory Idempotency Key (Should return 400)
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: {{contentType}}
+
+{
+  "transfers": [
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 10.00,
+      "description": "Should fail - missing mandatory idempotency key"
+    }
+  ]
+}
+
+### Error Test 10: Demo Transfer without Mandatory Idempotency Key (Should return 400)
+POST {{baseUrl}}/api/transfer/demo
+Content-Type: {{contentType}}
+
 # ============================================================================
 # PERFORMANCE & STRESS TESTING
 # ============================================================================
@@ -495,6 +525,7 @@ Content-Type: {{contentType}}
 ### Performance Test 2: Large Batch Transfer
 POST {{baseUrl}}/api/transfer/batch
 Content-Type: {{contentType}}
+Idempotency-Key: perf-test-large-batch-001
 
 {
   "transfers": [
@@ -540,6 +571,83 @@ Content-Type: {{contentType}}
     }
   ]
 }
+
+### Test batch transfer with mandatory idempotency key
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: application/json
+Idempotency-Key: batch-transfer-test-001
+
+{
+  "transfers": [
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 25.00,
+      "description": "Batch transfer 1"
+    },
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "Bank",
+      "toType": "AVAILABLE",
+      "amount": 15.00,
+      "description": "Batch transfer 2"
+    }
+  ]
+}
+
+### Test batch transfer idempotency - same key should return success without processing
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: application/json
+Idempotency-Key: batch-transfer-test-001
+
+{
+  "transfers": [
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 25.00,
+      "description": "Batch transfer 1"
+    },
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "Bank",
+      "toType": "AVAILABLE",
+      "amount": 15.00,
+      "description": "Batch transfer 2"
+    }
+  ]
+}
+
+### Test batch transfer without idempotency key (should fail)
+POST {{baseUrl}}/api/transfer/batch
+Content-Type: application/json
+
+{
+  "transfers": [
+    {
+      "fromUserId": "UserA",
+      "fromType": "AVAILABLE",
+      "toUserId": "UserB",
+      "toType": "AVAILABLE",
+      "amount": 10.00,
+      "description": "Should fail - no idempotency key"
+    }
+  ]
+}
+
+### Test demo transfer with mandatory idempotency key
+POST {{baseUrl}}/api/transfer/demo
+Idempotency-Key: demo-transfer-test-001
+
+### Test demo transfer without idempotency key (should fail with 400 Bad Request)
+POST {{baseUrl}}/api/transfer/demo
+Content-Type: {{contentType}}
 
 # ============================================================================
 # BUSINESS LOGIC TESTING
@@ -589,6 +697,7 @@ Content-Type: {{contentType}}
 ### Simulate trading workflow: Available -> Brokerage -> Exchange
 POST {{baseUrl}}/api/transfer/batch
 Content-Type: {{contentType}}
+Idempotency-Key: trader-workflow-001
 
 {
   "transfers": [
@@ -661,9 +770,11 @@ Accept: {{contentType}}
 
 # NEW FEATURES ADDED:
 # 1. IDEMPOTENCY SUPPORT:
-#    - Custom idempotency keys via "Idempotency-Key" header
-#    - Auto-generated keys based on request content (SHA-256)
-#    - 60-minute cache duration with automatic cleanup
+#    - MANDATORY idempotency keys via "Idempotency-Key" header for batch and demo transfers
+#    - Custom idempotency keys via "Idempotency-Key" header for single transfers (optional)
+#    - Auto-generated keys based on request content (SHA-256) for single transfers
+#    - Batch-level idempotency: One key protects entire batch operation
+#    - RocksDB-based persistent storage survives restarts and works cluster-wide
 #    - Prevents duplicate transfers from network retries
 #
 # 2. ACCOUNT EXISTENCE VALIDATION:
@@ -694,22 +805,31 @@ Accept: {{contentType}}
 
 # Error Codes to Expect:
 # - 200: OK (successful operation or idempotent response)
-# - 400: Bad Request (invalid parameters, insufficient funds)
+# - 400: Bad Request (invalid parameters, insufficient funds, missing idempotency key)
 # - 404: Not Found (non-existent accounts/users)
 # - 500: Internal Server Error (system issues)
 
 # Performance Notes:
-# - Single transfers are processed asynchronously with idempotency support
-# - Batch transfers are atomic (all succeed or all fail)
+# - Single transfers are processed asynchronously with optional idempotency support
+# - Batch transfers are atomic (all succeed or all fail) with mandatory idempotency
+# - Demo transfers require mandatory idempotency key
 # - RocksDB provides fast local state storage
 # - MySQL provides persistent audit trail
-# - Idempotency cache uses in-memory ConcurrentHashMap for high performance
+# - Idempotency storage uses RocksDB for persistence across restarts
 
 # Idempotency Usage:
-# - Include "Idempotency-Key: your-unique-key" header for custom keys
-# - Omit header to use auto-generated content-based keys
+# - MANDATORY for batch transfers: Include "Idempotency-Key" header (400 Bad Request if missing)
+# - MANDATORY for demo transfers: Include "Idempotency-Key" header (400 Bad Request if missing)
+# - OPTIONAL for single transfers: Include "Idempotency-Key" header for custom keys
+# - Single transfers: Omit header to use auto-generated content-based keys
 # - Identical requests return cached responses without processing
-# - Cache automatically expires after 60 minutes
+# - Batch-level idempotency: One key protects entire batch operation
+# - Storage survives application restarts and works in cluster mode
+
+# IMPORTANT: Mandatory Idempotency Key Requirements:
+# - /api/transfer/batch: MUST include "Idempotency-Key" header (400 Bad Request if missing)
+# - /api/transfer/demo: MUST include "Idempotency-Key" header (400 Bad Request if missing)
+# - /api/transfer/single: Optional "Idempotency-Key" header (auto-generated if omitted)
 
 # ============================================================================
 # END OF TEST SUITE

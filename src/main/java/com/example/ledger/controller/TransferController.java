@@ -82,11 +82,21 @@ public class TransferController {
     @PostMapping("/batch")
     @Operation(summary = "批量转账", description = "执行多笔原子性复式记账转账")
     public CompletableFuture<ResponseEntity<TransferResponse>> batchTransfer(
-            @RequestBody BatchTransferRequest request) {
+            @RequestBody BatchTransferRequest request,
+            @Parameter(description = "批量转账幂等性键，必填") 
+            @RequestHeader(value = "Idempotency-Key", required = true) String idempotencyKey) {
         
-        log.info("Processing batch transfer with {} transactions", request.getTransfers().size());
+        log.info("Processing batch transfer with {} transactions, idempotencyKey: {}", 
+                request.getTransfers().size(), idempotencyKey);
         
-        return ledgerService.batchTransfer(request.getTransfers())
+        // Validate idempotency key
+        if (idempotencyKey == null || idempotencyKey.trim().isEmpty()) {
+            return CompletableFuture.completedFuture(
+                ResponseEntity.badRequest().body(new TransferResponse(false, "Idempotency-Key header is mandatory for batch transfers"))
+            );
+        }
+        
+        return ledgerService.batchTransfer(request.getTransfers(), idempotencyKey.trim())
             .thenApply(success -> {
                 if (success) {
                     return ResponseEntity.ok(new TransferResponse(true, "Batch transfer completed successfully"));
@@ -95,13 +105,25 @@ public class TransferController {
                 }
             }).exceptionally(ex -> {
                 String msg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
-                return ResponseEntity.status(404).body(new TransferResponse(false, msg));
+                if (msg.contains("idempotentId is mandatory")) {
+                    return ResponseEntity.badRequest().body(new TransferResponse(false, msg));
+                }
+                return ResponseEntity.status(500).body(new TransferResponse(false, "Batch transfer error: " + msg));
             });
     }
 
     @PostMapping("/demo")
     @Operation(summary = "演示转账", description = "演示你的用例：UserA.Available -> 10 -> UserB.Available 和 UserA.Available -> 20 -> Bank.Available")
-    public CompletableFuture<ResponseEntity<TransferResponse>> demoTransfer() {
+    public CompletableFuture<ResponseEntity<TransferResponse>> demoTransfer(
+            @Parameter(description = "演示转账幂等性键，必填") 
+            @RequestHeader(value = "Idempotency-Key", required = true) String idempotencyKey) {
+        
+        // Validate idempotency key
+        if (idempotencyKey == null || idempotencyKey.trim().isEmpty()) {
+            return CompletableFuture.completedFuture(
+                ResponseEntity.badRequest().body(new TransferResponse(false, "Idempotency-Key header is mandatory for demo transfers"))
+            );
+        }
         
         // 先创建账户
         CompletableFuture<Boolean> createAccounts = CompletableFuture
@@ -123,7 +145,7 @@ public class TransferController {
                                                 new BigDecimal("20.00"), "Demo transfer to Bank")
             );
             
-            return ledgerService.batchTransfer(transfers);
+            return ledgerService.batchTransfer(transfers, idempotencyKey.trim());
         }).thenApply(success -> {
             if (success) {
                 return ResponseEntity.ok(new TransferResponse(true, 

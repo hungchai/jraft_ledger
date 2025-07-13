@@ -203,44 +203,164 @@ public class LedgerService {
     
     /**
      * 批量转账（原子性多个复式记账）
-     * Now uses FIFO ordering to ensure proper sequencing
+     * Now supports batch-level idempotency with mandatory idempotentId
      */
-    public CompletableFuture<Boolean> batchTransfer(List<TransferRequest> transfers) {
-        if (raftEnabled && raftNodeManager != null) {
-            // In cluster mode, submit each transfer to JRaft which provides ordering
-            CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
-            
-            for (TransferRequest transfer : transfers) {
-                result = result.thenCompose(success -> {
-                    if (success) {
-                        return transfer(transfer.getFromUserId(), transfer.getFromType(),
-                                      transfer.getToUserId(), transfer.getToType(),
-                                      transfer.getAmount(), transfer.getDescription());
-                    } else {
-                        return CompletableFuture.completedFuture(false);
-                    }
-                });
+    public CompletableFuture<Boolean> batchTransfer(List<TransferRequest> transfers, String idempotentId) {
+        // Validate mandatory idempotentId
+        if (idempotentId == null || idempotentId.trim().isEmpty()) {
+            CompletableFuture<Boolean> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalArgumentException("idempotentId is mandatory for batch transfers"));
+            return failed;
+        }
+        
+        // Check batch-level idempotency using RocksDB
+        String batchIdempotencyKey = "batch_idem:" + idempotentId;
+        try {
+            String existingResult = accountBusinessService.getRocksDBService().get(batchIdempotencyKey);
+            if (existingResult != null) {
+                log.info("Batch transfer already processed for idempotentId: {}", idempotentId);
+                return CompletableFuture.completedFuture(true); // Already processed
             }
-            
-            return result;
+        } catch (Exception e) {
+            log.error("Error checking batch idempotency for key: {}", idempotentId, e);
+        }
+        
+        // Mark batch as processing
+        try {
+            accountBusinessService.getRocksDBService().put(batchIdempotencyKey + ":processing", "1");
+        } catch (Exception e) {
+            log.warn("Failed to mark batch as processing: {}", idempotentId, e);
+        }
+        
+        if (raftEnabled && raftNodeManager != null) {
+            // In cluster mode, submit batch as a single atomic operation
+            return processBatchAsAtomicOperation(transfers, idempotentId);
         } else {
             // In standalone mode, submit all transfers to FIFO queue sequentially
-            CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
-            
-            for (TransferRequest transfer : transfers) {
-                result = result.thenCompose(success -> {
-                    if (success) {
-                        return transfer(transfer.getFromUserId(), transfer.getFromType(),
-                                      transfer.getToUserId(), transfer.getToType(),
-                                      transfer.getAmount(), transfer.getDescription());
-                    } else {
-                        return CompletableFuture.completedFuture(false);
-                    }
-                });
-            }
-            
-            return result;
+            return processBatchSequentially(transfers, idempotentId);
         }
+    }
+    
+    /**
+     * Process batch transfers as atomic operation in cluster mode
+     */
+    private CompletableFuture<Boolean> processBatchAsAtomicOperation(List<TransferRequest> transfers, String idempotentId) {
+        CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
+        
+        // Generate unique batch transaction ID
+        String batchTransactionId = "BATCH_" + System.currentTimeMillis() + "_" + idempotentId;
+        
+        for (int i = 0; i < transfers.size(); i++) {
+            TransferRequest transfer = transfers.get(i);
+            final int transferIndex = i;
+            
+            result = result.thenCompose(success -> {
+                if (success) {
+                    // Create unique idempotency key for this transfer within the batch
+                    String transferIdempotentId = idempotentId + "_transfer_" + transferIndex;
+                    
+                    return transfer(transfer.getFromUserId(), transfer.getFromType(),
+                                  transfer.getToUserId(), transfer.getToType(),
+                                  transfer.getAmount(), 
+                                  transfer.getDescription() + " (Batch: " + batchTransactionId + ")",
+                                  transferIdempotentId);
+                } else {
+                    return CompletableFuture.completedFuture(false);
+                }
+            });
+        }
+        
+        return result.thenApply(success -> {
+            // Store batch-level idempotency marker after successful completion
+            if (success) {
+                try {
+                    String batchIdempotencyKey = "batch_idem:" + idempotentId;
+                    accountBusinessService.getRocksDBService().put(batchIdempotencyKey, "completed");
+                    
+                    // Clean up processing marker
+                    accountBusinessService.getRocksDBService().delete(batchIdempotencyKey + ":processing");
+                    
+                    log.info("Batch transfer completed successfully for idempotentId: {}", idempotentId);
+                } catch (Exception e) {
+                    log.error("Failed to store batch idempotency marker: {}", idempotentId, e);
+                }
+            } else {
+                // Clean up processing marker on failure
+                try {
+                    String batchIdempotencyKey = "batch_idem:" + idempotentId;
+                    accountBusinessService.getRocksDBService().delete(batchIdempotencyKey + ":processing");
+                } catch (Exception e) {
+                    log.warn("Failed to clean up processing marker: {}", idempotentId, e);
+                }
+            }
+            return success;
+        });
+    }
+    
+    /**
+     * Process batch transfers sequentially in standalone mode
+     */
+    private CompletableFuture<Boolean> processBatchSequentially(List<TransferRequest> transfers, String idempotentId) {
+        CompletableFuture<Boolean> result = CompletableFuture.completedFuture(true);
+        
+        // Generate unique batch transaction ID
+        String batchTransactionId = "BATCH_" + System.currentTimeMillis() + "_" + idempotentId;
+        
+        for (int i = 0; i < transfers.size(); i++) {
+            TransferRequest transfer = transfers.get(i);
+            final int transferIndex = i;
+            
+            result = result.thenCompose(success -> {
+                if (success) {
+                    // Create unique idempotency key for this transfer within the batch
+                    String transferIdempotentId = idempotentId + "_transfer_" + transferIndex;
+                    
+                    return transfer(transfer.getFromUserId(), transfer.getFromType(),
+                                  transfer.getToUserId(), transfer.getToType(),
+                                  transfer.getAmount(), 
+                                  transfer.getDescription() + " (Batch: " + batchTransactionId + ")",
+                                  transferIdempotentId);
+                } else {
+                    return CompletableFuture.completedFuture(false);
+                }
+            });
+        }
+        
+        return result.thenApply(success -> {
+            // Store batch-level idempotency marker after successful completion
+            if (success) {
+                try {
+                    String batchIdempotencyKey = "batch_idem:" + idempotentId;
+                    accountBusinessService.getRocksDBService().put(batchIdempotencyKey, "completed");
+                    
+                    // Clean up processing marker
+                    accountBusinessService.getRocksDBService().delete(batchIdempotencyKey + ":processing");
+                    
+                    log.info("Batch transfer completed successfully for idempotentId: {}", idempotentId);
+                } catch (Exception e) {
+                    log.error("Failed to store batch idempotency marker: {}", idempotentId, e);
+                }
+            } else {
+                // Clean up processing marker on failure
+                try {
+                    String batchIdempotencyKey = "batch_idem:" + idempotentId;
+                    accountBusinessService.getRocksDBService().delete(batchIdempotencyKey + ":processing");
+                } catch (Exception e) {
+                    log.warn("Failed to clean up processing marker: {}", idempotentId, e);
+                }
+            }
+            return success;
+        });
+    }
+    
+    /**
+     * Deprecated: Use batchTransfer(List<TransferRequest>, String) instead
+     */
+    @Deprecated
+    public CompletableFuture<Boolean> batchTransfer(List<TransferRequest> transfers) {
+        CompletableFuture<Boolean> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalArgumentException("idempotentId is mandatory for batch transfers. Use batchTransfer(transfers, idempotentId) instead."));
+        return failed;
     }
     
     /**

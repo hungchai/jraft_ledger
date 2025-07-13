@@ -379,8 +379,14 @@ public class LedgerIntegrationTest {
                                             new BigDecimal("20.00"), "Batch transfer 2")
         );
         
-        CompletableFuture<Boolean> batchResult = ledgerService.batchTransfer(transfers);
+        // Test with mandatory idempotentId
+        String batchIdempotentId = "test-batch-transfer-" + System.currentTimeMillis();
+        CompletableFuture<Boolean> batchResult = ledgerService.batchTransfer(transfers, batchIdempotentId);
         assertTrue(batchResult.get(10, TimeUnit.SECONDS), "Batch transfer should succeed");
+        
+        // Test idempotency - same batch should not process again
+        CompletableFuture<Boolean> duplicateBatchResult = ledgerService.batchTransfer(transfers, batchIdempotentId);
+        assertTrue(duplicateBatchResult.get(10, TimeUnit.SECONDS), "Duplicate batch transfer should return success (idempotent)");
     }
 
     @Test

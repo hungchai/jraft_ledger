@@ -49,6 +49,13 @@ public class AccountBusinessService {
             return BigDecimal.ZERO;
         }
     }
+    
+    /**
+     * Get RocksDB service for direct access
+     */
+    public RocksDBService getRocksDBService() {
+        return rocksDBService;
+    }
 
     /**
      * Update account balance in RocksDB

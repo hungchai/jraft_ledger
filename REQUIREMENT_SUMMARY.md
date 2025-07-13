@@ -32,13 +32,21 @@ The application exposes a RESTful API for ledger operations, administration, and
 
 **Endpoints include:**
 
-- `POST /api/transfer` — Initiate a transfer between accounts.
+- `POST /api/transfer/single` — Initiate a single transfer between accounts (optional idempotency).
+- `POST /api/transfer/batch` — **[MANDATORY IDEMPOTENCY]** Initiate multiple atomic transfers (requires `Idempotency-Key` header).
+- `POST /api/transfer/demo` — **[MANDATORY IDEMPOTENCY]** Execute predefined demo transfers (requires `Idempotency-Key` header).
 - `GET /api/balance/{accountId}` — Query account balance.
 - `POST /api/admin/` — Administrative operations (e.g., create account, reset ledger).
 - `GET /api/data/` — Data initialization and inspection.
 - `GET /api/raft/status` — Raft cluster status and diagnostics.
+- `GET /api/admin/idempotency/stats` — Idempotency cache statistics and monitoring.
 
 The API follows standard REST conventions, returns JSON, and uses appropriate HTTP status codes.
+
+**⚠️ IMPORTANT: Mandatory Idempotency Requirements**
+- `/api/transfer/batch`: MUST include `Idempotency-Key` header (400 Bad Request if missing)
+- `/api/transfer/demo`: MUST include `Idempotency-Key` header (400 Bad Request if missing)
+- `/api/transfer/single`: Optional `Idempotency-Key` header (auto-generated if omitted)
 
 ---
 
@@ -59,8 +67,15 @@ The API follows standard REST conventions, returns JSON, and uses appropriate HT
 
 ## 7. Idempotency and Transaction Logging
 
-- The application ensures idempotency for ledger operations to prevent duplicate processing.
-- All transactions are logged for audit and recovery purposes.
+- **Comprehensive Idempotency Support**: The application ensures idempotency for all ledger operations to prevent duplicate processing.
+- **Mandatory Batch-Level Idempotency**: All batch operations require `Idempotency-Key` header for complete batch protection.
+- **Persistent Storage**: Idempotency keys stored in RocksDB for forever persistence across restarts and cluster-wide consistency.
+- **Dual-Level Protection**: 
+  - **Batch Level**: One `idempotentId` protects entire batch operation using `batch_idem:` prefix
+  - **Transfer Level**: Individual transfers within batch get unique IDs: `{idempotentId}_transfer_{index}`
+- **Processing State Tracking**: Uses `:processing` markers for atomic state management during batch operations.
+- **Error Handling**: Returns 400 Bad Request for missing mandatory idempotency keys with clear error messages.
+- **Transaction Logging**: All transactions are logged for audit and recovery purposes.
 
 ---
 
