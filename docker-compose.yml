@@ -139,6 +139,29 @@ services:
       - ledger-net
     restart: unless-stopped
 
+  projection:
+    build:
+      context: .
+      dockerfile: Dockerfile.projection
+    container_name: ledger-projection
+    hostname: ledger-projection
+    ports:
+      - "8089:8089"
+    environment:
+      SERVER_PORT: 8089
+      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
 networks:
   ledger-net:
     driver: bridge

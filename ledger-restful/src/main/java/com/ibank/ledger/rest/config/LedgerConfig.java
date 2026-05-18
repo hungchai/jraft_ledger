@@ -16,15 +16,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import jakarta.annotation.PreDestroy;
+import org.springframework.context.annotation.Profile;
 
 @Configuration
 public class LedgerConfig {
 
     private static final Logger log = LoggerFactory.getLogger(LedgerConfig.class);
-
-    private RocksDBManager rocksDBManager;
 
     @Bean
     public NodeRole nodeRole() {
@@ -43,20 +40,22 @@ public class LedgerConfig {
     @Bean
     public BalanceTypeConfigStore balanceTypeConfigStore() { return new BalanceTypeConfigStore(); }
 
-    @Bean
+    @Bean(destroyMethod = "close")
+    @Profile("!test")
     public RocksDBManager rocksDBManager() {
         String dbPath = System.getenv().getOrDefault("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
-        this.rocksDBManager = new RocksDBManager(dbPath);
+        RocksDBManager mgr = new RocksDBManager(dbPath);
         try {
-            this.rocksDBManager.open();
+            mgr.open();
             log.info("RocksDB opened at {}", dbPath);
         } catch (Exception e) {
             log.error("Failed to open RocksDB at {} — running in-memory only", dbPath, e);
         }
-        return this.rocksDBManager;
+        return mgr;
     }
 
     @Bean
+    @Profile("!test")
     public OutboxStore outboxStore(RocksDBManager rocksDBManager) {
         return new OutboxStore(rocksDBManager);
     }
@@ -66,28 +65,24 @@ public class LedgerConfig {
             BalanceStore balanceStore,
             AccountMetaStore accountMetaStore,
             BalanceTypeConfigStore balanceTypeConfigStore,
-            RocksDBManager rocksDBManager,
-            OutboxStore outboxStore) {
+            @org.springframework.beans.factory.annotation.Autowired(required = false) RocksDBManager rocksDBManager,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore) {
         LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
-        sm.setRocksDB(rocksDBManager);
-        sm.setOutboxStore(outboxStore);
-        sm.setPersistAfterApply(true); // snapshot after every write
 
-        // Restore from previous snapshot if exists
-        try {
-            sm.restoreFromSnapshot();
-            log.info("StateMachine restored from RocksDB snapshot");
-        } catch (Exception e) {
-            log.info("No snapshot found — starting fresh");
+        if (rocksDBManager != null && rocksDBManager.isOpen()) {
+            sm.setRocksDB(rocksDBManager);
+            sm.setOutboxStore(outboxStore);
+            sm.setPersistAfterApply(true);
+            try {
+                sm.restoreFromSnapshot();
+                log.info("StateMachine restored from RocksDB snapshot");
+            } catch (Exception e) {
+                log.info("No snapshot found — starting fresh");
+            }
+        } else {
+            log.info("RocksDB not available — running in-memory only");
         }
         return sm;
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        if (rocksDBManager != null) {
-            try { rocksDBManager.close(); } catch (Exception ignored) {}
-        }
     }
 
     @Bean

@@ -18,6 +18,7 @@
         <module>ledger-service</module>
         <module>ledger-restful</module>
         <module>ledger-feign</module>
+        <module>ledger-projection</module>
     </modules>
 
     <parent>
@@ -68,6 +69,12 @@
             <dependency>
                 <groupId>com.ibank</groupId>
                 <artifactId>ledger-service</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.ibank</groupId>
+                <artifactId>ledger-projection</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

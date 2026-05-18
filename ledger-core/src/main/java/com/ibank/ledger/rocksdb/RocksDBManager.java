@@ -60,6 +60,10 @@ public class RocksDBManager implements AutoCloseable {
         log.info("RocksDB opened at {}, {} column families", dbPath, columnFamilyHandles.size());
     }
 
+    public boolean isOpen() {
+        return rocksDB != null && rocksDB.isOwningHandle();
+    }
+
     public ColumnFamilyHandle getHandle(String cfName) {
         ColumnFamilyHandle handle = columnFamilyHandles.get(cfName);
         if (handle == null) {
