@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: ledger-platform
+  threads:
+    virtual:
+      enabled: true
+
+ledger:
+  rocksdb:
+    path: /tmp/ledger/rocksdb
+  raft:
+    group-id: ledger-group-1
+    data-path: /tmp/ledger/raft
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topics:
+      balance-change: ledger.balance.change.v1
+      posting-completion: ledger.posting.completion.v1
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
