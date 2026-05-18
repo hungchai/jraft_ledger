@@ -12,7 +12,7 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - ./jraft_ledger/mysql:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - ledger-net
@@ -28,6 +28,7 @@ services:
   kafka:
     image: apache/kafka:3.9.0
     container_name: ledger-kafka
+    hostname: ledger-kafka
     ports:
       - "9092:9092"
     environment:
@@ -39,42 +40,39 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - ./jraft_ledger/kafka:/var/lib/kafka/data
     networks:
       - ledger-net
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
 
   ledger1:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: ledger-node-1
+    hostname: ledger-node-1
     ports:
       - "8081:8080"
-      - "8091:8090"
+      - "28081:28080"
     environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-1
-      RAFT_PORT: 8090
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
       SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
       SPRING_DATASOURCE_USERNAME: ledger
       SPRING_DATASOURCE_PASSWORD: ledger123
-      LEDGER_KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
-      PEER_NODES: ledger-node-2:8090,ledger-node-3:8090
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
-        condition: service_healthy
+        condition: service_started
     volumes:
-      - ledger1_data:/var/lib/ledger
+      - ./jraft_ledger/node1:/var/lib/ledger
     networks:
       - ledger-net
     restart: unless-stopped
@@ -84,26 +82,28 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ledger-node-2
+    hostname: ledger-node-2
     ports:
       - "8082:8080"
-      - "8092:8090"
+      - "28082:28080"
     environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-2
-      RAFT_PORT: 8090
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
       SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
       SPRING_DATASOURCE_USERNAME: ledger
       SPRING_DATASOURCE_PASSWORD: ledger123
-      LEDGER_KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
-      PEER_NODES: ledger-node-1:8090,ledger-node-3:8090
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
-        condition: service_healthy
+        condition: service_started
     volumes:
-      - ledger2_data:/var/lib/ledger
+      - ./jraft_ledger/node2:/var/lib/ledger
     networks:
       - ledger-net
     restart: unless-stopped
@@ -113,26 +113,28 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ledger-node-3
+    hostname: ledger-node-3
     ports:
       - "8083:8080"
-      - "8093:8090"
+      - "28083:28080"
     environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-3
-      RAFT_PORT: 8090
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
       SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
       SPRING_DATASOURCE_USERNAME: ledger
       SPRING_DATASOURCE_PASSWORD: ledger123
-      LEDGER_KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
-      PEER_NODES: ledger-node-1:8090,ledger-node-2:8090
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
-        condition: service_healthy
+        condition: service_started
     volumes:
-      - ledger3_data:/var/lib/ledger
+      - ./jraft_ledger/node3:/var/lib/ledger
     networks:
       - ledger-net
     restart: unless-stopped
@@ -140,9 +142,3 @@ services:
 networks:
   ledger-net:
     driver: bridge
-
-volumes:
-  mysql_data:
-  ledger1_data:
-  ledger2_data:
-  ledger3_data:

@@ -7,10 +7,11 @@ spring:
 
 ledger:
   rocksdb:
-    path: /tmp/ledger/rocksdb
+    path: ${LEDGER_ROCKSDB_PATH:/tmp/ledger/rocksdb}
   raft:
     group-id: ledger-group-1
-    data-path: /tmp/ledger/raft
+    data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}
+    server-port: ${RAFT_SERVER_PORT:28080}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     topics:

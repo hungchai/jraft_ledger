@@ -509,6 +509,29 @@ class LedgerStateMachineTest {
     }
 
     @Test
+    @DisplayName("TC-F008-22 applyAdjustment accountSeq incremented")
+    void applyAdjustment_accountSeqIncremented() {
+        // Start with accountSeq=20
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 20, 20, "JNL-020", Instant.now()));
+        setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("5000.00"));
+
+        PostingCommand adjCmd = new PostingCommand(
+                "adj-022", "MANUAL_ADJUSTMENT", "ADJ-CASE-022", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
+                                EntryType.DEBIT, new BigDecimal("100.00"), "Adjustment debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
+                                EntryType.CREDIT, new BigDecimal("100.00"), "Adjustment credit")
+                )))
+        );
+
+        stateMachine.applyPosting(adjCmd);
+
+        assertThat(balanceStore.getOrThrow(key).accountSeq()).isEqualTo(21);
+    }
+
+    @Test
     @DisplayName("TC-F008-21 applyReversal accountSeq incremented")
     void applyReversal_accountSeqIncremented() {
         // Start with accountSeq=10

@@ -748,6 +748,22 @@ TC-RAFT-02  cluster_survivesFollowerRestart
 
 ---
 
+## Module 16：Kafka Event Publishing（F-011/F-011b）
+
+```
+TC-KAFKA-01  posting_publishesBalanceChangeEvent_toKafka
+             Given: Kafka broker (Testcontainers), CLIENT_ACC_001 balance=1000
+             When:  StateMachine.applyPosting DEBIT 100 → KafkaEventPublisher flush
+             Then:  Kafka consumer receives 1+ record with BALANCE_CHANGE, accountSeq field
+
+TC-KAFKA-02  multiplePostings_produceSequentialAccountSeq
+             Given: Kafka broker, CLIENT_ACC_001
+             When:  5 sequential DEBIT 10 postings → publish to Kafka
+             Then:  Kafka consumer receives 5 records with monotonically increasing accountSeq
+```
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
