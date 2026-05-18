@@ -1,0 +1,509 @@
+{
+  "info": {
+    "name": "Ledger Platform API",
+    "description": "Next-Gen Internal Ledger Platform — Raft + CQRS\n\nBase URL: http://localhost:8081\n\nVariables:\n- {{base_url}} = http://localhost:8081\n- {{node1}} = http://localhost:8081\n- {{node2}} = http://localhost:8082\n- {{node3}} = http://localhost:8083",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8081" },
+    { "key": "account_id", "value": "CLIENT_ACC_001" },
+    { "key": "company_id", "value": "COMPANY_FX_ACC" },
+    { "key": "request_id", "value": "{{$guid}}" },
+    { "key": "journal_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounts",
+      "item": [
+        {
+          "name": "Create Client Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status COMPLETED', () => pm.expect(pm.response.json().status).to.eql('COMPLETED'));",
+                  "pm.collectionVariables.set('account_id', 'CLIENT_ACC_001');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"CLIENT_ACC_001\",\n  \"accountType\": \"CLIENT\",\n  \"displayName\": \"Client Account 001\",\n  \"ownerId\": \"CUST-001\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" },\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"HKD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "Create Company Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"COMPANY_FX_ACC\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Company FX Account\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "Freeze Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/freeze", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "freeze"] }
+          }
+        },
+        {
+          "name": "Unfreeze Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/unfreeze", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "unfreeze"] }
+          }
+        },
+        {
+          "name": "Close Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/close", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "close"] }
+          }
+        },
+        {
+          "name": "Add Balance Type",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"balanceType\": \"BROKERAGE_BALANCE\",\n  \"currency\": \"USD\",\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/balance-types", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "balance-types"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Posting",
+      "item": [
+        {
+          "name": "Deposit (Company→Client)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status COMPLETED', () => pm.expect(json.status).to.eql('COMPLETED'));",
+                  "if (json.journalId) pm.collectionVariables.set('journal_id', json.journalId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\", \"description\": \"Company funds\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\", \"description\": \"Client deposit\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Withdraw (Client→Company)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"WITHDRAWAL\",\n  \"businessEventRef\": \"WTH-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"WITHDRAWAL\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"300.00\", \"description\": \"Client withdrawal\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"300.00\", \"description\": \"Company receive\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Idempotent Resend (same requestId)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"10.00\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"10.00\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Unbalanced Posting (400 error)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"UNBAL-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"99.00\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Insufficient Balance (400 error)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"INSF-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"999999.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"999999.00\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Balance Query",
+      "item": [
+        {
+          "name": "Get Balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get HKD Balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=HKD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "HKD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Historical Balance (as-of)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances/as-of?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=USD&asOf=2026-05-15",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances", "as-of"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" },
+                { "key": "asOf", "value": "2026-05-15" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Batch Balances",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" },\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"HKD\" },\n  { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n]"
+            },
+            "url": { "raw": "{{base_url}}/ledger/balances/batch", "host": ["{{base_url}}"], "path": ["ledger", "balances", "batch"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Journal Query",
+      "item": [
+        {
+          "name": "Get Journal by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/journals/{{journal_id}}", "host": ["{{base_url}}"], "path": ["ledger", "journals", "{{journal_id}}"] }
+          }
+        },
+        {
+          "name": "Get Journals by Account (paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals?accountId={{account_id}}&page=0&size=50",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Journal by Request ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals/by-request-id?requestId={{request_id}}",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals", "by-request-id"],
+              "query": [{ "key": "requestId", "value": "{{request_id}}" }]
+            }
+          }
+        },
+        {
+          "name": "Get Journals by Business Ref",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals/by-business-ref?businessEventRef=RFQ-001",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals", "by-business-ref"],
+              "query": [{ "key": "businessEventRef", "value": "RFQ-001" }]
+            }
+          }
+        },
+        {
+          "name": "Get Journal Chain",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/journals/chain/{{journal_id}}", "host": ["{{base_url}}"], "path": ["ledger", "journals", "chain", "{{journal_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reversal",
+      "item": [
+        {
+          "name": "Reverse Journal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"reversalReason\": \"Test reversal\",\n  \"reversalReasonCode\": \"CANCELLATION\",\n  \"valueDate\": \"2026-05-18\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/journals/{{journal_id}}/reversal", "host": ["{{base_url}}"], "path": ["ledger", "journals", "{{journal_id}}", "reversal"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Manual Adjustment",
+      "item": [
+        {
+          "name": "Create Adjustment Draft",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.draftId) pm.collectionVariables.set('draft_id', json.draftId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"makerId\": \"maker-001\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"ADJUSTMENT\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100.00\", \"description\": \"Adjustment credit\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\", \"description\": \"Adjustment debit\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts"] }
+          }
+        },
+        {
+          "name": "Approve Adjustment Draft",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkerId\": \"checker-001\",\n  \"approveRequestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts/{{draft_id}}/approve", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts", "{{draft_id}}", "approve"] }
+          }
+        },
+        {
+          "name": "Reject Adjustment Draft",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkerId\": \"checker-001\",\n  \"reason\": \"Not valid\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts/{{draft_id}}/reject", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts", "{{draft_id}}", "reject"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "item": [
+        {
+          "name": "Run L1 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2026-05-18\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l1", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l1"] }
+          }
+        },
+        {
+          "name": "Run L2 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-05-18\",\n  \"accountBalances\": {\n    \"CLIENT_001\": \"100.00\",\n    \"CLIENT_002\": \"200.00\"\n  },\n  \"controlAccountId\": \"CONTROL_CLIENT\",\n  \"controlBalance\": \"300.00\",\n  \"tolerance\": \"0.01\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l2", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l2"] }
+          }
+        },
+        {
+          "name": "Run L3 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-05-18\",\n  \"externalRecords\": [\n    { \"externalRef\": \"EXT-001\", \"amount\": \"800.00\" },\n    { \"externalRef\": \"EXT-002\", \"amount\": \"200.00\" }\n  ],\n  \"journalIds\": [\"JNL-0001\", \"JNL-0002\"]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l3", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l3"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounting Period",
+      "item": [
+        {
+          "name": "Trigger EOD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2026-05-17\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/periods/eod", "host": ["{{base_url}}"], "path": ["ledger", "periods", "eod"] }
+          }
+        },
+        {
+          "name": "Get Period Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/periods?date=2026-05-17",
+              "host": ["{{base_url}}"], "path": ["ledger", "periods"],
+              "query": [{ "key": "date", "value": "2026-05-17" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Balance Type Registry",
+      "item": [
+        {
+          "name": "Get Balance Type Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/admin/ledger/balance-types/AVAILABLE_BALANCE", "host": ["{{base_url}}"], "path": ["admin", "ledger", "balance-types", "AVAILABLE_BALANCE"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Full Flow (Run in Order)",
+      "item": [
+        {
+          "name": "STEP 1: Create Accounts",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-001\",\n  \"accountId\": \"ALICE_ACC\",\n  \"accountType\": \"CLIENT\",\n  \"displayName\": \"Alice\",\n  \"ownerId\": \"ALICE\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "STEP 2: Create Counterparty Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-002\",\n  \"accountId\": \"BANK_ACC\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Bank\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "STEP 3: Transfer 1000 USD to Alice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-003\",\n  \"businessEventType\": \"TRANSFER\",\n  \"businessEventRef\": \"FLOW-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TRANSFER\",\n    \"lines\": [\n      { \"accountId\": \"BANK_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\" },\n      { \"accountId\": \"ALICE_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "STEP 4: Check Alice Balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId=ALICE_ACC&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "ALICE_ACC" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
