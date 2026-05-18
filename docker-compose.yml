@@ -45,6 +45,19 @@ services:
     networks:
       - ledger-net
 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ledger-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ledger
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ledger-kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - ledger-net
+
   ledger1:
     build:
       context: .

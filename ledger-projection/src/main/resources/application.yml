@@ -6,19 +6,15 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:ledger}
     password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
     driver-class-name: com.mysql.cj.jdbc.Driver
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ledger-projection
+      auto-offset-reset: earliest
 
 mybatis:
   configuration:
     map-underscore-to-camel-case: true
-
-kafka:
-  bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-  consumer:
-    group-id: ledger-projection
-    auto-offset-reset: earliest
-  topics:
-    balance-change: ledger.balance.change.v1
-    posting-completion: ledger.posting.completion.v1
 
 server:
   port: 8089

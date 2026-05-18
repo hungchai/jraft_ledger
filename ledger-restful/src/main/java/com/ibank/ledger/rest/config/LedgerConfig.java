@@ -3,6 +3,7 @@ package com.ibank.ledger.rest.config;
 import com.ibank.ledger.domain.model.BalanceTypeConfig;
 import com.ibank.ledger.domain.model.NegativeSemantics;
 import com.ibank.ledger.domain.model.SignConvention;
+import com.ibank.ledger.event.KafkaEventPublisher;
 import com.ibank.ledger.raft.LedgerRaftStateMachine;
 import com.ibank.ledger.raft.NodeRole;
 import com.ibank.ledger.raft.RaftNodeManager;
@@ -70,14 +71,27 @@ public class LedgerConfig {
         return new OutboxStore(rocksDBManager);
     }
 
+    @Bean(destroyMethod = "close")
+    public KafkaEventPublisher kafkaEventPublisher() {
+        String brokers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
+        return new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+    }
+
     @Bean
     public LedgerStateMachine ledgerStateMachine(
             BalanceStore balanceStore,
             AccountMetaStore accountMetaStore,
             BalanceTypeConfigStore balanceTypeConfigStore,
             @org.springframework.beans.factory.annotation.Autowired(required = false) RocksDBManager rocksDBManager,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore) {
+            @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher) {
         LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
+
+        // Wire Kafka event publisher
+        if (kafkaPublisher != null) {
+            sm.setEventListener(kafkaPublisher);
+            log.info("Kafka event publisher wired");
+        }
 
         if (rocksDBManager != null && rocksDBManager.isOpen()) {
             sm.setRocksDB(rocksDBManager);

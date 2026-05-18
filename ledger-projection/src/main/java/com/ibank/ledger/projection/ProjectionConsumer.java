@@ -33,7 +33,7 @@ public class ProjectionConsumer {
         this.journalMapper = journalMapper;
     }
 
-    @KafkaListener(topics = "${kafka.topics.balance-change}", groupId = "${kafka.consumer.group-id}")
+    @KafkaListener(topics = "ledger.balance.change.v1", groupId = "ledger-projection")
     public void onBalanceChange(String message) {
         try {
             JsonNode event = mapper.readTree(message);
