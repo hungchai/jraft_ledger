@@ -98,13 +98,24 @@ class LedgerStateMachineTest {
     @Test
     @DisplayName("TC-F008-03 applyPosting debit exceeds balance allowNegative=false command rejected")
     void applyPosting_debitExceedsBalance_allowNegativeFalse_commandRejected() {
-        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("100.00"));
+        // CLIENT account with insufficient balance — must be rejected
+        String clientId = "REAL_CLIENT";
+        accountMetaStore.put(clientId, new Account(
+                clientId, AccountType.CLIENT, "Real Client",
+                "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
+        AccountBalanceKey clientKey = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD");
+        balanceStore.put(clientKey, new BalanceEntry(new BigDecimal("100.00"), 0, 1, "", Instant.now()));
 
+        // Balanced posting: CLIENT DEBIT 200 + COMPANY CREDIT 200
+        // CLIENT has only 100 → INSUFFICIENT_BALANCE
+        setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("10000.00"));
         PostingCommand cmd = new PostingCommand(
                 "req-003", "TEST", "test-ref", LocalDate.now(),
                 List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("200.00"), "Test")
+                        new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
+                                EntryType.DEBIT, new BigDecimal("200.00"), "Test"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
+                                EntryType.CREDIT, new BigDecimal("200.00"), "Counter")
                 )))
         );
 
@@ -112,9 +123,7 @@ class LedgerStateMachineTest {
 
         assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
         assertThat(result.errorCodes()).contains("INSUFFICIENT_BALANCE");
-
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("100.00"));
+        assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("100.00"));
     }
 
     @Test

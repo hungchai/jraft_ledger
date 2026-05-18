@@ -255,10 +255,19 @@ public class LedgerStateMachine {
             BigDecimal after = computeAfterBalance(current.amount(), line.entryType(), line.amount());
 
             if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
-                var result = CommandResult.rejected("INSUFFICIENT_BALANCE");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
+                // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE)
+                // Only CLIENT/CONTROL accounts have strict balance enforcement
+                var account = accountMetaStore.get(line.accountId());
+                boolean isInstitutional = account.isPresent() && (
+                        account.get().accountType() == AccountType.COMPANY ||
+                        account.get().accountType() == AccountType.NOSTRO ||
+                        account.get().accountType() == AccountType.SUSPENSE);
+                if (!isInstitutional) {
+                    var result = CommandResult.rejected("INSUFFICIENT_BALANCE");
+                    idempotencyStore.put(cmd.requestId(),
+                            IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                    return result;
+                }
             }
             if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
                 var result = CommandResult.rejected("CREDIT_EXCEEDS_LIMIT");

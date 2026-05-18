@@ -210,7 +210,13 @@ class ConcurrencyTest {
         int threadCount = 101;
         int initialBalance = 100;
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        // CLIENT account for strict balance enforcement
+        String clientId = "CLIENT_NFR5";
+        accountMetaStore.put(clientId, new Account(
+                clientId, AccountType.CLIENT, "Client NFR5",
+                "CUST-NFR5", AccountStatus.ACTIVE, null, Instant.now()));
+
+        AccountBalanceKey key = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal(initialBalance), 0, 0, "", Instant.now()));
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -226,8 +232,10 @@ class ConcurrencyTest {
                 PostingCommand cmd = new PostingCommand(
                         "req-nfr5-" + idx, "TEST", "test-ref", LocalDate.now(),
                         List.of(new PostingCommand.Leg("leg-" + idx, "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, BigDecimal.ONE, "Debit " + idx)
+                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
+                                        EntryType.DEBIT, BigDecimal.ONE, "Debit " + idx),
+                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
+                                        EntryType.CREDIT, BigDecimal.ONE, "Counter " + idx)
                         )))
                 );
                 return stateMachine.applyPosting(cmd);
@@ -245,13 +253,11 @@ class ConcurrencyTest {
             else rejected++;
         }
 
-        // Exactly 100 should succeed, 1 should be INSUFFICIENT_BALANCE
-        assertThat(completed).isEqualTo(initialBalance); // 100 completed
-        assertThat(rejected).isEqualTo(1);                // 1 rejected
+        assertThat(completed).isEqualTo(initialBalance);
+        assertThat(rejected).isEqualTo(1);
 
         BigDecimal finalBalance = balanceStore.getOrThrow(key).amount();
         assertThat(finalBalance).isEqualByComparingTo(BigDecimal.ZERO);
-        // No negative balance
         assertThat(finalBalance.compareTo(BigDecimal.ZERO)).isGreaterThanOrEqualTo(0);
     }
 }
