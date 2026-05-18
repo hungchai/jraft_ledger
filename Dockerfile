@@ -1,5 +1,5 @@
 # ── Build Stage ─────────────────────────────────────────────
-FROM maven:3.9-eclipse-temurin-21-alpine AS build
+FROM maven:3.9-amazoncorretto-21 AS build
 
 WORKDIR /build
 COPY pom.xml .
@@ -9,18 +9,17 @@ COPY ledger-service/pom.xml ledger-service/pom.xml
 COPY ledger-restful/pom.xml ledger-restful/pom.xml
 COPY ledger-feign/pom.xml ledger-feign/pom.xml
 
-# Download dependencies (cache layer)
 RUN mvn dependency:go-offline -pl ledger-restful -am -q || true
 
 COPY . .
 RUN mvn package -pl ledger-restful -am -DskipTests -q
 
-# ── Runtime Stage ────────────────────────────────────────────
-FROM eclipse-temurin:21-jre-alpine
+# ── Runtime Stage (non-Alpine for RocksDB glibc compat) ─────
+FROM amazoncorretto:21
 
-RUN apk add --no-cache curl
+RUN yum install -y shadow-utils curl && yum clean all
 
-RUN addgroup -S ledger && adduser -S ledger -G ledger
+RUN groupadd -r ledger && useradd -r -g ledger ledger
 
 RUN mkdir -p /var/lib/ledger/rocksdb /var/lib/ledger/raft /var/log/ledger \
     && chown -R ledger:ledger /var/lib/ledger /var/log/ledger

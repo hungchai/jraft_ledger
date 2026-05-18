@@ -27,9 +27,15 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private final LedgerStateMachine ledgerStateMachine;
     private final AtomicLong leaderTerm = new AtomicLong(-1);
     private volatile boolean isLeader;
+    private NodeRole nodeRole;
 
     public LedgerRaftStateMachine(LedgerStateMachine ledgerStateMachine) {
         this.ledgerStateMachine = ledgerStateMachine;
+    }
+
+    public LedgerRaftStateMachine withNodeRole(NodeRole nr) {
+        this.nodeRole = nr;
+        return this;
     }
 
     public LedgerStateMachine getLedgerStateMachine() {
@@ -113,6 +119,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     public void onLeaderStart(long term) {
         this.leaderTerm.set(term);
         this.isLeader = true;
+        if (nodeRole != null) nodeRole.setLeader(serverIdStr(), term);
         log.info("Became leader at term {}", term);
     }
 
@@ -120,7 +127,16 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     public void onLeaderStop(Status status) {
         this.isLeader = false;
         this.leaderTerm.set(-1);
+        if (nodeRole != null) nodeRole.setFollower(serverIdStr());
         log.info("Stepped down as leader: {}", status);
+    }
+
+    private String serverIdStr() {
+        return nodeRole != null ? nodeRole.getNodeId() : "unknown";
+    }
+
+    public void setNodeId(String nodeId) {
+        if (nodeRole != null) nodeRole.setFollower(nodeId);
     }
 
     // onError removed — not present in SOFAJRaft 1.3.15 StateMachineAdapter

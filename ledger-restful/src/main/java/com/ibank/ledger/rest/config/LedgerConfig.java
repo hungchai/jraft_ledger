@@ -3,7 +3,9 @@ package com.ibank.ledger.rest.config;
 import com.ibank.ledger.domain.model.BalanceTypeConfig;
 import com.ibank.ledger.domain.model.NegativeSemantics;
 import com.ibank.ledger.domain.model.SignConvention;
+import com.ibank.ledger.raft.LedgerRaftStateMachine;
 import com.ibank.ledger.raft.NodeRole;
+import com.ibank.ledger.raft.RaftNodeManager;
 import com.ibank.ledger.rocksdb.OutboxStore;
 import com.ibank.ledger.rocksdb.RocksDBManager;
 import com.ibank.ledger.service.*;
@@ -11,6 +13,8 @@ import com.ibank.ledger.statemachine.LedgerStateMachine;
 import com.ibank.ledger.store.AccountMetaStore;
 import com.ibank.ledger.store.BalanceStore;
 import com.ibank.ledger.store.BalanceTypeConfigStore;
+import java.io.File;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -27,7 +31,8 @@ public class LedgerConfig {
     public NodeRole nodeRole() {
         NodeRole nr = new NodeRole();
         String envNodeId = System.getenv("NODE_ID");
-        nr.setLeader(envNodeId != null ? envNodeId : "standalone", 0);
+        // Start as FOLLOWER. Raft election (RaftNodeManager) promotes to LEADER.
+        nr.setFollower(envNodeId != null ? envNodeId : "standalone");
         return nr;
     }
 
@@ -108,6 +113,40 @@ public class LedgerConfig {
     public ReconciliationService reconciliationService(LedgerStateMachine sm) { return new ReconciliationService(sm); }
     @Bean
     public AccountingPeriodService accountingPeriodService() { return new AccountingPeriodService(); }
+
+    @Bean(destroyMethod = "close")
+    public RaftNodeManager raftNodeManager(LedgerStateMachine ledgerStateMachine, NodeRole nodeRole) {
+        String nodeId   = System.getenv("NODE_ID");
+        String peers    = System.getenv("PEER_NODES");
+        String raftPath = System.getenv().getOrDefault("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
+        String raftPort = System.getenv().getOrDefault("RAFT_SERVER_PORT", "28080");
+
+        if (nodeId == null || peers == null) {
+            log.info("Raft cluster not configured — running standalone");
+            return null;
+        }
+
+        LedgerRaftStateMachine fsm = new LedgerRaftStateMachine(ledgerStateMachine)
+                .withNodeRole(nodeRole);
+        fsm.setNodeId(nodeId);
+
+        String[] peerArr = peers.split(",");
+        StringBuilder raftPeers = new StringBuilder();
+        for (String p : peerArr) {
+            String host = p.split(":")[0].trim();
+            if (raftPeers.length() > 0) raftPeers.append(",");
+            raftPeers.append(host).append(":").append(raftPort);
+        }
+
+        String serverId = nodeId + ":" + raftPort;
+        new File(raftPath).mkdirs(); // ensure dir exists before SOFAJRaft init
+        RaftNodeManager mgr = new RaftNodeManager(
+                "ledger-group-1", serverId, raftPeers.toString(),
+                raftPath, fsm);
+        mgr.init();
+        log.info("Raft node started: {} peers={}", serverId, raftPeers);
+        return mgr;
+    }
 
     @Bean
     CommandLineRunner initDefaultTypes(BalanceTypeConfigStore configStore,

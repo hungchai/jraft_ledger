@@ -1,4 +1,4 @@
-FROM maven:3.9-eclipse-temurin-21-alpine AS build
+FROM maven:3.9-amazoncorretto-21 AS build
 WORKDIR /build
 COPY pom.xml .
 COPY ledger-core/pom.xml ledger-core/pom.xml
@@ -8,8 +8,9 @@ RUN mvn dependency:go-offline -pl ledger-projection -am -q || true
 COPY . .
 RUN mvn package -pl ledger-projection -am -DskipTests -q
 
-FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S ledger && adduser -S ledger -G ledger
+FROM amazoncorretto:21
+RUN yum install -y shadow-utils && yum clean all
+RUN groupadd -r ledger && useradd -r -g ledger ledger
 COPY --from=build /build/ledger-projection/target/ledger-projection-*.jar /app/projection.jar
 USER ledger
 EXPOSE 8089

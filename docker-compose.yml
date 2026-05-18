@@ -22,7 +22,6 @@ services:
       timeout: 5s
       retries: 10
     command:
-      - --default-authentication-plugin=mysql_native_password
       - --max-connections=1000
 
   kafka:
@@ -34,11 +33,11 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_LISTENERS: PLAINTEXT://ledger-kafka:9092,CONTROLLER://ledger-kafka:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://ledger-kafka:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@ledger-kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
@@ -60,9 +59,6 @@ services:
       RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-1
       PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
-      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
-      SPRING_DATASOURCE_USERNAME: ledger
-      SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
@@ -91,9 +87,6 @@ services:
       RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-2
       PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
-      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
-      SPRING_DATASOURCE_USERNAME: ledger
-      SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
@@ -122,9 +115,6 @@ services:
       RAFT_SERVER_PORT: 28080
       NODE_ID: ledger-node-3
       PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
-      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
-      SPRING_DATASOURCE_USERNAME: ledger
-      SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
@@ -149,9 +139,6 @@ services:
       - "8089:8089"
     environment:
       SERVER_PORT: 8089
-      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
-      SPRING_DATASOURCE_USERNAME: ledger
-      SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
     depends_on:
       mysql:
