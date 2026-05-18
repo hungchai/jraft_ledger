@@ -127,7 +127,7 @@ class RaftClusterIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
         bs.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "", Instant.now()));

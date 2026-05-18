@@ -41,7 +41,7 @@ class AccountQueueManagerTest {
         balanceTypeConfigStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         accountMetaStore.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
         balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
                 new BalanceEntry(new BigDecimal("10000.00"), 0, 1, "", Instant.now()));
@@ -115,9 +115,9 @@ class AccountQueueManagerTest {
     @DisplayName("Multiple accounts have independent queues")
     void multipleAccounts_independentQueues() throws Exception {
         accountMetaStore.put("ACC_A", new Account(
-                "ACC_A", AccountType.CLIENT, "A", "C-A", AccountStatus.ACTIVE, null, Instant.now()));
+                "ACC_A", AccountType.COMPANY, "A", "C-A", AccountStatus.ACTIVE, null, Instant.now()));
         accountMetaStore.put("ACC_B", new Account(
-                "ACC_B", AccountType.CLIENT, "B", "C-B", AccountStatus.ACTIVE, null, Instant.now()));
+                "ACC_B", AccountType.COMPANY, "B", "C-B", AccountStatus.ACTIVE, null, Instant.now()));
 
         balanceStore.put(new AccountBalanceKey("ACC_A", "AVAILABLE_BALANCE", "USD"),
                 new BalanceEntry(BigDecimal.ZERO, 0, 0, "", Instant.now()));

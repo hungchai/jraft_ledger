@@ -41,7 +41,7 @@ class QueueAndOutboxIntegrationTest {
         balanceTypeConfigStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         accountMetaStore.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
         accountMetaStore.put("COMPANY_FX_ACC", new Account(
                 "COMPANY_FX_ACC", AccountType.COMPANY, "Company",
@@ -123,7 +123,7 @@ class QueueAndOutboxIntegrationTest {
         for (int i = 0; i < count; i++) {
             String clientId = "CLIENT_HOT_" + i;
             accountMetaStore.put(clientId, new Account(
-                    clientId, AccountType.CLIENT, "Client " + i,
+                    clientId, AccountType.COMPANY, "Client " + i,
                     "CUST-" + i, AccountStatus.ACTIVE, null, Instant.now()));
             balanceStore.put(new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD"),
                     new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.now()));

@@ -90,7 +90,7 @@ class RocksDBIntegrationTest {
         configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         accountMetaStore.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
@@ -162,7 +162,7 @@ class RocksDBIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Set accountSeq to 42
@@ -197,7 +197,7 @@ class RocksDBIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
@@ -251,7 +251,7 @@ class RocksDBIntegrationTest {
         for (String[] acct : accounts) {
             AccountBalanceKey key = new AccountBalanceKey(acct[0], acct[1], acct[2]);
             if (!ams.contains(acct[0])) {
-                ams.put(acct[0], new Account(acct[0], AccountType.CLIENT, acct[0],
+                ams.put(acct[0], new Account(acct[0], AccountType.COMPANY, acct[0],
                         "OWNER-" + acct[0], AccountStatus.ACTIVE, null, Instant.now()));
             }
             bs.put(key, new BalanceEntry(
@@ -296,7 +296,7 @@ class RocksDBIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Initial balance
@@ -385,7 +385,7 @@ class RocksDBIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Create account with existing balance and transactions
@@ -434,7 +434,7 @@ class RocksDBIntegrationTest {
         cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                 "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
         ams.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");

@@ -28,11 +28,16 @@ public class LedgerConfig {
     private static final Logger log = LoggerFactory.getLogger(LedgerConfig.class);
 
     @Bean
-    public NodeRole nodeRole() {
+    public NodeRole nodeRole(org.springframework.core.env.Environment env) {
         NodeRole nr = new NodeRole();
         String envNodeId = System.getenv("NODE_ID");
-        // Start as FOLLOWER. Raft election (RaftNodeManager) promotes to LEADER.
-        nr.setFollower(envNodeId != null ? envNodeId : "standalone");
+        String nodeName = envNodeId != null ? envNodeId : "standalone";
+        if (env.acceptsProfiles(org.springframework.core.env.Profiles.of("test"))
+                || System.getenv("PEER_NODES") == null) {
+            nr.setLeader(nodeName, 0);
+        } else {
+            nr.setFollower(nodeName);
+        }
         return nr;
     }
 

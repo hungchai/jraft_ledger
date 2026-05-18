@@ -48,7 +48,7 @@ class BalanceChangeEventTest {
 
         // Create test account
         accountMetaStore.put("CLIENT_ACC_001", new Account(
-                "CLIENT_ACC_001", AccountType.CLIENT, "Client 001",
+                "CLIENT_ACC_001", AccountType.COMPANY, "Client 001",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
     }
 

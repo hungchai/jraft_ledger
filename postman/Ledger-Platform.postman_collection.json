@@ -9,7 +9,9 @@
     { "key": "account_id", "value": "CLIENT_ACC_001" },
     { "key": "company_id", "value": "COMPANY_FX_ACC" },
     { "key": "request_id", "value": "{{$guid}}" },
-    { "key": "journal_id", "value": "" }
+    { "key": "journal_id", "value": "" },
+    { "key": "draft_id", "value": "" },
+    { "key": "leader_url", "value": "http://localhost:8081" }
   ],
   "item": [
     {
@@ -106,6 +108,30 @@
       "name": "Posting",
       "item": [
         {
+          "name": "★ Seed Company Account ★ (run this FIRST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Seed COMPLETED', () => pm.expect(json.status).to.eql('COMPLETED'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"seed-company-001\",\n  \"businessEventType\": \"CAPITAL_INJECTION\",\n  \"businessEventRef\": \"SEED-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"CAPITAL\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100000.00\", \"description\": \"Seed capital\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
           "name": "Deposit (Company→Client)",
           "event": [
             {
@@ -193,6 +219,22 @@
               "host": ["{{base_url}}"], "path": ["ledger", "balances"],
               "query": [
                 { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Company Balance (COMPANY_FX_ACC)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{company_id}}&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{company_id}}" },
                 { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
                 { "key": "currency", "value": "USD" }
               ]
@@ -432,6 +474,69 @@
               "query": [{ "key": "date", "value": "2026-05-17" }]
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "Cluster",
+      "item": [
+        {
+          "name": "Get Cluster Info (role + routing)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has role', () => pm.expect(json.isLeader).to.be.oneOf([true, false]));",
+                  "if (json.isLeader) pm.collectionVariables.set('leader_url', pm.variables.get('base_url'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/info", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "info"] }
+          }
+        },
+        {
+          "name": "Get All Cluster Nodes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/nodes", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "nodes"] }
+          }
+        },
+        {
+          "name": "Health — Check Leader on All Nodes",
+          "item": [
+            {
+              "name": "Node 1 :8081",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8081/health", "host": ["localhost:8081"], "path": ["health"] }
+              }
+            },
+            {
+              "name": "Node 2 :8082",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8082/health", "host": ["localhost:8082"], "path": ["health"] }
+              }
+            },
+            {
+              "name": "Node 3 :8083",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8083/health", "host": ["localhost:8083"], "path": ["health"] }
+              }
+            }
+          ]
         }
       ]
     },

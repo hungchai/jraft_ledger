@@ -208,9 +208,24 @@ public class LedgerStateMachine {
             }
         }
 
-        // 4. Check per-leg journal balance (multi-line legs must balance)
+        // 4. Check per-leg journal balance + seed account restriction
         for (var leg : cmd.legs()) {
-            if (leg.lines().size() < 2) continue; // single-line leg is always balanced
+            if (leg.lines().size() < 2) {
+                // Single-line leg = seed/capital injection. Only COMPANY/NOSTRO/SUSPENSE allowed.
+                for (var line : leg.lines()) {
+                    var account = accountMetaStore.get(line.accountId());
+                    if (account.isPresent()) {
+                        var type = account.get().accountType();
+                        if (type == AccountType.CLIENT || type == AccountType.CONTROL) {
+                            var result = CommandResult.rejected("SEED_NOT_ALLOWED_FOR_" + type);
+                            idempotencyStore.put(cmd.requestId(),
+                                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                            return result;
+                        }
+                    }
+                }
+                continue;
+            }
             BigDecimal debitTotal = BigDecimal.ZERO;
             BigDecimal creditTotal = BigDecimal.ZERO;
             for (var line : leg.lines()) {
