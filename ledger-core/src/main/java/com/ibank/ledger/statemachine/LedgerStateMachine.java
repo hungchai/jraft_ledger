@@ -47,6 +47,11 @@ public class LedgerStateMachine {
 
     private LedgerEventListener eventListener;
     private RocksDBManager rocksDB;
+    private com.ibank.ledger.rocksdb.OutboxStore outboxStore;
+
+    public void setOutboxStore(com.ibank.ledger.rocksdb.OutboxStore outboxStore) {
+        this.outboxStore = outboxStore;
+    }
     private static final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
@@ -323,6 +328,7 @@ public class LedgerStateMachine {
                         cmd.valueDate(),
                         Map.of("sourceSystem", "LEDGER"));
                 eventListener.onEvent(event);
+                if (outboxStore != null) outboxStore.enqueue(event);
             }
         }
 

@@ -695,6 +695,59 @@ TC-NFR-05  concurrentPosting_noNegativeBalance_noDoubleDebit
 
 ---
 
+## Module 13：Account Queue（ADR-001 v0.2）
+
+```
+TC-QUEUE-01  singleAccount_serialization_processedInOrder
+             Given: CLIENT_ACC_001 balance=10000, 50 concurrent DEBIT 1 via AccountQueueManager
+             When:  全部請求完成
+             Then:  balance=9950，所有請求串行處理，無並發衝突
+
+TC-QUEUE-02  backpressure_exceedingMaxQueueSize_returnsFalse
+             Given: MAX_QUEUE_SIZE=1000
+             When:  提交 > 1000 請求到同一帳戶
+             Then:  超過部分返回 false（背壓），queue depth ≤ 1000
+
+TC-QUEUE-03  multipleAccounts_independentQueues
+             Given: ACC_A 和 ACC_B 各有獨立 queue
+             When:  同時提交 100 CREDIT 到兩個帳戶
+             Then:  兩者獨立並行處理，無錯誤
+```
+
+---
+
+## Module 14：Account Queue + Outbox Integration
+
+```
+TC-QUEUE-OBX-01  concurrentRequests_produceCorrectEvents
+                 Given: CLIENT_ACC_001 + COMPANY_FX_ACC，20 並發 Posting（每筆 2 條 JournalLine）
+                 When:  Account Queue serialized → StateMachine apply → Event publish
+                 Then:  40 個 BalanceChangeEvent，CLIENT 端 accountSeq 嚴格遞增
+
+TC-QUEUE-OBX-02  hotspotAccount_concurrentCredits_allSucceed
+                 Given: COMPANY_FX_ACC hotspot，50 並發 CREDIT 各 10.00
+                 When:  Account Queue 串行處理 COMPANY 帳戶
+                 Then:  COMPANY balance = 100000 + 500 = 100500，100 個事件，無重複
+```
+
+---
+
+## Module 15：SOFAJRaft Cluster
+
+```
+TC-RAFT-01  threeNodeCluster_leaderElectionAndLogReplication
+            Given: 3 個 RaftNodeManager on 127.0.0.1:18081/2/3
+            When:  start → wait leader → submit PostingCommand
+            Then:  leader elected in < 1s，journal replicated to all 3 nodes
+
+TC-RAFT-02  cluster_survivesFollowerRestart
+            Given: 3-node cluster with elected leader
+            When:  follower 關閉後重啟
+            Then:  follower 重新加入 cluster，無錯誤
+```
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
