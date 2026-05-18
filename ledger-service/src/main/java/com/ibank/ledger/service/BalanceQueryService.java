@@ -16,6 +16,7 @@ import java.util.List;
  */
 public class BalanceQueryService {
 
+
     private final BalanceStore balanceStore;
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
