@@ -121,11 +121,13 @@ Phase 2 – Apply（單一 Raft Command）:
 
 ## 4. 讀路徑詳述
 
-### 4.1 Balance Query
+### 4.1 Balance Query (CQRS Read Path)
 
-- 直接讀 Leader 的 in-memory State Machine
+- **任何 Raft 節點均可服務 Balance 查詢**（非 Leader 專屬）
+- 讀取本機 in-memory State Machine（Raft log 已複製到所有節點）
 - 不走 RocksDB，不走 MySQL
 - P95 目標：≤ 2ms（純記憶體讀取）
+- 一致性：最終一致性（Follower 可能落後 Leader 數毫秒，為 Raft log apply 延遲）
 
 ### 4.2 Journal / Audit / Reconciliation Query
 
@@ -133,11 +135,23 @@ Phase 2 – Apply（單一 Raft Command）:
 - 可能有輕微延遲（通常 < 1 秒）
 - P95 目標：≤ 100ms
 
-### 4.3 一致性保證
+### 4.3 CQRS 讀寫分離
 
-- Balance Query 是強一致性（讀 Leader in-memory，永遠最新）
-- Journal Query 是最終一致性（Learner 異步同步，可能略有延遲）
-- 對帳場景允許最終一致性（T+0 對帳允許分鐘級延遲）
+```
+寫路徑（僅 Leader）:
+  Client → ANY node → forward to Leader → Raft → StateMachine → RocksDB
+
+讀路徑（任何節點）:
+  Balance Query  → 本機 in-memory StateMachine（Raft 已複製）
+  Journal Query  → MySQL View Layer（Learner 異步同步）
+```
+
+| 操作 | 可服務節點 | 一致性 |
+|---|---|---|
+| Posting / Reversal / Adjustment | Leader only | 強一致性（Raft Quorum） |
+| Balance Query | 任何節點 | 最終一致性（Raft log apply 延遲，通常 < 5ms） |
+| Journal Query | 任何節點 | 最終一致性（Learner 同步，通常 < 1s） |
+| Reconciliation | 任何節點 | 最終一致性（T+0 日內完成） |
 
 ---
 

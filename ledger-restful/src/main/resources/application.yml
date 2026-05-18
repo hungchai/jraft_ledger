@@ -4,6 +4,19 @@ spring:
   threads:
     virtual:
       enabled: true
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
+    username: ${SPRING_DATASOURCE_USERNAME:ledger}
+    password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: never
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
 
 ledger:
   rocksdb:
@@ -19,10 +32,4 @@ ledger:
       posting-completion: ledger.posting.completion.v1
 
 server:
-  port: 8080
-
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics
+  port: ${SERVER_PORT:8080}

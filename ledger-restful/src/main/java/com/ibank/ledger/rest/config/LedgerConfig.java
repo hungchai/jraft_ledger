@@ -3,90 +3,116 @@ package com.ibank.ledger.rest.config;
 import com.ibank.ledger.domain.model.BalanceTypeConfig;
 import com.ibank.ledger.domain.model.NegativeSemantics;
 import com.ibank.ledger.domain.model.SignConvention;
+import com.ibank.ledger.raft.NodeRole;
+import com.ibank.ledger.rocksdb.OutboxStore;
+import com.ibank.ledger.rocksdb.RocksDBManager;
 import com.ibank.ledger.service.*;
 import com.ibank.ledger.statemachine.LedgerStateMachine;
 import com.ibank.ledger.store.AccountMetaStore;
 import com.ibank.ledger.store.BalanceStore;
 import com.ibank.ledger.store.BalanceTypeConfigStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import jakarta.annotation.PreDestroy;
+
 @Configuration
 public class LedgerConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(LedgerConfig.class);
+
+    private RocksDBManager rocksDBManager;
+
     @Bean
-    public BalanceStore balanceStore() {
-        return new BalanceStore();
+    public NodeRole nodeRole() {
+        NodeRole nr = new NodeRole();
+        String envNodeId = System.getenv("NODE_ID");
+        nr.setLeader(envNodeId != null ? envNodeId : "standalone", 0);
+        return nr;
     }
 
     @Bean
-    public AccountMetaStore accountMetaStore() {
-        return new AccountMetaStore();
+    public BalanceStore balanceStore() { return new BalanceStore(); }
+
+    @Bean
+    public AccountMetaStore accountMetaStore() { return new AccountMetaStore(); }
+
+    @Bean
+    public BalanceTypeConfigStore balanceTypeConfigStore() { return new BalanceTypeConfigStore(); }
+
+    @Bean
+    public RocksDBManager rocksDBManager() {
+        String dbPath = System.getenv().getOrDefault("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
+        this.rocksDBManager = new RocksDBManager(dbPath);
+        try {
+            this.rocksDBManager.open();
+            log.info("RocksDB opened at {}", dbPath);
+        } catch (Exception e) {
+            log.error("Failed to open RocksDB at {} — running in-memory only", dbPath, e);
+        }
+        return this.rocksDBManager;
     }
 
     @Bean
-    public BalanceTypeConfigStore balanceTypeConfigStore() {
-        return new BalanceTypeConfigStore();
+    public OutboxStore outboxStore(RocksDBManager rocksDBManager) {
+        return new OutboxStore(rocksDBManager);
     }
 
     @Bean
     public LedgerStateMachine ledgerStateMachine(
             BalanceStore balanceStore,
             AccountMetaStore accountMetaStore,
-            BalanceTypeConfigStore balanceTypeConfigStore) {
-        return new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
+            BalanceTypeConfigStore balanceTypeConfigStore,
+            RocksDBManager rocksDBManager,
+            OutboxStore outboxStore) {
+        LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
+        sm.setRocksDB(rocksDBManager);
+        sm.setOutboxStore(outboxStore);
+        sm.setPersistAfterApply(true); // snapshot after every write
+
+        // Restore from previous snapshot if exists
+        try {
+            sm.restoreFromSnapshot();
+            log.info("StateMachine restored from RocksDB snapshot");
+        } catch (Exception e) {
+            log.info("No snapshot found — starting fresh");
+        }
+        return sm;
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        if (rocksDBManager != null) {
+            try { rocksDBManager.close(); } catch (Exception ignored) {}
+        }
     }
 
     @Bean
-    public BalanceTypeConfigService balanceTypeConfigService() {
-        return new BalanceTypeConfigService();
-    }
+    public BalanceTypeConfigService balanceTypeConfigService() { return new BalanceTypeConfigService(); }
 
     @Bean
-    public AccountService accountService(
-            LedgerStateMachine stateMachine,
-            BalanceTypeConfigStore balanceTypeConfigStore) {
-        return new AccountService(stateMachine, balanceTypeConfigStore);
+    public AccountService accountService(LedgerStateMachine sm, BalanceTypeConfigStore cs) {
+        return new AccountService(sm, cs);
     }
-
     @Bean
-    public PostingService postingService(LedgerStateMachine stateMachine) {
-        return new PostingService(stateMachine);
-    }
-
+    public PostingService postingService(LedgerStateMachine sm) { return new PostingService(sm); }
     @Bean
-    public ReversalService reversalService(LedgerStateMachine stateMachine) {
-        return new ReversalService(stateMachine);
-    }
-
+    public ReversalService reversalService(LedgerStateMachine sm) { return new ReversalService(sm); }
     @Bean
-    public AdjustmentService adjustmentService(LedgerStateMachine stateMachine) {
-        return new AdjustmentService(stateMachine);
-    }
-
+    public AdjustmentService adjustmentService(LedgerStateMachine sm) { return new AdjustmentService(sm); }
     @Bean
-    public BalanceQueryService balanceQueryService(
-            BalanceStore balanceStore,
-            AccountMetaStore accountMetaStore,
-            BalanceTypeConfigStore balanceTypeConfigStore) {
-        return new BalanceQueryService(balanceStore, accountMetaStore, balanceTypeConfigStore);
+    public BalanceQueryService balanceQueryService(BalanceStore bs, AccountMetaStore ams, BalanceTypeConfigStore cs) {
+        return new BalanceQueryService(bs, ams, cs);
     }
-
     @Bean
-    public JournalQueryService journalQueryService(LedgerStateMachine stateMachine) {
-        return new JournalQueryService(stateMachine);
-    }
-
+    public JournalQueryService journalQueryService(LedgerStateMachine sm) { return new JournalQueryService(sm); }
     @Bean
-    public ReconciliationService reconciliationService(LedgerStateMachine stateMachine) {
-        return new ReconciliationService(stateMachine);
-    }
-
+    public ReconciliationService reconciliationService(LedgerStateMachine sm) { return new ReconciliationService(sm); }
     @Bean
-    public AccountingPeriodService accountingPeriodService() {
-        return new AccountingPeriodService();
-    }
+    public AccountingPeriodService accountingPeriodService() { return new AccountingPeriodService(); }
 
     @Bean
     CommandLineRunner initDefaultTypes(BalanceTypeConfigStore configStore,
@@ -99,7 +125,6 @@ public class LedgerConfig {
                     SignConvention.NORMAL_DEBIT, 1));
             configStore.put("BROKERAGE_BALANCE", new BalanceTypeConfig(
                     "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
-
             configService.registerType(new BalanceTypeConfig(
                     "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
             configService.registerType(new BalanceTypeConfig(

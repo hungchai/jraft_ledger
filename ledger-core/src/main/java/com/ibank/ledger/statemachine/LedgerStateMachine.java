@@ -48,9 +48,20 @@ public class LedgerStateMachine {
     private LedgerEventListener eventListener;
     private RocksDBManager rocksDB;
     private com.ibank.ledger.rocksdb.OutboxStore outboxStore;
+    private boolean persistAfterApply;
 
     public void setOutboxStore(com.ibank.ledger.rocksdb.OutboxStore outboxStore) {
         this.outboxStore = outboxStore;
+    }
+
+    public void setPersistAfterApply(boolean persist) {
+        this.persistAfterApply = persist;
+    }
+
+    private void persistIfNeeded() {
+        if (persistAfterApply && rocksDB != null) {
+            try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
+        }
     }
     private static final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
@@ -336,6 +347,7 @@ public class LedgerStateMachine {
         idempotencyStore.put(cmd.requestId(),
                 IdempotencyEntry.completed(cmd.requestId(), journalId, now));
 
+        persistIfNeeded();
         return CommandResult.completed(journalId);
     }
 
@@ -523,6 +535,7 @@ public class LedgerStateMachine {
         idempotencyStore.put(cmd.requestId(),
                 IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now));
 
+        persistIfNeeded();
         return CommandResult.completed(reversalJournalId);
     }
 

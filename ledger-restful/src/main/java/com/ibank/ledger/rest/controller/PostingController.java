@@ -3,6 +3,7 @@ package com.ibank.ledger.rest.controller;
 import com.ibank.ledger.domain.command.CommandResult;
 import com.ibank.ledger.domain.command.PostingCommand;
 import com.ibank.ledger.domain.model.EntryType;
+import com.ibank.ledger.raft.NodeRole;
 import com.ibank.ledger.service.PostingService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -17,13 +18,23 @@ import java.util.Map;
 public class PostingController {
 
     private final PostingService postingService;
+    private final NodeRole nodeRole;
 
-    public PostingController(PostingService postingService) {
+    public PostingController(PostingService postingService, NodeRole nodeRole) {
         this.postingService = postingService;
+        this.nodeRole = nodeRole;
     }
 
     @PostMapping
     public ResponseEntity<?> post(@RequestBody Map<String, Object> body) {
+        // Reject writes on non-leader nodes
+        if (!nodeRole.isLeader()) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "status", "REJECTED",
+                    "errorCodes", List.of("NOT_LEADER"),
+                    "leaderHint", "Query /health on each node to find the leader"
+            ));
+        }
         String requestId = (String) body.get("requestId");
         String businessEventType = (String) body.get("businessEventType");
         String businessEventRef = (String) body.get("businessEventRef");
