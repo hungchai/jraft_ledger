@@ -38,39 +38,44 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 - 生產驗證（Ant Financial 同款技術棧）
 - 支持 Learner 角色，適用於 CQRS 讀寫分離
 
-### 2.3 整體架構
+### 2.3 整體架構 (v0.3 — 新增 Projection Service)
 
 ```
-Client Request
-      │
-      ▼
-┌─────────────────────────────────────────────────┐
-│              Ledger Write Domain                 │
-│                                                  │
-│  ┌────────────┐   ┌──────────────────────────┐  │
-│  │   Network  │   │       Raft Cluster        │  │
-│  │   Layer    │   │  ┌────────┐  ┌─────────┐ │  │
-│  │ (gRPC/HTTP)│   │  │ Leader │  │Follower │ │  │
-│  └─────┬──────┘   │  │        │  │         │ │  │
-│        │          │  │RocksDB │  │ RocksDB │ │  │
-│  ┌─────▼──────┐   │  └────────┘  └─────────┘ │  │
-│  │   Ledger   │◄──►       ↕ Raft Log          │  │
-│  │   Layer    │   │  ┌─────────┐              │  │
-│  │            │   │  │ Learner │ non-voting   │  │
-│  │  Account   │   │  └────┬────┘              │  │
-│  │  Queue     │   └───────│───────────────────┘  │
-│  │  (per acct)│           │ async push            │
-│  │            │           ▼                      │
-│  │  State     │   ┌───────────────┐              │
-│  │  Machine   │   │  View Layer   │              │
-│  │ (in-memory │   │  (MySQL)      │              │
-│  │  balance)  │   │  journal_line │              │
-│  └────────────┘   │  account_bal  │              │
-│                   │  snapshot     │              │
-└───────────────────┴───────────────┴──────────────┘
-         ↑ Write                  ↑ Read
-    Posting / Rev / Adj      Journal / Recon / Report
+                          POST /ledger/postings
+                                │
+               ┌────────────────┼────────────────┐
+               ▼                ▼                ▼
+         ledger-node-1     ledger-node-2     ledger-node-3
+         (Leader)           (Follower)        (Follower)
+         StateMachine       StateMachine      StateMachine
+         RocksDB            RocksDB           RocksDB
+               │                │                │
+               └────────┬───────┘                │
+                        │ Raft Log               │
+                        ▼                        │
+                 ┌──────────────┐                │
+                 │    Kafka     │                │
+                 │  Event Bus   │                │
+                 └──────┬───────┘                │
+                        │                        │
+                        ▼                        │
+                 ┌──────────────────────────────┐│
+                 │  Projection Service :8089     ││
+                 │  (Kafka Consumer → MySQL)     ││
+                 └──────────────┬───────────────┘│
+                                │                │
+                                ▼                │
+                         ┌──────────────┐        │
+                         │  MySQL :3306 │        │
+                         │ (View Layer) │◄───────┘
+                         └──────────────┘  Journal/Recon reads
+
+    Writes:  Client → Leader → StateMachine → RocksDB + Kafka
+    Reads:   Balance → Any node (in-memory StateMachine)
+             Journal → MySQL (via Projection Service)
 ```
+
+> **v0.3 變更摘要**：架構圖新增 Kafka Event Bus + Projection Service。Learner 同步 MySQL 路徑替換為 Kafka → Projection Service 模式，實現完整 CQRS 讀寫分離。
 
 ---
 
@@ -152,6 +157,40 @@ Phase 2 – Apply（單一 Raft Command）:
 | Balance Query | 任何節點 | 最終一致性（Raft log apply 延遲，通常 < 5ms） |
 | Journal Query | 任何節點 | 最終一致性（Learner 同步，通常 < 1s） |
 | Reconciliation | 任何節點 | 最終一致性（T+0 日內完成） |
+
+---
+
+## 4.4 Projection Service（CQRS View Layer Sync）【v0.3 新增】
+
+Projection Service 是獨立的 Kafka 消費者服務，將帳務事件非同步投影到 MySQL View Layer：
+
+```
+Kafka Topic: ledger.balance.change.v1
+       │
+       ▼
+ProjectionConsumer.onBalanceChange(message)
+       │
+       ├── 1. 反序列化 BalanceChangeEvent JSON
+       ├── 2. INSERT INTO journal (idempotent: ON DUPLICATE KEY skip)
+       ├── 3. INSERT INTO journal_line
+       └── 4. 日誌記錄
+```
+
+**設計決策**：
+
+| 決策 | 理由 |
+|---|---|
+| 獨立部署（非嵌入 Ledger node） | 解耦寫路徑與讀路徑；Projection crash 不影響入帳 |
+| Kafka consumer group | 支援多實例水平擴展，同一 partition 內保證順序 |
+| At-least-once + idempotent insert | Kafka 重複消費時，MySQL 唯一鍵保證不重複寫入 |
+| 僅投影 journal / journal_line | Balance 查詢讀 in-memory StateMachine（強一致）；不需投影 balance 到 MySQL |
+
+**為什麼不用 Raft Learner 直接寫 MySQL？**
+
+Learner 同步方案需要 Learner 節點內嵌 MyBatis/DataSource，耦合 Raft 層與 DB 層。Kafka 解耦方案：
+- 寫路徑不碰 MySQL（零延遲影響）
+- Projection 可獨立擴展、重啟、升級
+- 下游多個消費者（Risk Engine、VAMP、通知服務）可訂閱同一 Kafka topic
 
 ---
 
