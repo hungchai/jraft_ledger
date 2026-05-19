@@ -1,9 +1,12 @@
 # NFR — 非功能需求規格
 
-**文件版本**: v0.1  
-**功能**: 非功能需求（NFR）  
-**系統**: Next-Gen Internal Ledger Platform  
+**文件版本**: v0.3
+**功能**: 非功能需求（NFR）
+**系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
+
+> **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）。
+> **v0.2 變更摘要**：新增 NFR-13（JVM & GC）、NFR-14（Account Queue）、NFR-15（accountSeq Overflow Policy）；NFR-9 Observability 補充 GC pause 告警和 accountSeq gap 告警。
 
 ---
 
@@ -96,13 +99,14 @@
 
 ---
 
-## 9. 可觀測性（Observability）
+## 9. 可觀測性（Observability）【v0.2 更新】
 
 | 要求 | 說明 |
 |---|---|
 | 分布式追蹤 | 所有請求帶 traceId / spanId，接入 Jaeger / Zipkin |
-| Metrics | Prometheus 暴露 TPS、P50/P95/P99 延遲、Queue 積壓、Raft term、Learner lag |
-| 告警 | Posting P99 > 50ms、Queue 積壓 > 1000、Learner lag > 10s、L1 對帳失敗 → PagerDuty |
+| Metrics | Prometheus 暴露 TPS、P50/P95/P99 延遲、Queue 積壓、Raft term、Learner lag、**GC pause time、Account Queue depth per account** |
+| 告警（原有） | Posting P99 > 50ms、Queue 積壓 > 1000、Learner lag > 10s、L1 對帳失敗 → PagerDuty |
+| 告警（新增） | **任意單次 GC pause > 5ms → PagerDuty**；**BalanceChangeEvent accountSeq gap 偵測失敗 → PagerDuty**；**任意 accountSeq ≥ Long.MAX_VALUE × 80% → PagerDuty（理論預警，永遠不應觸發）** |
 | 日誌 | 結構化 JSON 日誌，帶 journalId、requestId、accountId、traceId |
 | 每筆帳務可追溯 | 任意餘額變化可在 5 分鐘內追到 source event、operator、rule version、journal chain |
 
@@ -144,3 +148,253 @@
 | View Layer DB | MySQL 8.0+（MyBatis，禁止 ORM） |
 | 消息總線 | Kafka（Learner 同步輸出帳務事件供下游系統消費） |
 | 禁止使用 | Hibernate / JPA / Redis（寫路徑）/ 直接寫 MySQL 繞過 Raft |
+
+---
+
+## 13. JVM & GC【v0.2 新增】
+
+P95 ≤ 3ms 的目標在 10,000 TPS 下，GC pause 是主要的不可控延遲來源。預設 G1GC 的 pause 目標為 200ms，遠超整個 Posting P95 預算，必須強制指定低延遲 GC。
+
+### 13.1 GC Collector
+
+| 要求 | 規格 |
+|---|---|
+| **強制使用** | ZGC（`-XX:+UseZGC`）或 Shenandoah（`-XX:+UseShenandoahGC`），二選一，**禁止使用 G1GC / ParallelGC** |
+| 推薦選擇 | **ZGC**（Java 21 Production-ready，concurrent，pause < 1ms） |
+| 備選 | Shenandoah（pause 特性相近，適合較小 heap） |
+| **禁止** | G1GC（默認）、ParallelGC — pause 不可預測，無法保證 P99 ≤ 10ms |
+
+### 13.2 JVM 啟動參數（State Machine / Raft Leader 節點）
+
+```bash
+# GC
+-XX:+UseZGC
+-XX:MaxGCPauseMillis=1          # ZGC concurrent，pause 目標 < 1ms
+
+# Heap：固定大小，避免 resize 觸發 Full GC
+-Xms8g
+-Xmx8g
+
+# GC Logging（接入 Prometheus GCEasy / JVM metrics exporter）
+-Xlog:gc*:file=/var/log/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+
+# Virtual Thread（Java 21）
+# 不需額外參數，Spring Boot 3 + Virtual Threads 默認啟用
+```
+
+### 13.3 GC Pause 預算
+
+| 場景 | 最大允許 GC Pause | 說明 |
+|---|---|---|
+| 正常運行 | ≤ 1ms（ZGC concurrent） | 不影響 Posting P95 |
+| 最壞情況 | ≤ 5ms | 超過此值觸發 PagerDuty 告警 |
+| **禁止** | > 10ms（P99 budget） | GC pause 單次超過 P99 預算，即屬配置錯誤 |
+
+### 13.4 Hot Path 物件分配原則
+
+State Machine apply() 在 10,000 TPS 峰值下每秒執行 10,000 次，hot path 的 heap allocation 直接影響 GC 頻率：
+
+| 原則 | 說明 |
+|---|---|
+| **BalanceEntry 複用** | Account Worker 線程（Virtual Thread，per-account 串行）可使用 ThreadLocal pool 複用 `BalanceEntry`，避免每次 apply 產生新物件 |
+| **WriteBatch 序列化 Buffer 複用** | RocksDB `WriteBatch` 序列化使用 ThreadLocal `ByteBuffer`（direct，off-heap），避免每次 apply 分配 `byte[]` |
+| **Immutable record 設計** | `AccountBalanceKey` 使用 Java record，JVM 可做 escape analysis 優化，減少 heap 分配 |
+| **避免 boxing** | balanceStore / idempotencyStore 的 value 使用 primitive-friendly 結構，避免 `Long` / `Double` autoboxing |
+
+### 13.5 GC Metrics（Prometheus）
+
+```
+# 必須暴露的 JVM GC metrics：
+jvm_gc_pause_seconds{cause, gc}         # 每次 GC pause 時長
+jvm_gc_pause_seconds_max                # 最近最大 pause
+jvm_memory_used_bytes{area="heap"}      # 堆使用量
+jvm_memory_max_bytes{area="heap"}       # 堆上限
+jvm_gc_live_data_size_bytes             # 存活數據大小（ZGC）
+
+# 告警規則（Prometheus AlertManager）：
+ALERT GCPauseTooLong
+  IF jvm_gc_pause_seconds_max > 0.005   # 5ms
+  FOR 1m
+  SEVERITY critical
+  ANNOTATIONS { summary = "GC pause exceeded 5ms, P99 at risk" }
+```
+
+---
+
+## 14. Account Queue 設計約束【v0.2 新增】
+
+Account Queue 是 Ledger 寫路徑的核心排隊機制，每個帳戶一條獨立 queue，保證 per-account 串行化。
+
+### 14.1 當前實現
+
+```
+Queue 類型：java.util.concurrent.LinkedBlockingQueue
+Worker：    Java 21 Virtual Thread（每個 Account Queue 一個 Virtual Thread worker）
+部署方式：  per-account，動態創建，inactive 帳戶的 queue 在無請求時自動回收
+```
+
+### 14.2 Queue 容量設計
+
+| 參數 | 值 | 說明 |
+|---|---|---|
+| 單帳戶 Queue 容量上限 | 1,000 個請求 | 超過觸發背壓（HTTP 429 / gRPC RESOURCE_EXHAUSTED） |
+| Global Request Queue 容量 | 50,000 個請求 | 所有帳戶入口 queue 緩衝，按 accountId routing 前的等待 |
+| Queue 積壓告警閾值 | 任意 account queue depth > 500 持續 30s | 表示該帳戶請求速率超過 State Machine 處理能力 |
+| Queue 滿時行為 | **快速失敗**，立即返回 HTTP 429，不阻塞 caller | 避免 caller 端 timeout 堆積 |
+
+### 14.3 升級路徑（如 GC 壓力過大）
+
+`LinkedBlockingQueue` 每次 `offer()` 分配一個 `Node<E>` 物件，在 10,000 TPS 峰值下每秒產生大量短命物件。若 GC 調優後仍無法滿足 P99，可按以下路徑升級，**無需修改 Raft 或 State Machine 架構**：
+
+```
+Phase 1（默認）: LinkedBlockingQueue
+  → 簡單，夠用，Java 標準庫
+
+Phase 2（如 GC 壓力可見）: JCTools MpscArrayQueue
+  → Lock-free MPSC（Multi-Producer Single-Consumer）
+  → 無 Node 物件，減少 GC allocation ~60%
+  → 預分配固定大小陣列，避免動態擴容
+  → API 相近，改動最小
+
+Phase 3（如 Phase 2 仍不足）: Agrona ManyToOneConcurrentArrayQueue
+  → Off-heap，完全 zero allocation
+  → 需引入 Agrona 依賴，複雜度上升
+```
+
+> **當前選擇為 Phase 1**，Phase 2 / 3 僅在性能測試（TC-NFR-01 / TC-NFR-02）未達標時啟動。
+
+### 14.4 背壓（Backpressure）機制
+
+```
+Client → HTTP/gRPC → Global Request Queue
+                              │
+                     Queue full (>50,000)?
+                              │ YES
+                              ▼
+                     HTTP 429 / RESOURCE_EXHAUSTED（立即返回）
+
+                              │ NO
+                              ▼
+                     Account Queue routing（by accountId）
+                              │
+                     Account Queue full (>1,000)?
+                              │ YES
+                              ▼
+                     HTTP 429（單帳戶背壓）
+
+                              │ NO
+                              ▼
+                     Account Worker → Raft → State Machine
+```
+
+---
+
+## 15. accountSeq Overflow Policy【v0.2 新增】
+
+`accountSeq` 是 per-account per-balanceType per-currency 的單調遞增序號，用於 BalanceChangeEvent 的下游 gap 偵測。
+
+### 15.1 溢出分析
+
+```
+類型：long（64-bit signed，max = 9,223,372,036,854,775,807，約 9.2 × 10¹⁸）
+
+最壞場景估算（hotspot 帳戶 COMPANY_FX_ACC）：
+  10,000 TPS × 1 JournalLine / posting = 10,000 seq 遞增 / 秒
+  溢出時間 = 9.2 × 10¹⁸ ÷ 10,000 ÷ 86,400 ÷ 365 ≈ 29,247,120 年
+
+結論：long 在任何可預見的業務場景下均不會溢出。
+```
+
+### 15.2 設計決策
+
+| 決策 | 理由 |
+|---|---|
+| **使用 `long`，不使用 `BigInteger`** | 29+ 百萬年壽命，無實際溢出風險；`BigInteger` 引入 heap allocation 和序列化複雜度 |
+| **禁止 wrap-around（迴繞）** | 若 `long` 溢出後從負數開始，下游 consumer 會誤判為 gap，觸發大量誤報告警，不可接受 |
+| **不使用 unsigned long** | Java 不原生支持 unsigned long；`Long.compareUnsigned()` 雖可用，但增加代碼理解成本，收益不足 |
+
+### 15.3 預警機制
+
+雖然溢出不可能發生，仍需一條告警作為安全網：
+
+```java
+// State Machine apply() 中，accountSeq 遞增後執行一次檢查
+private static final long OVERFLOW_WARN_THRESHOLD = Long.MAX_VALUE / 100 * 80;
+// ≈ 7.37 × 10¹⁸，距溢出還有約 5.86 × 10¹⁸（~18,636,500 年）
+
+if (nextSeq >= OVERFLOW_WARN_THRESHOLD) {
+    // 這條 log 在正常情況下永遠不會出現
+    log.error("[SEQ_OVERFLOW_WARN] accountId={} balanceType={} currency={} seq={}",
+        key.accountId(), key.balanceType(), key.currency(), nextSeq);
+    // 同時觸發 PagerDuty（見 NFR-9 告警規則）
+}
+```
+
+```
+# Prometheus 告警規則
+ALERT AccountSeqOverflowRisk
+  IF ledger_account_seq_max > 7370000000000000000   # 80% of Long.MAX_VALUE
+  FOR 1m
+  SEVERITY critical
+  ANNOTATIONS { summary = "accountSeq approaching Long.MAX_VALUE — investigate immediately" }
+```
+
+---
+
+## 16. Raft 集群規模與容錯【v0.3 新增】
+
+Raft 協議的數據安全與一致性建基於過半數決（Quorum）機制：任何日誌提交必須獲得集群內超過半數節點的成功複製與確認。系統總節點數遵循 **N = 2F + 1** 公式，其中 N 為總節點數，F 為可容忍的故障節點數量。
+
+### 16.1 最小配置
+
+| 總 Voting Nodes | Follower 數 | Quorum | 可容忍故障 | 適用場景 |
+|----------------|------------|--------|-----------|---------|
+| 3 | 2 | 2 | 1 台 | 開發 / 測試 / 低風險環境 |
+| 5 | 4 | 3 | 2 台 | **金融級生產環境** |
+
+> **2 節點無法運作。** 2 節點的 Quorum = 2，任意 1 台故障即失去多數派，Leader 無法提交任何新日誌，系統不可用。Raft 的最小實用配置為 3 Voting Nodes。
+
+### 16.2 生產推薦配置：5 節點
+
+```
+3 Voting Nodes（1 Leader + 2 Follower）
+  ├─ 參與 Raft 投票和日誌複製
+  ├─ 跨 3 個 AZ 部署，每個 AZ 一個 voting node
+  └─ Quorum = 3，允許 2 個 voting node 同時故障
+
+2 Learner Nodes（non-voting）
+  ├─ 不參與投票，不影響 Quorum 計算
+  ├─ 異步同步 Raft Log → MySQL View Layer
+  └─ 可部署於異地 DC 作為 DR 節點（可選）
+```
+
+| 對比維度 | 3 Voting Nodes | 5 Nodes（3 Voting + 2 Learner） |
+|---------|---------------|-------------------------------|
+| Quorum | 2 | 3 |
+| 容忍 voting node 故障 | 1 台 | 2 台 |
+| 滾動升級 | 風險較高（僅 1 台冗餘） | 可逐一重啟，不影響 Quorum |
+| AZ 級故障 | 允許 1 個 AZ 故障 | 允許 2 個 AZ 故障（含 voting） |
+| Learner 水平擴展 | 需額外部署 | 內建 2 Learner，可按需擴展 |
+| 適用場景 | 開發 / 測試 | **金融級生產** |
+
+### 16.3 邊際收益遞減
+
+超過 5 Voting Nodes 後，每增加 2 個節點才多容忍 1 個故障，但代價呈非線性增長：
+
+| 節點數增加 | 額外容錯收益 | 代價 |
+|-----------|------------|------|
+| 3 → 5 | +1 容錯（1 → 2） | 網路開銷 +67%，可接受 |
+| 5 → 7 | +1 容錯（2 → 3） | 網路開銷 +40%，Quorum 增大，選舉競爭概率上升 |
+| 7 → 9 | +1 容錯（3 → 4） | 複製延遲明顯增加，運維複雜度顯著 |
+
+> **結論：5 Voting Nodes（可配若干 Learner）是金融場景的最佳平衡點。** 7+ Voting Nodes 僅在極端可用性要求（≥ 99.999%）時考慮，且建議配合 Multi-Raft-Group 分片以控制單集群規模。
+
+### 16.4 與其他 NFR 的關聯
+
+| 關聯章節 | 關係 |
+|---------|------|
+| NFR-3 可用性 | 集群規模直接決定可用性目標是否可達成（≥ 99.99% 需 ≥ 3 Voting Nodes 跨 AZ） |
+| NFR-4 數據持久性 | Quorum commit 保證 RPO = 0，節點數越多副本越多 |
+| NFR-5 一致性 | 強一致性依賴 Quorum 機制，投票節點數決定一致性安全邊界 |
+| NFR-11 災難恢復 | Learner 可部署為異地 DR 節點，不影響線上 Quorum |
+| ADR-001 §5.1 | 集群配置的架構決策背景與 Raft 庫選型理由 |

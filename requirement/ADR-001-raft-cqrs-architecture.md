@@ -1,9 +1,11 @@
 # ADR-001 Ledger 核心架構決策：Raft + CQRS + Account-Level Queue
 
-**決策狀態**: Accepted  
-**決策日期**: 2026-05-16  
-**決策人**: Ledger Platform Team  
+**決策狀態**: Accepted
+**決策日期**: 2026-05-16
+**決策人**: Ledger Platform Team
 **影響範圍**: F-002 Posting, F-003 Manual Adjustment, F-004 Reversal, F-005 Balance Query, F-006 Journal Query, F-007 Reconciliation, F-008 State Machine
+
+> **v0.2 變更摘要**：Section 3.2 補充 Multi-Account Coordinator 完整實現規格（Leader 選舉機制、Timeout 處理、N 帳戶通用設計）；新增 Section 3.3 Multi-Account Task 資料結構；Section 8 新增風險項。
 
 ---
 
@@ -38,44 +40,39 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 - 生產驗證（Ant Financial 同款技術棧）
 - 支持 Learner 角色，適用於 CQRS 讀寫分離
 
-### 2.3 整體架構 (v0.3 — 新增 Projection Service)
+### 2.3 整體架構
 
 ```
-                          POST /ledger/postings
-                                │
-               ┌────────────────┼────────────────┐
-               ▼                ▼                ▼
-         ledger-node-1     ledger-node-2     ledger-node-3
-         (Leader)           (Follower)        (Follower)
-         StateMachine       StateMachine      StateMachine
-         RocksDB            RocksDB           RocksDB
-               │                │                │
-               └────────┬───────┘                │
-                        │ Raft Log               │
-                        ▼                        │
-                 ┌──────────────┐                │
-                 │    Kafka     │                │
-                 │  Event Bus   │                │
-                 └──────┬───────┘                │
-                        │                        │
-                        ▼                        │
-                 ┌──────────────────────────────┐│
-                 │  Projection Service :8089     ││
-                 │  (Kafka Consumer → MySQL)     ││
-                 └──────────────┬───────────────┘│
-                                │                │
-                                ▼                │
-                         ┌──────────────┐        │
-                         │  MySQL :3306 │        │
-                         │ (View Layer) │◄───────┘
-                         └──────────────┘  Journal/Recon reads
-
-    Writes:  Client → Leader → StateMachine → RocksDB + Kafka
-    Reads:   Balance → Any node (in-memory StateMachine)
-             Journal → MySQL (via Projection Service)
+Client Request
+      │
+      ▼
+┌─────────────────────────────────────────────────┐
+│              Ledger Write Domain                 │
+│                                                  │
+│  ┌────────────┐   ┌──────────────────────────┐  │
+│  │   Network  │   │       Raft Cluster        │  │
+│  │   Layer    │   │  ┌────────┐  ┌─────────┐ │  │
+│  │ (gRPC/HTTP)│   │  │ Leader │  │Follower │ │  │
+│  └─────┬──────┘   │  │        │  │         │ │  │
+│        │          │  │RocksDB │  │ RocksDB │ │  │
+│  ┌─────▼──────┐   │  └────────┘  └─────────┘ │  │
+│  │   Ledger   │◄──►       ↕ Raft Log          │  │
+│  │   Layer    │   │  ┌─────────┐              │  │
+│  │            │   │  │ Learner │ non-voting   │  │
+│  │  Account   │   │  └────┬────┘              │  │
+│  │  Queue     │   └───────│───────────────────┘  │
+│  │  (per acct)│           │ async push            │
+│  │            │           ▼                      │
+│  │  State     │   ┌───────────────┐              │
+│  │  Machine   │   │  View Layer   │              │
+│  │ (in-memory │   │  (MySQL)      │              │
+│  │  balance)  │   │  journal_line │              │
+│  └────────────┘   │  account_bal  │              │
+│                   │  snapshot     │              │
+└───────────────────┴───────────────┴──────────────┘
+         ↑ Write                  ↑ Read
+    Posting / Rev / Adj      Journal / Recon / Report
 ```
-
-> **v0.3 變更摘要**：架構圖新增 Kafka Event Bus + Projection Service。Learner 同步 MySQL 路徑替換為 Kafka → Projection Service 模式，實現完整 CQRS 讀寫分離。
 
 ---
 
@@ -102,37 +99,145 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 7. Response          通過 response_queue 返回結果給 client
 ```
 
-### 3.2 多帳戶 Journal 的原子性
+### 3.2 多帳戶 Journal 的原子性【v0.2 詳化】
 
-RFQ 場景涉及 CLIENT_ACC + COMPANY_ACC 兩個帳戶：
+RFQ 場景涉及 CLIENT_ACC + COMPANY_ACC 兩個（或以上）帳戶。
+
+#### 核心設計原則：Queue 即 Lock
+
+每個帳戶一條 `LinkedBlockingQueue`，由單一 Virtual Thread 串行消費。**沒有顯式 Lock / Mutex / synchronized**。Queue 本身保證同一帳戶在任意時刻只有一筆交易在執行，鎖即隊列位置。
+
+#### 死鎖預防：accountId 升序排列
+
+多帳戶場景必須按 accountId **字典序升序**依次提交 task，確保所有請求以相同順序獲取「Queue 位置」，消除循環等待（Resource Ordering 算法）：
 
 ```
-問題：兩個帳戶可能在不同 Account Queue，如何保證原子？
+✅ 正確：所有請求先佔 COMPANY_FX_ACC queue，再佔 CLIENT_ACC_001 queue
+❌ 錯誤：不排序 → 可能互相等待 → 死鎖
+```
 
-解法：Two-Phase Locking via Account Queue Coordinator
+#### Two-Phase 協調流程
 
-Phase 1 – Lock（按 accountId 升序排列，避免死鎖）:
-  1. 把 CLIENT_ACC 和 COMPANY_ACC 按 ID 升序排列
-  2. 依序提交到各自的 Account Queue 並取得「鎖票」
-  3. 兩個 queue 都就緒後，一起提交一筆 Multi-Account Raft Command
+```
+Phase 1 – 佔位（Coordinator 負責）
+  1. 提取所有涉及 accountId，按字典序升序排列
+  2. 建立 MultiAccountTask（含 CountDownLatch + AtomicInteger + resultLatch）
+  3. 依序把同一個 MultiAccountTask 推入各帳戶的 Account Queue
+     → Queue 滿（> 1000）時立即返回 HTTP 429，不阻塞
 
-Phase 2 – Apply（單一 Raft Command）:
-  一筆 Raft Command 包含所有 JournalLine
-  State Machine apply 時，一次性更新所有帳戶 in-memory balance
-  → 對外表現為原子
+Phase 2 – 執行（Account Worker 負責）
+  每個 Account Worker 取出 MultiAccountTask 後：
+  1. 調用 task.markReadyAndCheckLeader()
+     → AtomicInteger 遞增，返回「是否最後一個 ready」
+  2. 調用 task.readyLatch.await(timeout=30ms)
+     → 等待所有帳戶 Worker 都 ready
+     → 超時 → 整筆請求 TIMEOUT_WAITING_ACCOUNTS，見 Timeout 處理
+  3. 若 isLeader：提交 RaftCommand，拿到結果，task.setResult()，task.resultLatch.countDown()
+     若非 Leader：task.resultLatch.await(timeout=100ms)，拿 task.getResult()
+  4. 返回結果給 caller response_queue
+```
+
+#### Leader Worker 選舉：固定為排序後最後一個帳戶的 Worker
+
+```java
+// Coordinator 建立 task 時確定，行為完全確定、易於追蹤
+class MultiAccountTask {
+    private final String leaderAccountId;  // sortedAccounts 的最後一個
+
+    MultiAccountTask(List<String> sortedAccounts, RaftCommand command) {
+        // 例：[COMPANY_FX_ACC, CLIENT_ACC_001] → leader = CLIENT_ACC_001
+        this.leaderAccountId = sortedAccounts.get(sortedAccounts.size() - 1);
+        this.totalAccounts   = sortedAccounts.size();
+        this.readyLatch      = new CountDownLatch(totalAccounts);
+        this.resultLatch     = new CountDownLatch(1);
+        this.readyCount      = new AtomicInteger(0);
+        this.command         = command;
+    }
+
+    // 每個 Worker 調用一次，返回 true = 我是 Leader
+    boolean markReadyAndCheckLeader(String myAccountId) {
+        readyCount.incrementAndGet();
+        readyLatch.countDown();
+        return myAccountId.equals(leaderAccountId);
+    }
+}
+```
+
+#### Timeout 處理
+
+```
+readyLatch.await 超時（預設 30ms）：
+  原因：某帳戶 Queue 積壓嚴重，Worker 遲遲無法取出 task
+  處理：
+    1. 先 ready 的 Worker 調用 task.cancel()
+    2. 所有 Worker 收到 cancelled 信號，立即返回 TIMEOUT_WAITING_ACCOUNTS
+    3. 從各自的 Queue 中標記此 task 已作廢（後來的 Worker 取出後直接跳過）
+    4. Coordinator 返回 HTTP 503，caller 可憑 requestId 重試（冪等保障）
+
+resultLatch.await 超時（預設 100ms）：
+  原因：Raft commit 超時（Leader 宕機 / 網絡分區）
+  處理：
+    1. 非 Leader Worker 返回 RAFT_TIMEOUT
+    2. Coordinator 返回 HTTP 503，caller 重試
+    3. 冪等機制保證重試安全（requestId 相同，不重複入帳）
+```
+
+### 3.3 MultiAccountTask 資料結構【v0.2 新增】
+
+```java
+class MultiAccountTask {
+    // 輸入
+    final String              requestId;
+    final RaftCommand         command;
+    final String              leaderAccountId;   // 排序後最後一個 accountId
+    final int                 totalAccounts;
+
+    // 協調
+    final CountDownLatch      readyLatch;        // 等所有 Worker ready
+    final CountDownLatch      resultLatch;       // 等 Leader 放結果
+    final AtomicInteger       readyCount;        // 已 ready 的 Worker 數
+    volatile boolean          cancelled = false; // timeout 取消標誌
+
+    // 結果（Leader 寫入，其他 Worker 讀取）
+    volatile CommandResult    result;
+
+    // Worker 調用：標記自己 ready，返回是否是 Leader
+    boolean markReadyAndCheckLeader(String myAccountId) {
+        readyCount.incrementAndGet();
+        readyLatch.countDown();
+        return myAccountId.equals(leaderAccountId);
+    }
+
+    void setResult(CommandResult r) {
+        this.result = r;
+        resultLatch.countDown();
+    }
+
+    CommandResult getResult() throws InterruptedException, TimeoutException {
+        if (!resultLatch.await(100, MILLISECONDS)) {
+            throw new TimeoutException("Raft result timeout");
+        }
+        return result;
+    }
+
+    void cancel() {
+        this.cancelled = true;
+        // 釋放所有等待中的 await，讓 Worker 儘快退出
+        while (readyLatch.getCount() > 0)  readyLatch.countDown();
+        while (resultLatch.getCount() > 0) resultLatch.countDown();
+    }
+}
 ```
 
 ---
 
 ## 4. 讀路徑詳述
 
-### 4.1 Balance Query (CQRS Read Path)
+### 4.1 Balance Query
 
-- **任何 Raft 節點均可服務 Balance 查詢**（非 Leader 專屬）
-- 讀取本機 in-memory State Machine（Raft log 已複製到所有節點）
+- 直接讀 Leader 的 in-memory State Machine
 - 不走 RocksDB，不走 MySQL
 - P95 目標：≤ 2ms（純記憶體讀取）
-- 一致性：最終一致性（Follower 可能落後 Leader 數毫秒，為 Raft log apply 延遲）
 
 ### 4.2 Journal / Audit / Reconciliation Query
 
@@ -140,57 +245,11 @@ Phase 2 – Apply（單一 Raft Command）:
 - 可能有輕微延遲（通常 < 1 秒）
 - P95 目標：≤ 100ms
 
-### 4.3 CQRS 讀寫分離
+### 4.3 一致性保證
 
-```
-寫路徑（僅 Leader）:
-  Client → ANY node → forward to Leader → Raft → StateMachine → RocksDB
-
-讀路徑（任何節點）:
-  Balance Query  → 本機 in-memory StateMachine（Raft 已複製）
-  Journal Query  → MySQL View Layer（Learner 異步同步）
-```
-
-| 操作 | 可服務節點 | 一致性 |
-|---|---|---|
-| Posting / Reversal / Adjustment | Leader only | 強一致性（Raft Quorum） |
-| Balance Query | 任何節點 | 最終一致性（Raft log apply 延遲，通常 < 5ms） |
-| Journal Query | 任何節點 | 最終一致性（Learner 同步，通常 < 1s） |
-| Reconciliation | 任何節點 | 最終一致性（T+0 日內完成） |
-
----
-
-## 4.4 Projection Service（CQRS View Layer Sync）【v0.3 新增】
-
-Projection Service 是獨立的 Kafka 消費者服務，將帳務事件非同步投影到 MySQL View Layer：
-
-```
-Kafka Topic: ledger.balance.change.v1
-       │
-       ▼
-ProjectionConsumer.onBalanceChange(message)
-       │
-       ├── 1. 反序列化 BalanceChangeEvent JSON
-       ├── 2. INSERT INTO journal (idempotent: ON DUPLICATE KEY skip)
-       ├── 3. INSERT INTO journal_line
-       └── 4. 日誌記錄
-```
-
-**設計決策**：
-
-| 決策 | 理由 |
-|---|---|
-| 獨立部署（非嵌入 Ledger node） | 解耦寫路徑與讀路徑；Projection crash 不影響入帳 |
-| Kafka consumer group | 支援多實例水平擴展，同一 partition 內保證順序 |
-| At-least-once + idempotent insert | Kafka 重複消費時，MySQL 唯一鍵保證不重複寫入 |
-| 僅投影 journal / journal_line | Balance 查詢讀 in-memory StateMachine（強一致）；不需投影 balance 到 MySQL |
-
-**為什麼不用 Raft Learner 直接寫 MySQL？**
-
-Learner 同步方案需要 Learner 節點內嵌 MyBatis/DataSource，耦合 Raft 層與 DB 層。Kafka 解耦方案：
-- 寫路徑不碰 MySQL（零延遲影響）
-- Projection 可獨立擴展、重啟、升級
-- 下游多個消費者（Risk Engine、VAMP、通知服務）可訂閱同一 Kafka topic
+- Balance Query 是強一致性（讀 Leader in-memory，永遠最新）
+- Journal Query 是最終一致性（Learner 異步同步，可能略有延遲）
+- 對帳場景允許最終一致性（T+0 對帳允許分鐘級延遲）
 
 ---
 
@@ -198,16 +257,45 @@ Learner 同步方案需要 Learner 節點內嵌 MyBatis/DataSource，耦合 Raft
 
 ### 5.1 Raft Cluster 配置
 
-```
-標準配置：3 節點（1 Leader + 2 Follower）
-高可用配置：5 節點（1 Leader + 2 Follower + 2 Learner）
+Raft 的數據安全基於過半數決（Quorum）機制，任何日誌提交必須獲得集群內超過半數節點的確認。系統總節點數遵循 **N = 2F + 1** 公式，其中 F 為可容忍的故障節點數量。
 
-Quorum = (N+1)/2：
-  3 節點 → Quorum = 2，允許 1 節點故障
-  5 節點 → Quorum = 3，允許 2 節點故障
+#### 最小配置：3 Voting Nodes
 
-Learner 不參與投票，不影響 Quorum 計算
 ```
+最少 3 個 Voting Node（1 Leader + 2 Follower）
+  理由：N = 2F + 1，若 F ≥ 1，則 N ≥ 3
+  2 節點無法工作：Quorum = ⌈N/2⌉ + 1，2 節點的 Quorum = 2，任意 1 節故障即失去多數派，Leader 無法提交新日誌
+  Quorum = 2，允許 1 個 Voting Node 故障
+  適用：開發、測試、低風險環境
+```
+
+#### 生產推薦：5 Nodes
+
+```
+3 Voting Nodes（1 Leader + 2 Follower）+ 2 Learner Nodes（non-voting）
+
+Voting Nodes：
+  - 參與 Raft 投票和日誌複製
+  - 跨 3 個 AZ 部署，每個 AZ 一個 voting node
+  - Quorum = 3，允許 2 個 voting node 同時故障
+  - 支援逐一滾動升級（至少保留 2 個 voting node 在線）
+
+Learner Nodes：
+  - 不參與投票，不影響 Quorum 計算
+  - 異步同步 Raft Log → MySQL View Layer
+  - 可部署於異地 DC 作為災備節點
+  - 可水平擴展以提升 Journal/Reconciliation 查詢吞吐
+```
+
+#### 節點規模與容錯能力
+
+| 總 Voting Nodes | Quorum | 容忍故障 | Learner（建議） | 適用場景 |
+|---------------|--------|---------|----------------|---------|
+| 3 | 2 | 1 | 0–2 | 開發 / 測試 |
+| 5 | 3 | 2 | 0–4 | **金融級生產** |
+| 7 | 4 | 3 | 0–6 | 極端可用性（≥ 99.999%） |
+
+> **5 節點（3 Voting + 2 Learner）是金融場景的最佳平衡點。** 超過 5 Voting Nodes 後，每增加 2 個節點才多容忍 1 個故障，而複製延遲、網路開銷和運維複雜度均顯著增長。詳見 [NFR §16](NFR-non-functional-requirements.md)。
 
 ### 5.2 Leader 故障恢復
 
@@ -256,6 +344,7 @@ MySQL：最終一致性的查詢視圖，可從 RocksDB replay 重建
 | 所有帳務寫操作必須走 Raft | 禁止直接寫 MySQL 繞過 Raft |
 | Balance 查詢必須讀 in-memory State Machine | 禁止讀 MySQL balance（可能落後） |
 | Account Worker 必須是單線程串行 | 禁止在同一帳戶的多個 journal 並發執行 |
+| 多帳戶 task 必須按 accountId 升序排列 | 防止死鎖，所有路徑強制執行 |
 | 不使用 ORM | 禁止 Hibernate / JPA，RocksDB 用 RocksDB Java API，MySQL 用 MyBatis |
 | State Machine Snapshot 間隔 ≤ 10 萬條 Raft Log | 控制故障恢復時間 |
 
@@ -270,6 +359,8 @@ MySQL：最終一致性的查詢視圖，可從 RocksDB replay 重建
 | Learner 同步延遲導致 Journal 查詢不一致 | 低 | 標明查詢時間戳，提示「最終一致性」 |
 | RocksDB 損壞 | 低 | 多副本 Raft，任一 Follower 可做資料恢復 |
 | SOFAJRaft 版本停更風險 | 低 | 評估 Apache Ratis 作為備選 |
+| **Multi-Account readyLatch timeout（Queue 積壓）** | 中 | 單帳戶 Queue 容量 ≤ 1000，超限 429 快速失敗；30ms readyLatch timeout 保護不無限等待；caller 憑 requestId 重試 |
+| **Leader Worker Raft timeout（宕機 / 網絡分區）** | 中 | 100ms resultLatch timeout；caller 憑 requestId 重試；冪等保障不重複入帳 |
 
 ---
 
@@ -281,4 +372,5 @@ MySQL：最終一致性的查詢視圖，可從 RocksDB replay 重建
 | Shard + Rebalancing | 資金管理複雜，rebalancing 引入資金缺口風險 |
 | Pre-authorized Limit + 異步 Settlement | 不符合「同步原子落帳」要求 |
 | Redis 作 balance cache | 一致性風險不可接受（金融場景） |
-| LMAX Disruptor | 解決 thread messaging 延遲，不解決 DB round-trip，不適用 |
+| LMAX Disruptor | 解決 thread messaging 延遲，不解決 Raft network round-trip；busy-spin 模型與 per-account 百萬 queue 不相容 |
+| `synchronized` / `ReentrantLock` 帳戶鎖 | 持有鎖期間 OS thread block，浪費 CPU；Virtual Thread park/unpark 配合 Queue 天然序列化，無需顯式鎖 |
