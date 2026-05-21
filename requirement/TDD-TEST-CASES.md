@@ -1,798 +1,1284 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.2
-**日期**: 2026-05-18
-**方法**: Test-Driven Development（Red → Green → Refactor）
-**框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
+**Version**: v0.2
+**Date**: 2026-05-18
+**Method**: Test-Driven Development (Red → Green → Refactor)
+**Framework**: JUnit 5 + Mockito + AssertJ + Testcontainers (MySQL) + RocksDB embedded
 
-> **v0.2 變更摘要**：新增 Module 3 Section 3.4（TC-F008-19 ~ TC-F008-26，accountSeq State Machine）、Module 11 Section 11.1（TC-F011-01 ~ TC-F011-07，BalanceChangeEvent accountSeq），TDD 執行計劃補充 Phase 3.5。
+> **v0.2 Change Summary**: Added Module 3 Section 3.4 (TC-F008-19 ~ TC-F008-26, accountSeq State Machine), Module 11 Section 11.1 (TC-F011-01 ~ TC-F011-07, BalanceChangeEvent accountSeq), TDD execution plan supplemented with Phase 3.5.
 
 ---
-
-## 測試分層策略
 
 ```
 ┌─────────────────────────────────────┐
-│         E2E / Integration Tests      │  少量，覆蓋關鍵業務流程
+│         E2E
 ├─────────────────────────────────────┤
-│         Service / UseCase Tests      │  中量，覆蓋業務規則
+│         Service
 ├─────────────────────────────────────┤
-│         Unit Tests                   │  大量，覆蓋所有核心邏輯
 └─────────────────────────────────────┘
 ```
 
-原則：
-- Unit Test 覆蓋率目標：≥ 90%
-- 每個 test case 只測一件事
-- Test 名稱格式：`[方法名]_[情境]_[預期結果]`
-- 所有 test 必須在 CI 環境無外部依賴下運行（embedded RocksDB / Testcontainers）
+## Test Layering Strategy
+
+```
+┌─────────────────────────────────────┐
+│ E2E / Integration Tests │ Few, covering key business flows
+├─────────────────────────────────────┤
+│ Service / UseCase Tests │ Medium, covering business rules
+├─────────────────────────────────────┤
+│ Unit Tests │ Many, covering all core logic
+└─────────────────────────────────────┘
+```
+
+Principles:
+- Unit Test coverage target: ≥ 90%
+- Each test case tests only one thing
+- Test name format: `[MethodName]_[Scenario]_[ExpectedResult]`
+- All tests must run in CI environment without external dependencies (embedded RocksDB / Testcontainers)
 
 ---
 
-## Module 1：Balance Type Registry（F-001）
+## Module 1
 
 ### 1.1 BalanceTypeConfigService
 
 ```
-TC-F001-01  getConfig_existingActiveType_returnsConfig
-            Given: AVAILABLE_BALANCE 已在 Registry 中，status=ACTIVE
-            When:  getConfig("AVAILABLE_BALANCE")
-            Then:  返回正確 config，allowNegative=false
+TC-F001-01 getConfig_existingActiveType_returnsConfig
+            When: getConfig("AVAILABLE_BALANCE")
 
-TC-F001-02  getConfig_nonExistentType_throwsBalanceTypeNotFoundException
-            Given: "UNKNOWN_TYPE" 不在 Registry
-            When:  getConfig("UNKNOWN_TYPE")
-            Then:  拋出 BalanceTypeNotFoundException
+TC-F001-02 getConfig_nonExistentType_throwsBalanceTypeNotFoundException
+            When: getConfig("UNKNOWN_TYPE")
 
-TC-F001-03  getConfig_inactiveType_throwsBalanceTypeInactiveException
+TC-F001-03 getConfig_inactiveType_throwsBalanceTypeInactiveException
             Given: "OLD_TYPE" status=INACTIVE
-            When:  getConfig("OLD_TYPE")
-            Then:  拋出 BalanceTypeInactiveException
+            When: getConfig("OLD_TYPE")
 
-TC-F001-04  registerType_newType_successfullyRegistered
-            Given: "BROKERAGE_BALANCE" 不存在
-            When:  registerType(BalanceTypeConfig{code="BROKERAGE_BALANCE", allowNegative=false})
-            Then:  Registry 中存在該 type，status=ACTIVE，configVersion=1
+TC-F001-04 registerType_newType_successfullyRegistered
+            When: registerType(BalanceTypeConfig{code="BROKERAGE_BALANCE", allowNegative=false})
 
-TC-F001-05  registerType_duplicateCode_throwsDuplicateBalanceTypeException
-            Given: "AVAILABLE_BALANCE" 已存在
-            When:  registerType(BalanceTypeConfig{code="AVAILABLE_BALANCE"})
-            Then:  拋出 DuplicateBalanceTypeException
+TC-F001-05 registerType_duplicateCode_throwsDuplicateBalanceTypeException
+            When: registerType(BalanceTypeConfig{code="AVAILABLE_BALANCE"})
 
-TC-F001-06  registerType_tradeAheadBalance_allowNegativeTrue_signConventionNormalDebit
-            Given: 新類型 TRADE_AHEAD_BALANCE，allowNegative=true，negativeSemantics=PRE_AUTHORIZED
-            When:  registerType(...)
-            Then:  config.allowNegative=true，config.negativeSemantics=PRE_AUTHORIZED
+TC-F001-06 registerType_tradeAheadBalance_allowNegativeTrue_signConventionNormalDebit
+            When: registerType(...)
 
-TC-F001-07  updateConfig_existingType_configVersionIncremented
+TC-F001-07 updateConfig_existingType_configVersionIncremented
             Given: "AVAILABLE_BALANCE" configVersion=1
-            When:  updateConfig("AVAILABLE_BALANCE", newConfig)
-            Then:  configVersion=2，變更記錄保存
+            When: updateConfig("AVAILABLE_BALANCE", newConfig)
 
-TC-F001-08  deactivateType_existingType_statusBecomesInactive
+TC-F001-08 deactivateType_existingType_statusBecomesInactive
             Given: "OLD_TYPE" status=ACTIVE
-            When:  deactivateType("OLD_TYPE")
-            Then:  status=INACTIVE，後續 getConfig 拋出 BalanceTypeInactiveException
+            When: deactivateType("OLD_TYPE")
+```
+
+### 1.1 BalanceTypeConfigService
+
+```
+TC-F001-01 getConfig_existingActiveType_returnsConfig
+            Given: AVAILABLE_BALANCE exists in Registry with status=ACTIVE
+            When: getConfig("AVAILABLE_BALANCE")
+            Then: Returns correct config with allowNegative=false
+
+TC-F001-02 getConfig_nonExistentType_throwsBalanceTypeNotFoundException
+            Given: "UNKNOWN_TYPE" does not exist in Registry
+            When: getConfig("UNKNOWN_TYPE")
+            Then: Throws BalanceTypeNotFoundException
+
+TC-F001-03 getConfig_inactiveType_throwsBalanceTypeInactiveException
+            Given: "OLD_TYPE" has status=INACTIVE
+            When: getConfig("OLD_TYPE")
+            Then: Throws BalanceTypeInactiveException
+
+TC-F001-04 registerType_newType_successfullyRegistered
+            Given: "BROKERAGE_BALANCE" does not exist
+            When: registerType(BalanceTypeConfig{code="BROKERAGE_BALANCE", allowNegative=false})
+            Then: Registry contains this type with status=ACTIVE and configVersion=1
+
+TC-F001-05 registerType_duplicateCode_throwsDuplicateBalanceTypeException
+            Given: "AVAILABLE_BALANCE" already exists
+            When: registerType(BalanceTypeConfig{code="AVAILABLE_BALANCE"})
+            Then: Throws DuplicateBalanceTypeException
+
+TC-F001-06 registerType_tradeAheadBalance_allowNegativeTrue_signConventionNormalDebit
+            Given: New type TRADE_AHEAD_BALANCE with allowNegative=true and negativeSemantics=PRE_AUTHORIZED
+            When: registerType(...)
+            Then: config.allowNegative=true and config.negativeSemantics=PRE_AUTHORIZED
+
+TC-F001-07 updateConfig_existingType_configVersionIncremented
+            Given: "AVAILABLE_BALANCE" has configVersion=1
+            When: updateConfig("AVAILABLE_BALANCE", newConfig)
+            Then: configVersion=2 and change record is saved
+
+TC-F001-08 deactivateType_existingType_statusBecomesInactive
+            Given: "OLD_TYPE" has status=ACTIVE
+            When: deactivateType("OLD_TYPE")
+            Then: status=INACTIVE; subsequent getConfig throws BalanceTypeInactiveException
 ```
 
 ---
 
-## Module 2：Account Management（F-010）
+## Module 2
 
 ### 2.1 AccountService
 
 ```
-TC-F010-01  createAccount_validInput_accountCreatedInStateMachine
-            Given: accountId="CLIENT_ACC_001"，type=CLIENT，ownerId="CUST-001"
-            When:  createAccount(...)
-            Then:  State Machine 中帳戶存在，status=ACTIVE
+TC-F010-01 createAccount_validInput_accountCreatedInStateMachine
+            When: createAccount(...)
 
-TC-F010-02  createAccount_duplicateAccountId_throwsAccountAlreadyExistsException
-            Given: "CLIENT_ACC_001" 已存在
-            When:  createAccount(accountId="CLIENT_ACC_001")
-            Then:  拋出 AccountAlreadyExistsException
+TC-F010-02 createAccount_duplicateAccountId_throwsAccountAlreadyExistsException
+            When: createAccount(accountId="CLIENT_ACC_001")
 
-TC-F010-03  createAccount_clientTypeWithoutOwnerId_throwsMissingOwnerIdException
-            Given: type=CLIENT，ownerId=null
-            When:  createAccount(...)
-            Then:  拋出 MissingOwnerIdException
+TC-F010-03 createAccount_clientTypeWithoutOwnerId_throwsMissingOwnerIdException
+            When: createAccount(...)
 
-TC-F010-04  createAccount_withBalanceInitializations_balancesInitializedToZero
-            Given: 初始化 AVAILABLE_BALANCE/USD + AVAILABLE_BALANCE/HKD
-            When:  createAccount(...)
-            Then:  balanceStore 中兩個 key 均存在，amount=0
+TC-F010-04 createAccount_withBalanceInitializations_balancesInitializedToZero
+            When: createAccount(...)
 
-TC-F010-05  createAccount_withUnknownBalanceType_throwsBalanceTypeNotFoundException
-            Given: balanceInitializations 包含 "UNKNOWN_TYPE"
-            When:  createAccount(...)
-            Then:  拋出 BalanceTypeNotFoundException
+TC-F010-05 createAccount_withUnknownBalanceType_throwsBalanceTypeNotFoundException
+            When: createAccount(...)
 
-TC-F010-06  freezeAccount_activeAccount_statusBecomeFrozen
+TC-F010-06 freezeAccount_activeAccount_statusBecomeFrozen
             Given: "CLIENT_ACC_001" status=ACTIVE
-            When:  freezeAccount("CLIENT_ACC_001")
-            Then:  State Machine 中 status=FROZEN
+            When: freezeAccount("CLIENT_ACC_001")
 
-TC-F010-07  unfreezeAccount_frozenAccount_statusBecomeActive
+TC-F010-07 unfreezeAccount_frozenAccount_statusBecomeActive
             Given: "CLIENT_ACC_001" status=FROZEN
-            When:  unfreezeAccount("CLIENT_ACC_001")
-            Then:  status=ACTIVE
+            When: unfreezeAccount("CLIENT_ACC_001")
+            Then: status=ACTIVE
 
-TC-F010-08  closeAccount_withNonZeroBalance_throwsAccountHasNonZeroBalanceException
+TC-F010-08 closeAccount_withNonZeroBalance_throwsAccountHasNonZeroBalanceException
             Given: "CLIENT_ACC_001" AVAILABLE_BALANCE/USD = 100.00
-            When:  closeAccount("CLIENT_ACC_001")
-            Then:  拋出 AccountHasNonZeroBalanceException
+            When: closeAccount("CLIENT_ACC_001")
 
-TC-F010-09  closeAccount_withAllZeroBalances_statusBecomeClosed
-            Given: 所有 balance = 0
-            When:  closeAccount("CLIENT_ACC_001")
-            Then:  status=CLOSED
+TC-F010-09 closeAccount_withAllZeroBalances_statusBecomeClosed
+            When: closeAccount("CLIENT_ACC_001")
+            Then: status=CLOSED
 
-TC-F010-10  closeAccount_closedAccount_cannotBeUnfrozen
+TC-F010-10 closeAccount_closedAccount_cannotBeUnfrozen
             Given: status=CLOSED
-            When:  unfreezeAccount("CLIENT_ACC_001")
-            Then:  拋出 AccountClosedException
+            When: unfreezeAccount("CLIENT_ACC_001")
 
-TC-F010-11  addBalanceType_existingAccount_newBalanceInitializedToZero
-            Given: "CLIENT_ACC_001" 已存在，無 BROKERAGE_BALANCE/USD
-            When:  addBalanceType("CLIENT_ACC_001", "BROKERAGE_BALANCE", "USD")
-            Then:  balanceStore 新 key 存在，amount=0
+TC-F010-11 addBalanceType_existingAccount_newBalanceInitializedToZero
+            When: addBalanceType("CLIENT_ACC_001", "BROKERAGE_BALANCE", "USD")
+```
+
+### 2.1 AccountService
+
+```
+TC-F010-01 createAccount_validInput_accountCreatedInStateMachine
+            Given: accountId="CLIENT_ACC_001", type=CLIENT, ownerId="CUST-001"
+            When: createAccount(...)
+            Then: Account exists in State Machine with status=ACTIVE
+
+TC-F010-02 createAccount_duplicateAccountId_throwsAccountAlreadyExistsException
+            Given: "CLIENT_ACC_001" already exists
+            When: createAccount(accountId="CLIENT_ACC_001")
+            Then: Throws AccountAlreadyExistsException
+
+TC-F010-03 createAccount_clientTypeWithoutOwnerId_throwsMissingOwnerIdException
+            Given: type=CLIENT with ownerId=null
+            When: createAccount(...)
+            Then: Throws MissingOwnerIdException
+
+TC-F010-04 createAccount_withBalanceInitializations_balancesInitializedToZero
+            Given: Initialize AVAILABLE_BALANCE/USD + AVAILABLE_BALANCE/HKD
+            When: createAccount(...)
+            Then: Both keys exist in balanceStore with amount=0
+
+TC-F010-05 createAccount_withUnknownBalanceType_throwsBalanceTypeNotFoundException
+            Given: balanceInitializations contains "UNKNOWN_TYPE"
+            When: createAccount(...)
+            Then: Throws BalanceTypeNotFoundException
+
+TC-F010-06 freezeAccount_activeAccount_statusBecomeFrozen
+            Given: "CLIENT_ACC_001" has status=ACTIVE
+            When: freezeAccount("CLIENT_ACC_001")
+            Then: Status becomes FROZEN in State Machine
+
+TC-F010-07 unfreezeAccount_frozenAccount_statusBecomeActive
+            Given: "CLIENT_ACC_001" has status=FROZEN
+            When: unfreezeAccount("CLIENT_ACC_001")
+            Then: status=ACTIVE
+
+TC-F010-08 closeAccount_withNonZeroBalance_throwsAccountHasNonZeroBalanceException
+            Given: "CLIENT_ACC_001" AVAILABLE_BALANCE/USD = 100.00
+            When: closeAccount("CLIENT_ACC_001")
+            Then: Throws AccountHasNonZeroBalanceException
+
+TC-F010-09 closeAccount_withAllZeroBalances_statusBecomeClosed
+            Given: All balances = 0
+            When: closeAccount("CLIENT_ACC_001")
+            Then: status=CLOSED
+
+TC-F010-10 closeAccount_closedAccount_cannotBeUnfrozen
+            Given: status=CLOSED
+            When: unfreezeAccount("CLIENT_ACC_001")
+            Then: Throws AccountClosedException
+
+TC-F010-11 addBalanceType_existingAccount_newBalanceInitializedToZero
+            Given: "CLIENT_ACC_001" exists without BROKERAGE_BALANCE/USD
+            When: addBalanceType("CLIENT_ACC_001", "BROKERAGE_BALANCE", "USD")
+            Then: New key exists in balanceStore with amount=0
 ```
 
 ---
 
-## Module 3：State Machine（F-008）
+## Module 3
 
-### 3.1 LedgerStateMachine — Balance 操作
+### 3.1 LedgerStateMachine
 
 ```
-TC-F008-01  applyPosting_singleDebit_balanceDecreased
+TC-F008-01 applyPosting_singleDebit_balanceDecreased
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 1000.00
-            When:  apply PostingCommand{ DEBIT 300.00 }
-            Then:  balance = 700.00，stateVersion 遞增
+            When: apply PostingCommand{ DEBIT 300.00 }
 
-TC-F008-02  applyPosting_singleCredit_balanceIncreased
+TC-F008-02 applyPosting_singleCredit_balanceIncreased
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 1000.00
-            When:  apply PostingCommand{ CREDIT 500.00 }
-            Then:  balance = 1500.00
+            When: apply PostingCommand{ CREDIT 500.00 }
+            Then: balance = 1500.00
 
-TC-F008-03  applyPosting_debitExceedsBalance_allowNegativeFalse_commandRejected
-            Given: balance = 100.00，allowNegative=false
-            When:  apply PostingCommand{ DEBIT 200.00 }
-            Then:  CommandResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
-                   balance 保持 100.00 不變
+TC-F008-03 applyPosting_debitExceedsBalance_allowNegativeFalse_commandRejected
+            When: apply PostingCommand{ DEBIT 200.00 }
 
-TC-F008-04  applyPosting_tradeAheadBalance_allowNegativeTrue_negativeBalanceAllowed
-            Given: TRADE_AHEAD_BALANCE/USD = 0.00，allowNegative=true
-            When:  apply PostingCommand{ DEBIT 50000.00 }
-            Then:  balance = -50000.00，CommandResult.status=COMPLETED
+TC-F008-04 applyPosting_tradeAheadBalance_allowNegativeTrue_negativeBalanceAllowed
+            When: apply PostingCommand{ DEBIT 50000.00 }
 
-TC-F008-05  applyPosting_tradeAheadBalance_creditAboveZero_commandRejected
-            Given: TRADE_AHEAD_BALANCE/USD = -10000.00，allowNegative=true
-            When:  apply PostingCommand{ CREDIT 20000.00 }（結果會 > 0）
-            Then:  CommandResult.status=REJECTED，errorCode=CREDIT_EXCEEDS_LIMIT
+TC-F008-05 applyPosting_tradeAheadBalance_creditAboveZero_commandRejected
+            When: apply PostingCommand{ CREDIT 20000.00 }
 
-TC-F008-06  applyPosting_multiAccount_atomicUpdate
-            Given: CLIENT_ACC_001 USD = 1000.00，COMPANY_FX_ACC USD = 5000.00
-            When:  apply PostingCommand{ CLIENT DEBIT 800 + COMPANY CREDIT 800 }
-            Then:  CLIENT = 200.00，COMPANY = 5800.00，兩者同時更新
+TC-F008-06 applyPosting_multiAccount_atomicUpdate
+            When: apply PostingCommand{ CLIENT DEBIT 800 + COMPANY CREDIT 800 }
 
-TC-F008-07  applyPosting_frozenAccount_commandRejected
+TC-F008-07 applyPosting_frozenAccount_commandRejected
             Given: CLIENT_ACC_001 status=FROZEN
-            When:  apply PostingCommand{ DEBIT 100.00 }
-            Then:  CommandResult.status=REJECTED，errorCode=ACCOUNT_FROZEN
+            When: apply PostingCommand{ DEBIT 100.00 }
 
-TC-F008-08  applyPosting_idempotency_sameRequestId_returnsSameResult
-            Given: requestId="req-001" 已成功執行，balance=700.00
-            When:  再次 apply 相同 requestId
-            Then:  返回原始 CommandResult，balance 仍為 700.00（不重複扣減）
+TC-F008-08 applyPosting_idempotency_sameRequestId_returnsSameResult
 
-TC-F008-09  applyPosting_journalUnbalanced_commandRejected
-            Given: legs 中 DEBIT total ≠ CREDIT total
-            When:  apply PostingCommand
-            Then:  CommandResult.status=REJECTED，errorCode=JOURNAL_UNBALANCED
+TC-F008-09 applyPosting_journalUnbalanced_commandRejected
+            When: apply PostingCommand
 
-TC-F008-10  applyPosting_generateJournalLine_balanceBeforeAndAfterCorrect
+TC-F008-10 applyPosting_generateJournalLine_balanceBeforeAndAfterCorrect
             Given: CLIENT balance = 1000.00
-            When:  apply DEBIT 300.00
-            Then:  JournalLine.balanceBefore=1000.00，balanceBefore=700.00
+            When: apply DEBIT 300.00
+```
+
+### 3.1 LedgerStateMachine — Balance Operations
+
+```
+TC-F008-01 applyPosting_singleDebit_balanceDecreased
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 1000.00
+            When: apply PostingCommand{ DEBIT 300.00 }
+            Then: balance = 700.00 and stateVersion incremented
+
+TC-F008-02 applyPosting_singleCredit_balanceIncreased
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 1000.00
+            When: apply PostingCommand{ CREDIT 500.00 }
+            Then: balance = 1500.00
+
+TC-F008-03 applyPosting_debitExceedsBalance_allowNegativeFalse_commandRejected
+            Given: balance = 100.00 with allowNegative=false
+            When: apply PostingCommand{ DEBIT 200.00 }
+            Then: CommandResult.status=REJECTED with errorCode=INSUFFICIENT_BALANCE
+                   and balance remains 100.00 unchanged
+
+TC-F008-04 applyPosting_tradeAheadBalance_allowNegativeTrue_negativeBalanceAllowed
+            Given: TRADE_AHEAD_BALANCE/USD = 0.00 with allowNegative=true
+            When: apply PostingCommand{ DEBIT 50000.00 }
+            Then: balance = -50000.00 and CommandResult.status=COMPLETED
+
+TC-F008-05 applyPosting_tradeAheadBalance_creditAboveZero_commandRejected
+            Given: TRADE_AHEAD_BALANCE/USD = -10000.00 with allowNegative=true
+            When: apply PostingCommand{ CREDIT 20000.00 } (would result in > 0)
+            Then: CommandResult.status=REJECTED with errorCode=CREDIT_EXCEEDS_LIMIT
+
+TC-F008-06 applyPosting_multiAccount_atomicUpdate
+            Given: CLIENT_ACC_001 USD = 1000.00 and COMPANY_FX_ACC USD = 5000.00
+            When: apply PostingCommand{ CLIENT DEBIT 800 + COMPANY CREDIT 800 }
+            Then: CLIENT = 200.00 and COMPANY = 5800.00, both updated atomically
+
+TC-F008-07 applyPosting_frozenAccount_commandRejected
+            Given: CLIENT_ACC_001 has status=FROZEN
+            When: apply PostingCommand{ DEBIT 100.00 }
+            Then: CommandResult.status=REJECTED with errorCode=ACCOUNT_FROZEN
+
+TC-F008-08 applyPosting_idempotency_sameRequestId_returnsSameResult
+            Given: requestId="req-001" already executed successfully with balance=700.00
+            When: apply same requestId again
+            Then: Returns original CommandResult with balance still 700.00 (no duplicate deduction)
+
+TC-F008-09 applyPosting_journalUnbalanced_commandRejected
+            Given: legs have DEBIT total ≠ CREDIT total
+            When: apply PostingCommand
+            Then: CommandResult.status=REJECTED with errorCode=JOURNAL_UNBALANCED
+
+TC-F008-10 applyPosting_generateJournalLine_balanceBeforeAndAfterCorrect
+            Given: CLIENT balance = 1000.00
+            When: apply DEBIT 300.00
+            Then: JournalLine.balanceBefore=1000.00 and balanceAfter=700.00
 ```
 
 ### 3.2 LedgerStateMachine — Reversal
 
 ```
-TC-F008-11  applyReversal_confirmedJournal_balanceReverted
-            Given: 原 Journal DEBIT 300.00 已執行，balance=700.00
-            When:  apply ReversalCommand{ originalJournalId }
-            Then:  balance=1000.00，原 Journal status=REVERSED
+TC-F008-11 applyReversal_confirmedJournal_balanceReverted
+            When: apply ReversalCommand{ originalJournalId }
 
-TC-F008-12  applyReversal_alreadyReversedJournal_commandRejected
-            Given: 原 Journal status=REVERSED
-            When:  apply ReversalCommand
-            Then:  CommandResult.status=REJECTED，errorCode=JOURNAL_ALREADY_REVERSED
+TC-F008-12 applyReversal_alreadyReversedJournal_commandRejected
+            When: apply ReversalCommand
 
-TC-F008-13  applyReversal_reversalJournal_commandRejected
-            Given: journalType=REVERSAL 的 Journal
-            When:  apply ReversalCommand
-            Then:  CommandResult.status=REJECTED，errorCode=CANNOT_REVERSE_REVERSAL
+TC-F008-13 applyReversal_reversalJournal_commandRejected
+            When: apply ReversalCommand
 
-TC-F008-14  applyReversal_noBalanceCheck_executesEvenIfInsufficientBalance
-            Given: 原 Journal CREDIT 1000.00，但帳戶餘額已被其他交易消耗為 0
-            When:  apply ReversalCommand（DEBIT 1000.00 回去，餘額會變負）
-            Then:  CommandResult.status=COMPLETED，balance=-1000.00（允許跌負）
+TC-F008-14 applyReversal_noBalanceCheck_executesEvenIfInsufficientBalance
+            When: apply ReversalCommand
 
-TC-F008-15  applyReversal_crossPeriod_markedCorrectly
-            Given: 原 Journal valueDate 在已關閉帳期
-            When:  apply ReversalCommand
-            Then:  Reversal Journal crossPeriod=true
+TC-F008-15 applyReversal_crossPeriod_markedCorrectly
+            When: apply ReversalCommand
+            Then: Reversal Journal crossPeriod=true
+```
+
+### 3.2 LedgerStateMachine — Reversal
+
+```
+TC-F008-11 applyReversal_confirmedJournal_balanceReverted
+            Given: Original Journal DEBIT 300.00 already executed with balance=700.00
+            When: apply ReversalCommand{ originalJournalId }
+            Then: balance=1000.00 and original Journal status=REVERSED
+
+TC-F008-12 applyReversal_alreadyReversedJournal_commandRejected
+            Given: Original Journal has status=REVERSED
+            When: apply ReversalCommand
+            Then: CommandResult.status=REJECTED with errorCode=JOURNAL_ALREADY_REVERSED
+
+TC-F008-13 applyReversal_reversalJournal_commandRejected
+            Given: Journal with journalType=REVERSAL
+            When: apply ReversalCommand
+            Then: CommandResult.status=REJECTED with errorCode=CANNOT_REVERSE_REVERSAL
+
+TC-F008-14 applyReversal_noBalanceCheck_executesEvenIfInsufficientBalance
+            Given: Original Journal CREDIT 1000.00, but account balance has been consumed by other transactions to 0
+            When: apply ReversalCommand (DEBIT 1000.00 back; balance would go negative)
+            Then: CommandResult.status=COMPLETED with balance=-1000.00 (negative allowed)
+
+TC-F008-15 applyReversal_crossPeriod_markedCorrectly
+            Given: Original Journal has valueDate in a closed accounting period
+            When: apply ReversalCommand
+            Then: Reversal Journal has crossPeriod=true
 ```
 
 ### 3.3 LedgerStateMachine — Snapshot & Replay
 
 ```
-TC-F008-16  takeSnapshot_allBalancesSerializedAndRestored
-            Given: 5 個帳戶各有不同 balance
-            When:  takeSnapshot() → 清空 State Machine → restoreFromSnapshot()
-            Then:  所有 balance 完全一致，stateVersion 一致
+TC-F008-16 takeSnapshot_allBalancesSerializedAndRestored
 
-TC-F008-17  replayFromLog_afterSnapshot_balanceCorrect
-            Given: Snapshot at index=100，index 101-110 有 10 筆 PostingCommand
-            When:  restore Snapshot + replay log 101-110
-            Then:  最終 balance 等於直接執行 110 筆的結果
+TC-F008-17 replayFromLog_afterSnapshot_balanceCorrect
+            When: restore Snapshot + replay log 101-110
 
-TC-F008-18  inactiveAccount_evictedFromMemory_reloadedFromRocksDB
-            Given: 帳戶 24 小時無交易，被 evict
-            When:  apply PostingCommand 到該帳戶
-            Then:  從 RocksDB warm-up，balance 正確，繼續執行
+TC-F008-18 inactiveAccount_evictedFromMemory_reloadedFromRocksDB
 ```
 
-### 3.4 LedgerStateMachine — accountSeq【v0.2 新增】
+### 3.3 LedgerStateMachine — Snapshot & Replay
 
 ```
-TC-F008-19  applyPosting_firstEver_accountSeqStartsAtOne
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD 尚未有任何交易（accountSeq 不存在）
-            When:  apply PostingCommand{ DEBIT 100.00 }
-            Then:  BalanceEntry.accountSeq == 1
+TC-F008-16 takeSnapshot_allBalancesSerializedAndRestored
+            Given: 5 accounts each with different balances
+            When: takeSnapshot() → clear State Machine → restoreFromSnapshot()
+            Then: All balances are exactly the same and stateVersion is consistent
 
-TC-F008-20  applyPosting_subsequentPosting_accountSeqIncremented
+TC-F008-17 replayFromLog_afterSnapshot_balanceCorrect
+            Given: Snapshot at index=100, indexes 101-110 have 10 PostingCommands
+            When: restore Snapshot + replay log 101-110
+            Then: Final balance equals result of directly executing 110 postings
+
+TC-F008-18 inactiveAccount_evictedFromMemory_reloadedFromRocksDB
+            Given: Account has no transactions for 24 hours and has been evicted
+            When: apply PostingCommand to that account
+            Then: Warmed up from RocksDB with correct balance and execution continues
+```
+
+### 3.4 LedgerStateMachine
+
+```
+TC-F008-19 applyPosting_firstEver_accountSeqStartsAtOne
+            When: apply PostingCommand{ DEBIT 100.00 }
+            Then: BalanceEntry.accountSeq == 1
+
+TC-F008-20 applyPosting_subsequentPosting_accountSeqIncremented
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 5
-            When:  apply PostingCommand{ DEBIT 100.00 }
-            Then:  BalanceEntry.accountSeq == 6
+            When: apply PostingCommand{ DEBIT 100.00 }
+            Then: BalanceEntry.accountSeq == 6
 
-TC-F008-21  applyReversal_accountSeqIncremented
+TC-F008-21 applyReversal_accountSeqIncremented
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 10
-            When:  apply ReversalCommand
-            Then:  BalanceEntry.accountSeq == 11
-                   （Reversal 同樣遞增 seq，因為是 balance 變動）
+            When: apply ReversalCommand
+            Then: BalanceEntry.accountSeq == 11
 
-TC-F008-22  applyAdjustment_accountSeqIncremented
+TC-F008-22 applyAdjustment_accountSeqIncremented
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 20
-            When:  apply AdjustmentCommand
-            Then:  BalanceEntry.accountSeq == 21
+            When: apply AdjustmentCommand
+            Then: BalanceEntry.accountSeq == 21
 
-TC-F008-23  applyPosting_differentBalanceType_seqIndependent
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD  accountSeq == 5
+TC-F008-23 applyPosting_differentBalanceType_seqIndependent
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 5
                    CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD accountSeq == 3
-            When:  apply PostingCommand 同時更新兩個 balance type
-            Then:  AVAILABLE_BALANCE/USD  accountSeq == 6
+            Then: AVAILABLE_BALANCE/USD accountSeq == 6
                    TRADE_AHEAD_BALANCE/USD accountSeq == 4
-                   （不同 key 的 seq 互相獨立）
 
-TC-F008-24  takeSnapshot_accountSeqSerializedAndRestored
+TC-F008-24 takeSnapshot_accountSeqSerializedAndRestored
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 42
-            When:  takeSnapshot() → restoreFromSnapshot()
-            Then:  BalanceEntry.accountSeq == 42
-                   （Snapshot 必須序列化 accountSeq，不得丟失）
+            When: takeSnapshot() → restoreFromSnapshot()
+            Then: BalanceEntry.accountSeq == 42
 
-TC-F008-25  replayFromLog_afterSnapshot_accountSeqContinues
-            Given: Snapshot at index=100：accountSeq == 42
-                   Raft Log index 101-105：5 條 PostingCommand
-            When:  restore Snapshot → replay log 101-105
-            Then:  accountSeq == 47（42 + 5）
+TC-F008-25 replayFromLog_afterSnapshot_accountSeqContinues
+                   Raft Log index 101-105
+            When: restore Snapshot → replay log 101-105
+            Then: accountSeq == 47
 
-TC-F008-26  restartNode_accountSeqResumesFromRocksDB
-            Given: CLIENT_ACC_001 accountSeq == 99，已寫入 RocksDB CF_BALANCE
-                   模擬 JVM crash（無 Snapshot）
-            When:  重啟，從 Raft Log replay
-            Then:  accountSeq 從 RocksDB 恢復，下一條事件 accountSeq == 100
-                   不得重置為 0 或 1
+TC-F008-26 restartNode_accountSeqResumesFromRocksDB
+```
+
+### 3.4 LedgerStateMachine
+
+```
+TC-F008-19 applyPosting_firstEver_accountSeqStartsAtOne
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD has no transactions yet (accountSeq does not exist)
+            When: apply PostingCommand{ DEBIT 100.00 }
+            Then: BalanceEntry.accountSeq == 1
+
+TC-F008-20 applyPosting_subsequentPosting_accountSeqIncremented
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 5
+            When: apply PostingCommand{ DEBIT 100.00 }
+            Then: BalanceEntry.accountSeq == 6
+
+TC-F008-21 applyReversal_accountSeqIncremented
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 10
+            When: apply ReversalCommand
+            Then: BalanceEntry.accountSeq == 11
+                   (Reversal also increments seq because it is a balance change)
+
+TC-F008-22 applyAdjustment_accountSeqIncremented
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 20
+            When: apply AdjustmentCommand
+            Then: BalanceEntry.accountSeq == 21
+
+TC-F008-23 applyPosting_differentBalanceType_seqIndependent
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 5
+                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD accountSeq == 3
+            When: apply PostingCommand updating both balance types simultaneously
+            Then: AVAILABLE_BALANCE/USD accountSeq == 6
+                   TRADE_AHEAD_BALANCE/USD accountSeq == 4
+                   (seqs for different keys are independent of each other)
+
+TC-F008-24 takeSnapshot_accountSeqSerializedAndRestored
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD accountSeq == 42
+            When: takeSnapshot() → restoreFromSnapshot()
+            Then: BalanceEntry.accountSeq == 42
+                   (Snapshot must serialize accountSeq; it must not be lost)
+
+TC-F008-25 replayFromLog_afterSnapshot_accountSeqContinues
+            Given: Snapshot at index=100: accountSeq == 42
+                   Raft Log index 101-105: 5 PostingCommands
+            When: restore Snapshot → replay log 101-105
+            Then: accountSeq == 47 (42 + 5)
+
+TC-F008-26 restartNode_accountSeqResumesFromRocksDB
+            Given: CLIENT_ACC_001 accountSeq == 99, written to RocksDB CF_BALANCE
+                   Simulating JVM crash (no Snapshot)
+            When: Restart and replay from Raft Log
+            Then: accountSeq recovers from RocksDB; next event accountSeq == 100
+                   Must not reset to 0 or 1
 ```
 
 ---
 
-## Module 4：Posting API（F-002）
+## Module 4
 
 ### 4.1 PostingService
 
 ```
-TC-F002-01  post_validSingleLeg_returnsCompletedResult
-            Given: 有效 PostingRequest，CLIENT DEBIT + COMPANY CREDIT，各 800 USD
-            When:  post(request)
-            Then:  PostingResult.status=COMPLETED，journalId 不為空
+TC-F002-01 post_validSingleLeg_returnsCompletedResult
+            When: post(request)
 
-TC-F002-02  post_insufficientBalance_returnsRejectedResult
-            Given: CLIENT balance=100，請求 DEBIT 500
-            When:  post(request)
-            Then:  PostingResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+TC-F002-02 post_insufficientBalance_returnsRejectedResult
+            When: post(request)
 
-TC-F002-03  post_unknownAccount_returnsRejectedResult
-            Given: accountId="GHOST_ACC" 不存在
-            When:  post(request)
-            Then:  PostingResult.status=REJECTED，errorCode=ACCOUNT_NOT_FOUND
+TC-F002-03 post_unknownAccount_returnsRejectedResult
+            When: post(request)
 
-TC-F002-04  post_sameRequestIdTwice_idempotentResult
-            Given: requestId="req-abc" 第一次成功
-            When:  第二次 post(相同 request)
-            Then:  返回第一次相同的 PostingResult，balance 不重複變動
+TC-F002-04 post_sameRequestIdTwice_idempotentResult
 
-TC-F002-05  post_unbalancedJournal_returnsBadRequest
-            Given: DEBIT 100 + CREDIT 99（不平衡）
-            When:  post(request)
-            Then:  HTTP 400 / errorCode=JOURNAL_UNBALANCED
-
-TC-F002-06  post_rfqScenario_twoAccounts_atomicUpdate
-            Given: CLIENT_ACC_001 USD=1000，COMPANY_FX_ACC USD=5000
-            When:  post(CLIENT DEBIT 800 + COMPANY CREDIT 800)
-            Then:  CLIENT=200，COMPANY=5800，Journal 包含 2 條 JournalLine
-
-TC-F002-07  post_frozenAccount_returnsRejectedResult
-            Given: CLIENT_ACC_001 status=FROZEN
-            When:  post(request to CLIENT_ACC_001)
-            Then:  PostingResult.status=REJECTED，errorCode=ACCOUNT_FROZEN
-
-TC-F002-08  post_concurrentSameAccount_noDoubleDebit
-            Given: CLIENT balance=1000，1000 並發請求各 DEBIT 1（總計 1000）
-            When:  全部執行
-            Then:  balance=0，Journal 精確 1000 筆，無重複
-
-TC-F002-09  post_hotspotCompanyAccount_1000Concurrent_noDuplicate
-            Given: COMPANY_FX_ACC，1000 並發不同 CLIENT CREDIT 進來
-            When:  全部執行
-            Then:  所有 Journal 唯一，COMPANY balance 精確等於所有 CREDIT 之和
-
-TC-F002-10  post_inactiveBalanceType_returnsBadRequest
-            Given: balanceType="OLD_TYPE" status=INACTIVE
-            When:  post(request)
-            Then:  HTTP 400 / errorCode=BALANCE_TYPE_NOT_FOUND
-```
-
----
-
-## Module 5：Reversal API（F-004）
-
-```
-TC-F004-01  reverse_confirmedJournal_reversalJournalCreated
-            Given: 原 Journal status=CONFIRMED
-            When:  reverse(originalJournalId, request)
-            Then:  ReversalResult.status=COMPLETED，reversalJournalId 不為空
-                   原 Journal status=REVERSED
-
-TC-F004-02  reverse_alreadyReversedJournal_returnsRejected
-            Given: 原 Journal status=REVERSED
-            When:  reverse(originalJournalId)
-            Then:  ReversalResult.status=REJECTED，errorCode=JOURNAL_ALREADY_REVERSED
-
-TC-F004-03  reverse_reversalJournal_returnsRejected
-            Given: journalType=REVERSAL
-            When:  reverse(reversalJournalId)
-            Then:  ReversalResult.status=REJECTED，errorCode=CANNOT_REVERSE_REVERSAL
-
-TC-F004-04  reverse_sameRequestIdTwice_idempotent
-            Given: requestId="rev-001" 第一次成功
-            When:  第二次 reverse(相同 requestId)
-            Then:  返回第一次相同的 ReversalResult，不重複 reverse
-
-TC-F004-05  reverse_crossPeriodJournal_markedCrossPeriod
-            Given: 原 Journal valueDate 在已關閉帳期
-            When:  reverse(...)
-            Then:  ReversalResult.crossPeriod=true
-
-TC-F004-06  reverse_mirrorsOriginalLines_debitCreditSwapped
-            Given: 原 Journal：CLIENT DEBIT 800 + COMPANY CREDIT 800
-            When:  reverse(...)
-            Then:  Reversal Journal：CLIENT CREDIT 800 + COMPANY DEBIT 800
-                   金額完全相同，方向完全相反
-
-TC-F004-07  reverse_insufficientBalance_stillExecutes
-            Given: 原 Journal CREDIT 1000（CLIENT 收到錢），但 CLIENT 已轉走，balance=0
-            When:  reverse（CLIENT DEBIT 1000 回去，balance 會跌負）
-            Then:  ReversalResult.status=COMPLETED，balance=-1000（不做餘額校驗）
-```
-
----
-
-## Module 6：Manual Adjustment（F-003）
-
-```
-TC-F003-01  createDraft_validInput_draftCreatedWithPendingStatus
-            Given: 有效 AdjustmentDraftRequest
-            When:  createDraft(request)
-            Then:  Draft 存在，status=PENDING_APPROVAL，未入帳
-
-TC-F003-02  createDraft_unbalancedLegs_returnsBadRequest
+TC-F002-05 post_unbalancedJournal_returnsBadRequest
             Given: DEBIT 100 + CREDIT 99
-            When:  createDraft(request)
-            Then:  HTTP 400 / errorCode=JOURNAL_UNBALANCED
+            When: post(request)
+            Then: HTTP 400 / errorCode=JOURNAL_UNBALANCED
 
-TC-F003-03  approveDraft_validChecker_adjustmentPosted
-            Given: Draft status=PENDING_APPROVAL，balance=1000
-            When:  approveDraft(draftId, checkerId="checker-001")
-            Then:  Draft status=EXECUTED，Journal 入帳，balance 變動
+TC-F002-06 post_rfqScenario_twoAccounts_atomicUpdate
+            When: post(CLIENT DEBIT 800 + COMPANY CREDIT 800)
 
-TC-F003-04  approveDraft_samePersonAsMaker_throwsMakerCheckerSamePersonException
+TC-F002-07 post_frozenAccount_returnsRejectedResult
+            Given: CLIENT_ACC_001 status=FROZEN
+            When: post(request to CLIENT_ACC_001)
+
+TC-F002-08 post_concurrentSameAccount_noDoubleDebit
+
+TC-F002-09 post_hotspotCompanyAccount_1000Concurrent_noDuplicate
+
+TC-F002-10 post_inactiveBalanceType_returnsBadRequest
+            Given: balanceType="OLD_TYPE" status=INACTIVE
+            When: post(request)
+            Then: HTTP 400 / errorCode=BALANCE_TYPE_NOT_FOUND
+```
+
+### 4.1 PostingService
+
+```
+TC-F002-01 post_validSingleLeg_returnsCompletedResult
+            Given: Valid PostingRequest with CLIENT DEBIT + COMPANY CREDIT, 800 USD each
+            When: post(request)
+            Then: PostingResult.status=COMPLETED and journalId is not empty
+
+TC-F002-02 post_insufficientBalance_returnsRejectedResult
+            Given: CLIENT balance=100 with DEBIT 500 requested
+            When: post(request)
+            Then: PostingResult.status=REJECTED with errorCode=INSUFFICIENT_BALANCE
+
+TC-F002-03 post_unknownAccount_returnsRejectedResult
+            Given: accountId="GHOST_ACC" does not exist
+            When: post(request)
+            Then: PostingResult.status=REJECTED with errorCode=ACCOUNT_NOT_FOUND
+
+TC-F002-04 post_sameRequestIdTwice_idempotentResult
+            Given: requestId="req-abc" succeeds first time
+            When: second post(same request)
+            Then: Returns same PostingResult as first time; balance not changed again
+
+TC-F002-05 post_unbalancedJournal_returnsBadRequest
+            Given: DEBIT 100 + CREDIT 99 (unbalanced)
+            When: post(request)
+            Then: HTTP 400 with errorCode=JOURNAL_UNBALANCED
+
+TC-F002-06 post_rfqScenario_twoAccounts_atomicUpdate
+            Given: CLIENT_ACC_001 USD=1000 and COMPANY_FX_ACC USD=5000
+            When: post(CLIENT DEBIT 800 + COMPANY CREDIT 800)
+            Then: CLIENT=200, COMPANY=5800, and Journal contains 2 JournalLines
+
+TC-F002-07 post_frozenAccount_returnsRejectedResult
+            Given: CLIENT_ACC_001 has status=FROZEN
+            When: post(request to CLIENT_ACC_001)
+            Then: PostingResult.status=REJECTED with errorCode=ACCOUNT_FROZEN
+
+TC-F002-08 post_concurrentSameAccount_noDoubleDebit
+            Given: CLIENT balance=1000 with 1000 concurrent requests each DEBIT 1 (total 1000)
+            When: All execute
+            Then: balance=0, exactly 1000 Journals, no duplicates
+
+TC-F002-09 post_hotspotCompanyAccount_1000Concurrent_noDuplicate
+            Given: COMPANY_FX_ACC with 1000 concurrent different CLIENT CREDITs coming in
+            When: All execute
+            Then: All Journals are unique; COMPANY balance equals exactly the sum of all CREDITs
+
+TC-F002-10 post_inactiveBalanceType_returnsBadRequest
+            Given: balanceType="OLD_TYPE" has status=INACTIVE
+            When: post(request)
+            Then: HTTP 400 with errorCode=BALANCE_TYPE_NOT_FOUND
+```
+
+---
+
+## Module 5
+
+```
+TC-F004-01 reverse_confirmedJournal_reversalJournalCreated
+            When: reverse(originalJournalId, request)
+
+TC-F004-02 reverse_alreadyReversedJournal_returnsRejected
+            When: reverse(originalJournalId)
+
+TC-F004-03 reverse_reversalJournal_returnsRejected
+            Given: journalType=REVERSAL
+            When: reverse(reversalJournalId)
+
+TC-F004-04 reverse_sameRequestIdTwice_idempotent
+
+TC-F004-05 reverse_crossPeriodJournal_markedCrossPeriod
+            When: reverse(...)
+            Then: ReversalResult.crossPeriod=true
+
+TC-F004-06 reverse_mirrorsOriginalLines_debitCreditSwapped
+            CLIENT DEBIT 800 + COMPANY CREDIT 800
+            When: reverse(...)
+
+TC-F004-07 reverse_insufficientBalance_stillExecutes
+            When: reverse
+```
+
+```
+TC-F004-01 reverse_confirmedJournal_reversalJournalCreated
+            Given: Original Journal has status=CONFIRMED
+            When: reverse(originalJournalId, request)
+            Then: ReversalResult.status=COMPLETED and reversalJournalId is not empty
+                   Original Journal status=REVERSED
+
+TC-F004-02 reverse_alreadyReversedJournal_returnsRejected
+            Given: Original Journal has status=REVERSED
+            When: reverse(originalJournalId)
+            Then: ReversalResult.status=REJECTED with errorCode=JOURNAL_ALREADY_REVERSED
+
+TC-F004-03 reverse_reversalJournal_returnsRejected
+            Given: journalType=REVERSAL
+            When: reverse(reversalJournalId)
+            Then: ReversalResult.status=REJECTED with errorCode=CANNOT_REVERSE_REVERSAL
+
+TC-F004-04 reverse_sameRequestIdTwice_idempotent
+            Given: requestId="rev-001" succeeds first time
+            When: second reverse(same requestId)
+            Then: Returns same ReversalResult as first time; no duplicate reversal
+
+TC-F004-05 reverse_crossPeriodJournal_markedCrossPeriod
+            Given: Original Journal has valueDate in a closed accounting period
+            When: reverse(...)
+            Then: ReversalResult.crossPeriod=true
+
+TC-F004-06 reverse_mirrorsOriginalLines_debitCreditSwapped
+            Given: Original Journal: CLIENT DEBIT 800 + COMPANY CREDIT 800
+            When: reverse(...)
+            Then: Reversal Journal: CLIENT CREDIT 800 + COMPANY DEBIT 800
+                   Amounts are exactly the same; directions are completely opposite
+
+TC-F004-07 reverse_insufficientBalance_stillExecutes
+            Given: Original Journal CREDIT 1000 (CLIENT received money), but CLIENT has transferred it out with balance=0
+            When: reverse (CLIENT DEBIT 1000 back; balance would go negative)
+            Then: ReversalResult.status=COMPLETED with balance=-1000 (no balance validation performed)
+```
+
+---
+
+## Module 6
+
+```
+TC-F003-01 createDraft_validInput_draftCreatedWithPendingStatus
+            When: createDraft(request)
+
+TC-F003-02 createDraft_unbalancedLegs_returnsBadRequest
+            Given: DEBIT 100 + CREDIT 99
+            When: createDraft(request)
+            Then: HTTP 400 / errorCode=JOURNAL_UNBALANCED
+
+TC-F003-03 approveDraft_validChecker_adjustmentPosted
+            When: approveDraft(draftId, checkerId="checker-001")
+
+TC-F003-04 approveDraft_samePersonAsMaker_throwsMakerCheckerSamePersonException
             Given: makerId="ops-001"
-            When:  approveDraft(draftId, checkerId="ops-001")
-            Then:  拋出 MakerCheckerSamePersonException，Draft 不執行
+            When: approveDraft(draftId, checkerId="ops-001")
 
-TC-F003-05  approveDraft_expiredDraft_throwsDraftExpiredException
-            Given: Draft expiresAt 已過期
-            When:  approveDraft(draftId)
-            Then:  拋出 DraftExpiredException
+TC-F003-05 approveDraft_expiredDraft_throwsDraftExpiredException
+            When: approveDraft(draftId)
 
-TC-F003-06  approveDraft_alreadyExecutedDraft_throwsDraftNotPendingException
+TC-F003-06 approveDraft_alreadyExecutedDraft_throwsDraftNotPendingException
             Given: Draft status=EXECUTED
-            When:  approveDraft(draftId)
-            Then:  拋出 DraftNotPendingException
+            When: approveDraft(draftId)
 
-TC-F003-07  rejectDraft_validChecker_draftStatusRejected
+TC-F003-07 rejectDraft_validChecker_draftStatusRejected
             Given: Draft status=PENDING_APPROVAL
-            When:  rejectDraft(draftId, checkerId, rejectReason)
-            Then:  Draft status=REJECTED，未入帳
+            When: rejectDraft(draftId, checkerId, rejectReason)
 
-TC-F003-08  approveDraft_idempotent_sameRequestIdTwice_notDoublePosted
-            Given: approveRequestId="appr-001" 第一次成功入帳
-            When:  第二次 approveDraft(相同 requestId)
-            Then:  返回原結果，balance 不重複變動
+TC-F003-08 approveDraft_idempotent_sameRequestIdTwice_notDoublePosted
+```
+
+```
+TC-F003-01 createDraft_validInput_draftCreatedWithPendingStatus
+            Given: Valid AdjustmentDraftRequest
+            When: createDraft(request)
+            Then: Draft exists with status=PENDING_APPROVAL and not posted
+
+TC-F003-02 createDraft_unbalancedLegs_returnsBadRequest
+            Given: DEBIT 100 + CREDIT 99
+            When: createDraft(request)
+            Then: HTTP 400 with errorCode=JOURNAL_UNBALANCED
+
+TC-F003-03 approveDraft_validChecker_adjustmentPosted
+            Given: Draft status=PENDING_APPROVAL with balance=1000
+            When: approveDraft(draftId, checkerId="checker-001")
+            Then: Draft status=EXECUTED and Journal posted with balance change
+
+TC-F003-04 approveDraft_samePersonAsMaker_throwsMakerCheckerSamePersonException
+            Given: makerId="ops-001"
+            When: approveDraft(draftId, checkerId="ops-001")
+            Then: Throws MakerCheckerSamePersonException and Draft is not executed
+
+TC-F003-05 approveDraft_expiredDraft_throwsDraftExpiredException
+            Given: Draft expiresAt has expired
+            When: approveDraft(draftId)
+            Then: Throws DraftExpiredException
+
+TC-F003-06 approveDraft_alreadyExecutedDraft_throwsDraftNotPendingException
+            Given: Draft status=EXECUTED
+            When: approveDraft(draftId)
+            Then: Throws DraftNotPendingException
+
+TC-F003-07 rejectDraft_validChecker_draftStatusRejected
+            Given: Draft status=PENDING_APPROVAL
+            When: rejectDraft(draftId, checkerId, rejectReason)
+            Then: Draft status=REJECTED and not posted
+
+TC-F003-08 approveDraft_idempotent_sameRequestIdTwice_notDoublePosted
+            Given: approveRequestId="appr-001" first time successfully posted
+            When: second approveDraft(same requestId)
+            Then: Returns original result and balance is not changed again
 ```
 
 ---
 
-## Module 7：Balance Query（F-005）
+## Module 7
 
 ```
-TC-F005-01  getBalance_activeAccount_returnsCurrentBalance
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 700.00（State Machine 最新值）
-            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD")
-            Then:  amount=700.00，dataSource=STATE_MACHINE
+TC-F005-01 getBalance_activeAccount_returnsCurrentBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 700.00
+            When: getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD")
 
-TC-F005-02  getBalance_afterPosting_immediatelyReflectsNewBalance
-            Given: balance=1000.00，執行 DEBIT 300
-            When:  立即 getBalance（同一請求周期）
-            Then:  amount=700.00（無延遲，強一致）
+TC-F005-02 getBalance_afterPosting_immediatelyReflectsNewBalance
+            Then: amount=700.00
 
-TC-F005-03  getBalance_tradeAheadNegativeBalance_returnsNegativeValue
+TC-F005-03 getBalance_tradeAheadNegativeBalance_returnsNegativeValue
             Given: TRADE_AHEAD_BALANCE/USD = -45000.00
-            When:  getBalance(...)
-            Then:  amount=-45000.00，allowNegative=true
+            When: getBalance(...)
 
-TC-F005-04  getBalance_unknownAccount_throwsAccountNotFoundException
-            Given: accountId 不存在
-            When:  getBalance(...)
-            Then:  拋出 AccountNotFoundException
+TC-F005-04 getBalance_unknownAccount_throwsAccountNotFoundException
+            When: getBalance(...)
 
-TC-F005-05  getBatchBalances_multipleAccounts_allReturnedCorrectly
-            Given: 200 個帳戶各有不同 balance
-            When:  getBatchBalances([200 個 key])
-            Then:  返回 200 個正確 balance，dataSource=STATE_MACHINE
+TC-F005-05 getBatchBalances_multipleAccounts_allReturnedCorrectly
+            When: getBatchBalances
 
-TC-F005-06  getAsOfBalance_historicalSnapshot_returnsSnapshotBalance
-            Given: EOD Snapshot at 2026-05-15，CLIENT balance=500.00
-                   今日 balance=700.00
-            When:  getAsOfBalance("CLIENT_ACC_001", asOf="2026-05-15")
-            Then:  amount=500.00，dataSource=EOD_SNAPSHOT
+TC-F005-06 getAsOfBalance_historicalSnapshot_returnsSnapshotBalance
+            When: getAsOfBalance("CLIENT_ACC_001", asOf="2026-05-15")
+```
+
+```
+TC-F005-01 getBalance_activeAccount_returnsCurrentBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 700.00 (State Machine latest value)
+            When: getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD")
+            Then: amount=700.00 and dataSource=STATE_MACHINE
+
+TC-F005-02 getBalance_afterPosting_immediatelyReflectsNewBalance
+            Given: balance=1000.00 and DEBIT 300 executed
+            When: getBalance immediately (same request cycle)
+            Then: amount=700.00 (no delay, strongly consistent)
+
+TC-F005-03 getBalance_tradeAheadNegativeBalance_returnsNegativeValue
+            Given: TRADE_AHEAD_BALANCE/USD = -45000.00
+            When: getBalance(...)
+            Then: amount=-45000.00 and allowNegative=true
+
+TC-F005-04 getBalance_unknownAccount_throwsAccountNotFoundException
+            Given: accountId does not exist
+            When: getBalance(...)
+            Then: Throws AccountNotFoundException
+
+TC-F005-05 getBatchBalances_multipleAccounts_allReturnedCorrectly
+            Given: 200 accounts each with different balance
+            When: getBatchBalances([200 keys])
+            Then: Returns 200 correct balances with dataSource=STATE_MACHINE
+
+TC-F005-06 getAsOfBalance_historicalSnapshot_returnsSnapshotBalance
+            Given: EOD Snapshot at 2026-05-15 with CLIENT balance=500.00
+                   Today's balance=700.00
+            When: getAsOfBalance("CLIENT_ACC_001", asOf="2026-05-15")
+            Then: amount=500.00 and dataSource=EOD_SNAPSHOT
 ```
 
 ---
 
-## Module 8：Journal Query（F-006）
+## Module 8
 
 ```
-TC-F006-01  getJournal_existingJournalId_returnsJournalWithLines
-            Given: JNL-001 已同步到 MySQL View Layer
-            When:  getJournal("JNL-001")
-            Then:  返回 Journal 及所有 JournalLine，dataSource=VIEW_LAYER
+TC-F006-01 getJournal_existingJournalId_returnsJournalWithLines
+            When: getJournal("JNL-001")
 
-TC-F006-02  getJournalsByAccount_withFilters_returnsPagedResults
-            Given: CLIENT_ACC_001 有 1250 筆 Journal
-            When:  getJournals(accountId="CLIENT_ACC_001", page=0, size=50)
-            Then:  返回 50 筆，totalCount=1250
+TC-F006-02 getJournalsByAccount_withFilters_returnsPagedResults
+            When: getJournals(accountId="CLIENT_ACC_001", page=0, size=50)
 
-TC-F006-03  getJournalsByBusinessEventRef_rfqId_returnsAllRelatedJournals
-            Given: RFQ-001 有原始 Journal + Reversal Journal
-            When:  getJournals(businessEventRef="RFQ-001")
-            Then:  返回 2 筆，包含 NORMAL + REVERSAL 類型
+TC-F006-03 getJournalsByBusinessEventRef_rfqId_returnsAllRelatedJournals
+            When: getJournals(businessEventRef="RFQ-001")
 
-TC-F006-04  getJournalChain_originalJournal_returnsFullChain
-            Given: 原始 → Reversal → Rebook 三筆 Journal
-            When:  getChain(originalJournalId)
-            Then:  chain 包含 3 筆，關係正確標明
+TC-F006-04 getJournalChain_originalJournal_returnsFullChain
+            When: getChain(originalJournalId)
 
-TC-F006-05  getJournalsByRequestId_confirmsIdempotency
-            Given: requestId="req-abc" 對應 JNL-001
-            When:  getJournals(requestId="req-abc")
-            Then:  返回 JNL-001
+TC-F006-05 getJournalsByRequestId_confirmsIdempotency
+            When: getJournals(requestId="req-abc")
+```
+
+```
+TC-F006-01 getJournal_existingJournalId_returnsJournalWithLines
+            Given: JNL-001 has been synced to MySQL View Layer
+            When: getJournal("JNL-001")
+            Then: Returns Journal and all JournalLines with dataSource=VIEW_LAYER
+
+TC-F006-02 getJournalsByAccount_withFilters_returnsPagedResults
+            Given: CLIENT_ACC_001 has 1250 Journals
+            When: getJournals(accountId="CLIENT_ACC_001", page=0, size=50)
+            Then: Returns 50 records with totalCount=1250
+
+TC-F006-03 getJournalsByBusinessEventRef_rfqId_returnsAllRelatedJournals
+            Given: RFQ-001 has original Journal + Reversal Journal
+            When: getJournals(businessEventRef="RFQ-001")
+            Then: Returns 2 records including NORMAL + REVERSAL types
+
+TC-F006-04 getJournalChain_originalJournal_returnsFullChain
+            Given: Original → Reversal → Rebook three Journals
+            When: getChain(originalJournalId)
+            Then: Chain contains 3 records with relationships correctly marked
+
+TC-F006-05 getJournalsByRequestId_confirmsIdempotency
+            Given: requestId="req-abc" corresponds to JNL-001
+            When: getJournals(requestId="req-abc")
+            Then: Returns JNL-001
 ```
 
 ---
 
-## Module 9：Reconciliation（F-007）
+## Module 9
 
 ```
-TC-F007-01  runL1Reconciliation_allJournalsBalanced_noDiscrepancies
-            Given: 100 筆 Journal，全部借貸平衡
-            When:  runL1Reconciliation(date)
-            Then:  Report.l1Summary.unbalancedJournals=0
+TC-F007-01 runL1Reconciliation_allJournalsBalanced_noDiscrepancies
+            When: runL1Reconciliation(date)
+            Then: Report.l1Summary.unbalancedJournals=0
 
-TC-F007-02  runL1Reconciliation_unbalancedJournal_discrepancyDetected
-            Given: 1 筆 Journal 被人為修改為不平衡（注入測試）
-            When:  runL1Reconciliation(date)
-            Then:  Report.l1Summary.unbalancedJournals=1，產生 Case
+TC-F007-02 runL1Reconciliation_unbalancedJournal_discrepancyDetected
+            When: runL1Reconciliation(date)
 
-TC-F007-03  runL1Reconciliation_balanceMismatch_detectedAndCaseCreated
-            Given: State Machine balance ≠ MySQL balance（注入不一致）
-            When:  runL1Reconciliation(date)
-            Then:  balanceConsistencyPassed=false，Case 產生
+TC-F007-03 runL1Reconciliation_balanceMismatch_detectedAndCaseCreated
+            Given: State Machine balance ≠ MySQL balance
+            When: runL1Reconciliation(date)
 
-TC-F007-04  runL2Reconciliation_subAccountsSumMatchControl_noCases
-            Given: 10 個 CLIENT 帳戶 USD 各 100，CONTROL_CLIENT_USD = 1000
-            When:  runL2Reconciliation(rule="RFQ-USD-CONTROL")
-            Then:  rulesPassed=1，無 Case
+TC-F007-04 runL2Reconciliation_subAccountsSumMatchControl_noCases
+            When: runL2Reconciliation(rule="RFQ-USD-CONTROL")
 
-TC-F007-05  runL2Reconciliation_subAccountsSumMismatch_caseCreated
-            Given: 10 個 CLIENT 帳戶 USD 各 100（共 1000），CONTROL = 999（差 1）
+TC-F007-05 runL2Reconciliation_subAccountsSumMismatch_caseCreated
                    tolerance=0.01
-            When:  runL2Reconciliation(rule)
-            Then:  rulesFailed=1，Case 產生，discrepancyAmount=1.00
+            When: runL2Reconciliation(rule)
 
-TC-F007-06  runL3Reconciliation_externalFileMatched_allMatched
-            Given: 100 筆外部清算，100 筆內部 Journal，key 完全對應
-            When:  runL3Reconciliation(externalFile)
-            Then:  matched=100，internalOnly=0，externalOnly=0
+TC-F007-06 runL3Reconciliation_externalFileMatched_allMatched
+            When: runL3Reconciliation(externalFile)
 
-TC-F007-07  runL3Reconciliation_internalOnly_caseCreated
-            Given: 內部有 1 筆 Journal，外部清算文件沒有
-            When:  runL3Reconciliation(externalFile)
-            Then:  internalOnly=1，Case 產生，type=INTERNAL_ONLY
+TC-F007-07 runL3Reconciliation_internalOnly_caseCreated
+            When: runL3Reconciliation(externalFile)
 
-TC-F007-08  runL3Reconciliation_amountMismatch_caseCreated
-            Given: 同一 externalRef，內部 800.00，外部 810.00
-            When:  runL3Reconciliation(externalFile)
-            Then:  amountMismatch=1，Case 產生，discrepancyAmount=10.00
+TC-F007-08 runL3Reconciliation_amountMismatch_caseCreated
+            When: runL3Reconciliation(externalFile)
+```
+
+```
+TC-F007-01 runL1Reconciliation_allJournalsBalanced_noDiscrepancies
+            Given: 100 Journals, all balanced
+            When: runL1Reconciliation(date)
+            Then: Report.l1Summary.unbalancedJournals=0
+
+TC-F007-02 runL1Reconciliation_unbalancedJournal_discrepancyDetected
+            Given: 1 Journal artificially modified to be unbalanced (injected test)
+            When: runL1Reconciliation(date)
+            Then: Report.l1Summary.unbalancedJournals=1 and Case created
+
+TC-F007-03 runL1Reconciliation_balanceMismatch_detectedAndCaseCreated
+            Given: State Machine balance ≠ MySQL balance (injected inconsistency)
+            When: runL1Reconciliation(date)
+            Then: balanceConsistencyPassed=false and Case created
+
+TC-F007-04 runL2Reconciliation_subAccountsSumMatchControl_noCases
+            Given: 10 CLIENT accounts USD each 100, CONTROL_CLIENT_USD = 1000
+            When: runL2Reconciliation(rule="RFQ-USD-CONTROL")
+            Then: rulesPassed=1 and no Case
+
+TC-F007-05 runL2Reconciliation_subAccountsSumMismatch_caseCreated
+            Given: 10 CLIENT accounts USD each 100 (total 1000), CONTROL = 999 (difference 1)
+                   tolerance=0.01
+            When: runL2Reconciliation(rule)
+            Then: rulesFailed=1 and Case created with discrepancyAmount=1.00
+
+TC-F007-06 runL3Reconciliation_externalFileMatched_allMatched
+            Given: 100 external settlements, 100 internal Journals, keys exactly match
+            When: runL3Reconciliation(externalFile)
+            Then: matched=100, internalOnly=0, externalOnly=0
+
+TC-F007-07 runL3Reconciliation_internalOnly_caseCreated
+            Given: 1 internal Journal without match in external settlement file
+            When: runL3Reconciliation(externalFile)
+            Then: internalOnly=1 and Case created with type=INTERNAL_ONLY
+
+TC-F007-08 runL3Reconciliation_amountMismatch_caseCreated
+            Given: Same externalRef with internal 800.00 and external 810.00
+            When: runL3Reconciliation(externalFile)
+            Then: amountMismatch=1 and Case created with discrepancyAmount=10.00
 ```
 
 ---
 
-## Module 10：Accounting Period / EOD（F-009）
+## Module 10
 
 ```
-TC-F009-01  closeperiod_openPeriod_eodTasksExecutedInOrder
-            Given: 帳期 2026-05-16 status=OPEN
-            When:  triggerEOD("2026-05-16")
-            Then:  各 EOD 步驟按順序執行（Snapshot → Recon → Snapshot → Report → CLOSED）
+TC-F009-01 closeperiod_openPeriod_eodTasksExecutedInOrder
+            When: triggerEOD("2026-05-16")
 
-TC-F009-02  postDuringClosing_returnsperiodClosedError
-            Given: 帳期 status=CLOSING
-            When:  post(PostingRequest)
-            Then:  PostingResult.status=REJECTED，errorCode=PERIOD_CLOSED
+TC-F009-02 postDuringClosing_returnsperiodClosedError
+            When: post(PostingRequest)
 
-TC-F009-03  postToClosedPeriod_returnsperiodClosedError
-            Given: 帳期 status=CLOSED
-            When:  post(PostingRequest，valueDate 在已關閉帳期)
-            Then:  PostingResult.status=REJECTED，errorCode=PERIOD_CLOSED
+TC-F009-03 postToClosedPeriod_returnsperiodClosedError
+            When: post
 
-TC-F009-04  reverseInClosedPeriod_allowedWithCrossPeriodFlag
-            Given: 原 Journal valueDate 在 CLOSED 帳期
-            When:  reverse(...)
-            Then:  ReversalResult.status=COMPLETED，crossPeriod=true
+TC-F009-04 reverseInClosedPeriod_allowedWithCrossPeriodFlag
+            When: reverse(...)
 
-TC-F009-05  eodBalanceSnapshot_matchesStateMachine
-            Given: EOD 執行完成
-            When:  比較 EOD Snapshot balance vs State Machine balance（同時間點）
-            Then:  所有帳戶 balance 完全一致，差異為 0
+TC-F009-05 eodBalanceSnapshot_matchesStateMachine
+```
+
+```
+TC-F009-01 closePeriod_openPeriod_eodTasksExecutedInOrder
+            Given: Period 2026-05-16 status=OPEN
+            When: triggerEOD("2026-05-16")
+            Then: EOD steps execute in order (Snapshot → Recon → Snapshot → Report → CLOSED)
+
+TC-F009-02 postDuringClosing_returnsPeriodClosedError
+            Given: Period status=CLOSING
+            When: post(PostingRequest)
+            Then: PostingResult.status=REJECTED with errorCode=PERIOD_CLOSED
+
+TC-F009-03 postToClosedPeriod_returnsPeriodClosedError
+            Given: Period status=CLOSED
+            When: post(PostingRequest with valueDate in closed period)
+            Then: PostingResult.status=REJECTED with errorCode=PERIOD_CLOSED
+
+TC-F009-04 reverseInClosedPeriod_allowedWithCrossPeriodFlag
+            Given: Original Journal valueDate in CLOSED period
+            When: reverse(...)
+            Then: ReversalResult.status=COMPLETED with crossPeriod=true
+
+TC-F009-05 eodBalanceSnapshot_matchesStateMachine
+            Given: EOD execution completed
+            When: Compare EOD Snapshot balance vs State Machine balance (same point in time)
+            Then: All account balances are exactly the same with difference 0
 ```
 
 ---
 
-## Module 11：RocksDB 持久性測試
+## Module 11
 
 ```
-TC-ROCKS-01  writeBatch_atomic_journalAndBalanceConsistentAfterCrash
-             Given: 模擬寫 WriteBatch 中途 JVM crash（注入）
-             When:  重啟後從 RocksDB 讀取
-             Then:  journal 和 balance 要嘛都存在，要嘛都不存在（原子性）
+TC-ROCKS-01 writeBatch_atomic_journalAndBalanceConsistentAfterCrash
 
-TC-ROCKS-02  walReplay_afterCleanRestart_balanceRecovered
-             Given: 執行 100 筆 PostingCommand，正常關閉
-             When:  重啟，從 WAL + Snapshot replay
-             Then:  所有 balance 與關閉前完全一致
+TC-ROCKS-02 walReplay_afterCleanRestart_balanceRecovered
 
-TC-ROCKS-03  columnFamilyIsolation_writeToOneCF_notAffectOthers
-             Given: 寫 CF_JOURNAL 一筆
-             When:  讀 CF_BALANCE
-             Then:  CF_BALANCE 不受影響，key 不衝突
+TC-ROCKS-03 columnFamilyIsolation_writeToOneCF_notAffectOthers
 ```
 
-### 11.1 BalanceChangeEvent — accountSeq【v0.2 新增】
+```
+TC-ROCKS-01 writeBatch_atomic_journalAndBalanceConsistentAfterCrash
+             Given: Simulate JVM crash during WriteBatch write (injection)
+             When: Read from RocksDB after restart
+             Then: Both journal and balance either exist together or not at all (atomicity)
+
+TC-ROCKS-02 walReplay_afterCleanRestart_balanceRecovered
+             Given: Execute 100 PostingCommands, shutdown normally
+             When: Restart and replay from WAL + Snapshot
+             Then: All balances are exactly the same as before shutdown
+
+TC-ROCKS-03 columnFamilyIsolation_writeToOneCF_notAffectOthers
+             Given: Write one record to CF_JOURNAL
+             When: Read CF_BALANCE
+             Then: CF_BALANCE is unaffected and keys do not conflict
+```
+
+### 11.1 BalanceChangeEvent
 
 ```
-TC-F011-01  publishEvent_firstPosting_accountSeqIsOne
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD 首次過帳
-            When:  State Machine apply → publish BalanceChangeEvent
-            Then:  event.accountSeq == 1
-                   event.prevAccountSeq == 0（代表無前序）
+TC-F011-01 publishEvent_firstPosting_accountSeqIsOne
+            When: State Machine apply → publish BalanceChangeEvent
+            Then: event.accountSeq == 1
+                   event.prevAccountSeq == 0
 
-TC-F011-02  publishEvent_subsequentPosting_accountSeqIncremented
-            Given: 上一條事件 accountSeq == 41
-            When:  下一筆 Posting apply → publish
-            Then:  event.accountSeq == 42
+TC-F011-02 publishEvent_subsequentPosting_accountSeqIncremented
+            Then: event.accountSeq == 42
                    event.prevAccountSeq == 41
 
-TC-F011-03  publishEvent_reversal_accountSeqIncremented
-            Given: 上一條事件 accountSeq == 10
-            When:  Reversal apply → publish
-            Then:  event.accountSeq == 11
+TC-F011-03 publishEvent_reversal_accountSeqIncremented
+            When: Reversal apply → publish
+            Then: event.accountSeq == 11
                    event.prevAccountSeq == 10
 
-TC-F011-04  consumer_detectsGap_whenSeqNotConsecutive
-            Given: Consumer 已收到 accountSeq == 100
-            When:  下一條收到的事件 accountSeq == 102（prevAccountSeq == 101）
-                   但 101 從未到達
-            Then:  Consumer 判定 gap（prevAccountSeq 102 ≠ 上一條 accountSeq 100 + 1），觸發告警
+TC-F011-04 consumer_detectsGap_whenSeqNotConsecutive
 
-TC-F011-05  consumer_noDuplicateAlert_whenIdempotentRetry
-            Given: Outbox at-least-once 重發同一條事件
-                   event.accountSeq == 50，event.idempotencyKey 相同
-            When:  Consumer 收到重複事件
-            Then:  Consumer 按 idempotencyKey 去重，不誤判為 gap
-                   （重複事件 accountSeq 相同，不是新的 seq）
+TC-F011-05 consumer_noDuplicateAlert_whenIdempotentRetry
 
-TC-F011-06  restartNode_outboxResend_accountSeqUnchanged
-            Given: State Machine apply 時 accountSeq == 77，寫入 Outbox
-                   節點重啟，Outbox 重發
-            When:  Consumer 收到重發事件
-            Then:  event.accountSeq 仍為 77，與原始發送一致
-                   （seq 在 apply 時已確定，Outbox 重發不改變值）
+TC-F011-06 restartNode_outboxResend_accountSeqUnchanged
 
-TC-F011-07  multiBalanceType_samePosting_seqIndependentPerKey
-            Given: 一筆 RFQ Posting 同時更新：
-                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD（上一條 seq=10）
-                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD（上一條 seq=5）
-            When:  publish 兩個 BalanceChangeEvent
-            Then:  AVAILABLE_BALANCE event.accountSeq == 11
+TC-F011-07 multiBalanceType_samePosting_seqIndependentPerKey
+
+                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD
+                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD
+            Then: AVAILABLE_BALANCE event.accountSeq == 11
                    TRADE_AHEAD_BALANCE event.accountSeq == 6
-                   （兩個 key 的 seq 各自遞增，互不影響）
+
+```
+
+### 11.1 BalanceChangeEvent
+
+```
+TC-F011-01 publishEvent_firstPosting_accountSeqIsOne
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD first posting
+            When: State Machine apply → publish BalanceChangeEvent
+            Then: event.accountSeq == 1
+                   event.prevAccountSeq == 0 (represents no predecessor)
+
+TC-F011-02 publishEvent_subsequentPosting_accountSeqIncremented
+            Given: Previous event has accountSeq == 41
+            When: Next Posting apply → publish
+            Then: event.accountSeq == 42
+                   event.prevAccountSeq == 41
+
+TC-F011-03 publishEvent_reversal_accountSeqIncremented
+            Given: Previous event has accountSeq == 10
+            When: Reversal apply → publish
+            Then: event.accountSeq == 11
+                   event.prevAccountSeq == 10
+
+TC-F011-04 consumer_detectsGap_whenSeqNotConsecutive
+            Given: Consumer has received accountSeq == 100
+            When: Next received event has accountSeq == 102 (prevAccountSeq == 101)
+                   but 101 never arrived
+            Then: Consumer detects gap (prevAccountSeq 102 ≠ previous accountSeq 100 + 1) and triggers alarm
+
+TC-F011-05 consumer_noDuplicateAlert_whenIdempotentRetry
+            Given: Outbox at-least-once resends the same event
+                   event.accountSeq == 50 with same event.idempotencyKey
+            When: Consumer receives duplicate event
+            Then: Consumer deduplicates by idempotencyKey and does not falsely detect gap
+                   (duplicate event has same accountSeq, not a new seq)
+
+TC-F011-06 restartNode_outboxResend_accountSeqUnchanged
+            Given: At State Machine apply accountSeq == 77, written to Outbox
+                   Node restarts and Outbox resends
+            When: Consumer receives resent event
+            Then: event.accountSeq is still 77, consistent with original send
+                   (seq is determined at apply time; Outbox resend does not change value)
+
+TC-F011-07 multiBalanceType_samePosting_seqIndependentPerKey
+            Given: One RFQ Posting simultaneously updates:
+                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD (previous seq=10)
+                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD (previous seq=5)
+            When: Publish two BalanceChangeEvents
+            Then: AVAILABLE_BALANCE event.accountSeq == 11
+                   TRADE_AHEAD_BALANCE event.accountSeq == 6
+                   (seqs for the two keys increment independently and do not affect each other)
 ```
 
 ---
 
-## Module 12：性能 / 負載測試（NFR）
+## Module 12
 
 ```
-TC-NFR-01  posting_p95_under3ms_normalLoad
-           Given: 500 並發，各自不同帳戶
-           When:  執行 10,000 次 Posting
-           Then:  P95 ≤ 3ms
+TC-NFR-01 posting_p95_under3ms_normalLoad
+           Then: P95 ≤ 3ms
 
-TC-NFR-02  posting_hotspotAccount_p95_under3ms
-           Given: 1000 並發，全部打 COMPANY_FX_ACC
-           When:  執行 10,000 次 Posting
-           Then:  P95 ≤ 3ms，無重複入帳，balance 精確
+TC-NFR-02 posting_hotspotAccount_p95_under3ms
 
-TC-NFR-03  balanceQuery_p95_under2ms
+TC-NFR-03 balanceQuery_p95_under2ms
            Given: 10,000 QPS Balance Query
-           When:  連續查詢 Active 帳戶 balance
-           Then:  P95 ≤ 2ms
+           Then: P95 ≤ 2ms
 
-TC-NFR-04  idempotency_1000Retries_onlyOneJournalCreated
-           Given: 相同 requestId
-           When:  1000 次並發重試
-           Then:  只有 1 筆 Journal 存在
+TC-NFR-04 idempotency_1000Retries_onlyOneJournalCreated
 
-TC-NFR-05  concurrentPosting_noNegativeBalance_noDoubleDebit
-           Given: CLIENT balance=1000，1001 並發 DEBIT 1
-           When:  全部執行
-           Then:  1000 筆成功，1 筆 INSUFFICIENT_BALANCE，balance=0，無負數穿透
+TC-NFR-05 concurrentPosting_noNegativeBalance_noDoubleDebit
+```
+
+```
+TC-NFR-01 posting_p95_under3ms_normalLoad
+           Given: 500 concurrent, each to different accounts
+           When: Execute 10,000 Postings
+           Then: P95 ≤ 3ms
+
+TC-NFR-02 posting_hotspotAccount_p95_under3ms
+           Given: 1000 concurrent, all hitting COMPANY_FX_ACC
+           When: Execute 10,000 Postings
+           Then: P95 ≤ 3ms with no duplicate postings and precise balance
+
+TC-NFR-03 balanceQuery_p95_under2ms
+           Given: 10,000 QPS Balance Query
+           When: Continuously query active account balances
+           Then: P95 ≤ 2ms
+
+TC-NFR-04 idempotency_1000Retries_onlyOneJournalCreated
+           Given: Same requestId
+           When: 1000 concurrent retries
+           Then: Only 1 Journal exists
+
+TC-NFR-05 concurrentPosting_noNegativeBalance_noDoubleDebit
+           Given: CLIENT balance=1000 with 1001 concurrent DEBIT 1
+           When: All execute
 ```
 
 ---
 
-## Module 13：Account Queue（ADR-001 v0.2）
+## Module 13
 
 ```
-TC-QUEUE-01  singleAccount_serialization_processedInOrder
+TC-QUEUE-01 singleAccount_serialization_processedInOrder
              Given: CLIENT_ACC_001 balance=10000, 50 concurrent DEBIT 1 via AccountQueueManager
-             When:  全部請求完成
-             Then:  balance=9950，所有請求串行處理，無並發衝突
 
-TC-QUEUE-02  backpressure_exceedingMaxQueueSize_returnsFalse
+TC-QUEUE-02 backpressure_exceedingMaxQueueSize_returnsFalse
              Given: MAX_QUEUE_SIZE=1000
-             When:  提交 > 1000 請求到同一帳戶
-             Then:  超過部分返回 false（背壓），queue depth ≤ 1000
 
-TC-QUEUE-03  multipleAccounts_independentQueues
-             Given: ACC_A 和 ACC_B 各有獨立 queue
-             When:  同時提交 100 CREDIT 到兩個帳戶
-             Then:  兩者獨立並行處理，無錯誤
+TC-QUEUE-03 multipleAccounts_independentQueues
+```
+
+```
+TC-QUEUE-01 singleAccount_serialization_processedInOrder
+             Given: CLIENT_ACC_001 balance=10000 with 50 concurrent DEBIT 1 via AccountQueueManager
+             When: All requests complete
+             Then: balance=9950, all requests processed serially with no concurrency conflicts
+
+TC-QUEUE-02 backpressure_exceedingMaxQueueSize_returnsFalse
+             Given: MAX_QUEUE_SIZE=1000
+             When: Submit > 1000 requests to the same account
+             Then: Excess returns false (backpressure) with queue depth ≤ 1000
+
+TC-QUEUE-03 multipleAccounts_independentQueues
+             Given: ACC_A and ACC_B each have independent queues
+             When: Submit 100 CREDITs to both accounts simultaneously
+             Then: Both process independently in parallel with no errors
 ```
 
 ---
 
-## Module 14：Account Queue + Outbox Integration
+```
+TC-QUEUE-OBX-01 concurrentRequests_produceCorrectEvents
+                 When: Account Queue serialized → StateMachine apply → Event publish
+
+TC-QUEUE-OBX-02 hotspotAccount_concurrentCredits_allSucceed
+```
 
 ```
-TC-QUEUE-OBX-01  concurrentRequests_produceCorrectEvents
-                 Given: CLIENT_ACC_001 + COMPANY_FX_ACC，20 並發 Posting（每筆 2 條 JournalLine）
-                 When:  Account Queue serialized → StateMachine apply → Event publish
-                 Then:  40 個 BalanceChangeEvent，CLIENT 端 accountSeq 嚴格遞增
+TC-QUEUE-OBX-01 concurrentRequests_produceCorrectEvents
+                 Given: CLIENT_ACC_001 + COMPANY_FX_ACC with 20 concurrent Postings (2 JournalLines each)
+                 When: Account Queue serialized → StateMachine apply → Event publish
+                 Then: 40 BalanceChangeEvents with CLIENT side accountSeq strictly increasing
 
-TC-QUEUE-OBX-02  hotspotAccount_concurrentCredits_allSucceed
-                 Given: COMPANY_FX_ACC hotspot，50 並發 CREDIT 各 10.00
-                 When:  Account Queue 串行處理 COMPANY 帳戶
-                 Then:  COMPANY balance = 100000 + 500 = 100500，100 個事件，無重複
+TC-QUEUE-OBX-02 hotspotAccount_concurrentCredits_allSucceed
+                 Given: COMPANY_FX_ACC hotspot with 50 concurrent CREDITs of 10.00 each
+                 When: Account Queue processes COMPANY account serially
+                 Then: COMPANY balance = 100000 + 500 = 100500, 100 events with no duplicates
 ```
 
 ---
 
-## Module 15：SOFAJRaft Cluster
-
 ```
-TC-RAFT-01  threeNodeCluster_leaderElectionAndLogReplication
-            Given: 3 個 RaftNodeManager on 127.0.0.1:18081/2/3
-            When:  start → wait leader → submit PostingCommand
-            Then:  leader elected in < 1s，journal replicated to all 3 nodes
+TC-RAFT-01 threeNodeCluster_leaderElectionAndLogReplication
+            When: start → wait leader → submit PostingCommand
 
-TC-RAFT-02  cluster_survivesFollowerRestart
+TC-RAFT-02 cluster_survivesFollowerRestart
             Given: 3-node cluster with elected leader
-            When:  follower 關閉後重啟
-            Then:  follower 重新加入 cluster，無錯誤
+```
+
+```
+TC-RAFT-01 threeNodeCluster_leaderElectionAndLogReplication
+            Given: 3 RaftNodeManagers on 127.0.0.1:18081/2/3
+            When: start → wait for leader → submit PostingCommand
+            Then: Leader elected in < 1s and journal replicated to all 3 nodes
+
+TC-RAFT-02 cluster_survivesFollowerRestart
+            Given: 3-node cluster with elected leader
+            When: Follower shuts down and restarts
+            Then: Follower rejoins cluster with no errors
 ```
 
 ---
 
-## Module 16：Kafka Event Publishing（F-011/F-011b）
+## Module 16
 
 ```
-TC-KAFKA-01  posting_publishesBalanceChangeEvent_toKafka
+TC-KAFKA-01 posting_publishesBalanceChangeEvent_toKafka
              Given: Kafka broker (Testcontainers), CLIENT_ACC_001 balance=1000
-             When:  StateMachine.applyPosting DEBIT 100 → KafkaEventPublisher flush
-             Then:  Kafka consumer receives 1+ record with BALANCE_CHANGE, accountSeq field
+             When: StateMachine.applyPosting DEBIT 100 → KafkaEventPublisher flush
+             Then: Kafka consumer receives 1+ record with BALANCE_CHANGE, accountSeq field
 
-TC-KAFKA-02  multiplePostings_produceSequentialAccountSeq
+TC-KAFKA-02 multiplePostings_produceSequentialAccountSeq
              Given: Kafka broker, CLIENT_ACC_001
-             When:  5 sequential DEBIT 10 postings → publish to Kafka
-             Then:  Kafka consumer receives 5 records with monotonically increasing accountSeq
+             When: 5 sequential DEBIT 10 postings → publish to Kafka
+             Then: Kafka consumer receives 5 records with monotonically increasing accountSeq
+```
+
+```
+TC-KAFKA-01 posting_publishesBalanceChangeEvent_toKafka
+             Given: Kafka broker (Testcontainers), CLIENT_ACC_001 balance=1000
+             When: StateMachine.applyPosting DEBIT 100 → KafkaEventPublisher flush
+             Then: Kafka consumer receives 1+ record with BALANCE_CHANGE and accountSeq field
+
+TC-KAFKA-02 multiplePostings_produceSequentialAccountSeq
+             Given: Kafka broker, CLIENT_ACC_001
+             When: 5 sequential DEBIT 10 postings → publish to Kafka
+             Then: Kafka consumer receives 5 records with monotonically increasing accountSeq
 ```
 
 ---
 
-## 測試執行順序建議（TDD Red-Green 順序）
+```
+Phase 1
+  TC-F001-* → TC-F010-* → TC-F008-01~10
+
+Phase 2
+  TC-F002-01~07
+  TC-F008-11~15
+  TC-F004-01~07
+  TC-F003-01~08
+
+Phase 3
+  TC-F005-*
+  TC-F006-*
+
+Phase 3.5
+  TC-F008-19~26
+  TC-F011-01~07
+
+Phase 4
+  TC-F007-*
+  TC-F009-*
+
+Phase 5
+  TC-ROCKS-*
+  TC-NFR-*
+
+Phase 6
+  TC-F002-08~09
+  TC-NFR-04~05
+```
+
+## Recommended Test Execution Order (TDD Red-Green Order)
 
 ```
-Phase 1 — 基礎模型
-  TC-F001-* → TC-F010-* → TC-F008-01~10（Balance 操作）
+Phase 1 — Foundation Model
+  TC-F001-* → TC-F010-* → TC-F008-01~10 (Balance Operations)
 
-Phase 2 — 核心寫路徑
-  TC-F002-01~07（Posting 基本）
-  TC-F008-11~15（Reversal State Machine）
-  TC-F004-01~07（Reversal API）
-  TC-F003-01~08（Manual Adjustment）
+Phase 2 — Core Write Path
+  TC-F002-01~07 (Posting Basics)
+  TC-F008-11~15 (Reversal State Machine)
+  TC-F004-01~07 (Reversal API)
+  TC-F003-01~08 (Manual Adjustment)
 
-Phase 3 — 讀路徑
-  TC-F005-*（Balance Query）
-  TC-F006-*（Journal Query）
+Phase 3 — Read Path
+  TC-F005-* (Balance Query)
+  TC-F006-* (Journal Query)
 
-Phase 3.5 — accountSeq【v0.2 新增】
-  TC-F008-19~26（State Machine accountSeq）
-  TC-F011-01~07（BalanceChangeEvent accountSeq）
+Phase 3.5
+  TC-F008-19~26 (State Machine accountSeq)
+  TC-F011-01~07 (BalanceChangeEvent accountSeq)
 
-Phase 4 — 對帳與帳期
-  TC-F007-*（Reconciliation）
-  TC-F009-*（Accounting Period）
+Phase 4 — Reconciliation and Period
+  TC-F007-* (Reconciliation)
+  TC-F009-* (Accounting Period)
 
-Phase 5 — 持久性與性能
-  TC-ROCKS-*（RocksDB 持久性）
-  TC-NFR-*（性能 / 負載）
+Phase 5 — Persistence and Performance
+  TC-ROCKS-* (RocksDB Persistence)
+  TC-NFR-* (Performance / Load)
 
-Phase 6 — 並發安全
-  TC-F002-08~09（並發 Posting）
-  TC-NFR-04~05（冪等 + 並發）
+Phase 6 — Concurrency Safety
+  TC-F002-08~09 (Concurrent Posting)
+  TC-NFR-04~05 (Idempotency + Concurrency)
 ```
