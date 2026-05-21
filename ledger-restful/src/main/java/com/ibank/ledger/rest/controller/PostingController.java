@@ -4,6 +4,7 @@ import com.ibank.ledger.domain.command.CommandResult;
 import com.ibank.ledger.domain.command.PostingCommand;
 import com.ibank.ledger.domain.model.EntryType;
 import com.ibank.ledger.raft.NodeRole;
+import com.ibank.ledger.raft.RaftNodeManager;
 import com.ibank.ledger.service.PostingService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -18,16 +19,19 @@ import java.util.Map;
 public class PostingController {
 
     private final PostingService postingService;
+    private final RaftNodeManager raftNodeManager;
     private final NodeRole nodeRole;
 
-    public PostingController(PostingService postingService, NodeRole nodeRole) {
+    public PostingController(PostingService postingService,
+                              @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+                              NodeRole nodeRole) {
         this.postingService = postingService;
+        this.raftNodeManager = raftNodeManager;
         this.nodeRole = nodeRole;
     }
 
     @PostMapping
     public ResponseEntity<?> post(@RequestBody Map<String, Object> body) {
-        // Reject writes on non-leader nodes
         if (!nodeRole.isLeader()) {
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
@@ -60,7 +64,14 @@ public class PostingController {
         }).toList();
 
         PostingCommand cmd = new PostingCommand(requestId, businessEventType, businessEventRef, valueDate, legs);
-        CommandResult result = postingService.post(cmd);
+
+        // Route through Raft for replication to followers
+        CommandResult result;
+        if (raftNodeManager != null) {
+            result = raftNodeManager.submit(cmd);
+        } else {
+            result = postingService.post(cmd);
+        }
 
         if (result.isRejected()) {
             return ResponseEntity.badRequest().body(result);

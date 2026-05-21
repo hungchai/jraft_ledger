@@ -12,14 +12,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 
-/**
- * Kafka consumer that projects BalanceChangeEvents into MySQL View Layer.
- *
- * Flow: Kafka ledger.balance.change.v1 → deserialize → MySQL INSERT journal/journal_line
- * Idempotency: INSERT ... ON DUPLICATE KEY ensures at-least-once safety.
- */
 @Service
 public class ProjectionConsumer {
 
@@ -46,46 +39,53 @@ public class ProjectionConsumer {
             String balanceType    = event.get("balanceType").asText();
             String currency       = event.get("currency").asText();
             String entryType      = event.get("entryType").asText();
-            BigDecimal amount     = new BigDecimal(event.get("amount").asText());
-            BigDecimal preBalance = new BigDecimal(event.get("preBalance").asText());
-            BigDecimal postBalance = new BigDecimal(event.get("postBalance").asText());
+            BigDecimal amount     = toBigDecimal(event.get("amount"));
+            BigDecimal preBalance = toBigDecimal(event.get("preBalance"));
+            BigDecimal postBalance = toBigDecimal(event.get("postBalance"));
             long accountSeq       = event.get("accountSeq").asLong();
-            String valueDateStr   = event.get("valueDate").asText();
-            LocalDate valueDate   = LocalDate.parse(valueDateStr);
+            String businessRef    = event.has("businessEventRef") ? event.get("businessEventRef").asText() : "";
+            LocalDate valueDate   = toLocalDate(event.get("valueDate"));
 
-            // Idempotent — journal may already exist from another projection instance
+            // Idempotent journal insert
             try {
                 journalMapper.insertJournal(
                         journalId,
-                        commandType.equals("REVERSAL") ? "REVERSAL" : "NORMAL",
-                        requestId,
-                        commandType,
-                        event.has("businessEventRef") ? event.get("businessEventRef").asText() : "",
-                        valueDate,
-                        "CONFIRMED",
-                        false,
-                        LocalDateTime.now()
-                );
+                        "REVERSAL".equals(commandType) ? "REVERSAL" : "NORMAL",
+                        requestId, commandType, businessRef,
+                        valueDate, "CONFIRMED", false, LocalDateTime.now());
             } catch (Exception e) {
-                log.debug("Journal {} already exists (idempotent)", journalId);
+                log.debug("Journal {} already exists", journalId);
             }
 
+            // Idempotent journal line insert
             try {
                 journalMapper.insertJournalLine(
-                        journalLineId, journalId,
-                        "", // legId from event if available
+                        journalLineId, journalId, "",
                         accountId, balanceType, currency, entryType,
-                        amount, preBalance, postBalance,
-                        1, LocalDateTime.now()
-                );
+                        amount, preBalance, postBalance, 1, LocalDateTime.now());
             } catch (Exception e) {
-                log.debug("JournalLine {} already exists (idempotent)", journalLineId);
+                log.debug("JournalLine {} already exists", journalLineId);
             }
 
-            log.debug("Projected: {} {} {} {} {} seq={}", journalId, accountId, entryType, amount, currency, accountSeq);
+            log.info("Projected: {} {} {} {} seq={}", journalId, accountId, entryType, amount, accountSeq);
 
         } catch (Exception e) {
             log.error("Failed to project event: {}", message, e);
         }
+    }
+
+    private static BigDecimal toBigDecimal(JsonNode node) {
+        if (node == null) return BigDecimal.ZERO;
+        if (node.isNumber()) return node.decimalValue();
+        return new BigDecimal(node.asText());
+    }
+
+    private static LocalDate toLocalDate(JsonNode node) {
+        if (node == null) return LocalDate.now();
+        // Jackson serializes LocalDate as [2026,5,18]
+        if (node.isArray() && node.size() >= 3) {
+            return LocalDate.of(node.get(0).asInt(), node.get(1).asInt(), node.get(2).asInt());
+        }
+        return LocalDate.parse(node.asText());
     }
 }

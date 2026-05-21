@@ -22,12 +22,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class LedgerStateMachine {
 
@@ -89,9 +86,21 @@ public class LedgerStateMachine {
 
     public void restoreFromSnapshot() throws Exception {
         if (rocksDB == null) return;
-        byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
+        byte[] raw = rocksDB.get("sm_sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
         if (raw == null) return;
-        SnapshotData data = objectMapper.readValue(raw, SnapshotData.class);
+        restoreFromBytes(raw);
+    }
+
+    public byte[] snapshotBytes() throws Exception {
+        SnapshotData data = SnapshotData.from(
+                balanceStore, accountMetaStore, balanceTypeConfigStore,
+                journalStore, idempotencyStore,
+                raftLogIndex.get(), journalSequence.get());
+        return objectMapper.writeValueAsBytes(data);
+    }
+
+    public void restoreFromBytes(byte[] bytes) throws Exception {
+        SnapshotData data = objectMapper.readValue(bytes, SnapshotData.class);
         data.restoreTo(balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore);
         raftLogIndex.set(data.raftLogIndex);
@@ -100,6 +109,11 @@ public class LedgerStateMachine {
 
     public long getRaftLogIndex() { return raftLogIndex.get(); }
     public long getJournalSequence() { return journalSequence.get(); }
+
+    public BalanceStore getBalanceStore() { return balanceStore; }
+    public AccountMetaStore getAccountMetaStore() { return accountMetaStore; }
+    public BalanceTypeConfigStore getBalanceTypeConfigStore() { return balanceTypeConfigStore; }
+    public Map<String, Journal> getAllJournals() { return new HashMap<>(journalStore); }
 
     // ── Snapshot data record ───────────────────────────────────
 

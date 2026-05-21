@@ -8,13 +8,23 @@ import com.alipay.sofa.jraft.entity.LeaderChangeContext;
 import com.alipay.sofa.jraft.error.RaftError;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
-import com.ibank.ledger.domain.command.*;
+import com.ibank.ledger.domain.command.AccountAddBalanceTypeCommand;
+import com.ibank.ledger.domain.command.AccountCloseCommand;
+import com.ibank.ledger.domain.command.AccountCreateCommand;
+import com.ibank.ledger.domain.command.AccountFreezeCommand;
+import com.ibank.ledger.domain.command.CommandResult;
+import com.ibank.ledger.domain.command.PostingCommand;
+import com.ibank.ledger.domain.command.RaftCommand;
+import com.ibank.ledger.domain.command.ReversalCommand;
 import com.ibank.ledger.statemachine.LedgerStateMachine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -28,9 +38,14 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private final AtomicLong leaderTerm = new AtomicLong(-1);
     private volatile boolean isLeader;
     private NodeRole nodeRole;
+    private java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands;
 
     public LedgerRaftStateMachine(LedgerStateMachine ledgerStateMachine) {
         this.ledgerStateMachine = ledgerStateMachine;
+    }
+
+    public void setPendingCommands(java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands) {
+        this.pendingCommands = pendingCommands;
     }
 
     public LedgerRaftStateMachine withNodeRole(NodeRole nr) {
@@ -58,6 +73,11 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes);
                     CommandResult result = executeCommand(cmd);
+                    // Propagate result back to submitter
+                    if (pendingCommands != null) {
+                        var future = pendingCommands.remove(cmd.requestId());
+                        if (future != null) future.complete(result);
+                    }
                     if (done != null) {
                         done.run(result.isCompleted() ? Status.OK() : new Status(RaftError.EBUSY, String.join(",", result.errorCodes())));
                     }
@@ -90,13 +110,23 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             return f.freeze() ? ledgerStateMachine.applyFreeze(f)
                     : ledgerStateMachine.applyUnfreeze(f);
         }
+        if (cmd instanceof AccountCloseCommand c) {
+            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId());
+        }
+        if (cmd instanceof AccountAddBalanceTypeCommand a) {
+            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId());
+        }
         throw new IllegalArgumentException("Unknown command: " + cmd.getClass().getName());
     }
 
     @Override
     public void onSnapshotSave(SnapshotWriter writer, Closure done) {
         try {
-            ledgerStateMachine.takeSnapshot();
+            byte[] data = ledgerStateMachine.snapshotBytes();
+            String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
+            java.nio.file.Files.write(java.nio.file.Paths.get(filePath), data);
+            writer.addFile("state_machine_snapshot");
+            ledgerStateMachine.takeSnapshot(); // also persist to local RocksDB
             done.run(Status.OK());
         } catch (Exception e) {
             log.error("Snapshot save failed", e);
@@ -107,7 +137,15 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     @Override
     public boolean onSnapshotLoad(SnapshotReader reader) {
         try {
-            ledgerStateMachine.restoreFromSnapshot();
+            // Prefer the SnapshotReader (from leader transfer), fall back to local RocksDB
+            if (reader.listFiles() != null && !reader.listFiles().isEmpty()) {
+                String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
+                byte[] data = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath));
+                ledgerStateMachine.restoreFromBytes(data);
+                log.info("Snapshot loaded from leader transfer");
+            } else {
+                ledgerStateMachine.restoreFromSnapshot();
+            }
             return true;
         } catch (Exception e) {
             log.error("Snapshot load failed", e);

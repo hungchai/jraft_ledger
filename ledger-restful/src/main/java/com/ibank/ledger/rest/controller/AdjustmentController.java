@@ -4,6 +4,8 @@ import com.ibank.ledger.domain.command.CommandResult;
 import com.ibank.ledger.domain.command.PostingCommand;
 import com.ibank.ledger.domain.model.AdjustmentDraft;
 import com.ibank.ledger.domain.model.EntryType;
+import com.ibank.ledger.raft.NodeRole;
+import com.ibank.ledger.raft.RaftNodeManager;
 import com.ibank.ledger.service.AdjustmentService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -18,9 +20,15 @@ import java.util.Map;
 public class AdjustmentController {
 
     private final AdjustmentService adjustmentService;
+    private final RaftNodeManager raftNodeManager;
+    private final NodeRole nodeRole;
 
-    public AdjustmentController(AdjustmentService adjustmentService) {
+    public AdjustmentController(AdjustmentService adjustmentService,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+                                 NodeRole nodeRole) {
         this.adjustmentService = adjustmentService;
+        this.raftNodeManager = raftNodeManager;
+        this.nodeRole = nodeRole;
     }
 
     @PostMapping("/drafts")
@@ -45,8 +53,31 @@ public class AdjustmentController {
 
     @PostMapping("/drafts/{draftId}/approve")
     public ResponseEntity<?> approve(@PathVariable String draftId, @RequestBody Map<String, String> body) {
-        CommandResult result = adjustmentService.approveDraft(
-                draftId, body.get("checkerId"), body.get("approveRequestId"));
+        if (!nodeRole.isLeader()) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "status", "REJECTED",
+                    "errorCodes", List.of("NOT_LEADER"),
+                    "leaderHint", "Query /health on each node to find the leader"
+            ));
+        }
+
+        String checkerId = body.get("checkerId");
+        String approveRequestId = body.get("approveRequestId");
+
+        // Local validation (draft existence, maker-checker, expiry, status)
+        PostingCommand cmd = adjustmentService.validateDraftForApproval(draftId, checkerId);
+
+        // Execute via Raft (or direct in standalone mode)
+        CommandResult result;
+        if (raftNodeManager != null) {
+            result = raftNodeManager.submit(cmd);
+        } else {
+            result = adjustmentService.approveDraft(draftId, checkerId, approveRequestId);
+            // approveDraft already records the result; avoid double record
+            return ResponseEntity.ok(result);
+        }
+
+        adjustmentService.recordApproveResult(draftId, approveRequestId, result);
         return ResponseEntity.ok(result);
     }
 

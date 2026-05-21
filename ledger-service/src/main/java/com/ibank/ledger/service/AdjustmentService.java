@@ -36,41 +36,39 @@ public class AdjustmentService {
         return draft;
     }
 
-    public CommandResult approveDraft(String draftId, String checkerId, String approveRequestId) {
-        // Idempotency first
-        CommandResult cached = approveResults.get(approveRequestId);
-        if (cached != null) {
-            return cached;
+    public PostingCommand validateDraftForApproval(String draftId, String checkerId) {
+        CommandResult cached = approveResults.get(draftId);
+        if (cached != null && cached.isCompleted()) {
+            throw new IllegalArgumentException("Draft already approved: " + draftId);
         }
 
         AdjustmentDraft draft = drafts.get(draftId);
         if (draft == null) {
             throw new IllegalArgumentException("Draft not found: " + draftId);
         }
-
-        // Maker cannot be checker
         if (draft.makerId().equals(checkerId)) {
             throw new MakerCheckerSamePersonException();
         }
-
-        // Not expired
         if (draft.isExpired()) {
             throw new DraftExpiredException(draftId);
         }
-
-        // Must be pending
         if (draft.status() != DraftStatus.PENDING_APPROVAL) {
             throw new DraftNotPendingException(draftId);
         }
+        return draft.command();
+    }
 
-        // Execute via State Machine
-        CommandResult result = stateMachine.applyPosting(draft.command());
-
-        // Mark draft as executed (or rejected by state machine)
-        DraftStatus newStatus = result.isCompleted() ? DraftStatus.EXECUTED : draft.status();
-        drafts.put(draftId, draft.approve());
-
+    public void recordApproveResult(String draftId, String approveRequestId, CommandResult result) {
+        if (result.isCompleted()) {
+            drafts.computeIfPresent(draftId, (k, d) -> d.approve());
+        }
         approveResults.put(approveRequestId, result);
+    }
+
+    public CommandResult approveDraft(String draftId, String checkerId, String approveRequestId) {
+        PostingCommand cmd = validateDraftForApproval(draftId, checkerId);
+        CommandResult result = stateMachine.applyPosting(cmd);
+        recordApproveResult(draftId, approveRequestId, result);
         return result;
     }
 

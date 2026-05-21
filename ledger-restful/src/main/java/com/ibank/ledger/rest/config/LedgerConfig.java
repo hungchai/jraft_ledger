@@ -169,8 +169,11 @@ public class LedgerConfig {
 
     @Bean
     CommandLineRunner initDefaultTypes(BalanceTypeConfigStore configStore,
-                                        BalanceTypeConfigService configService) {
+                                        BalanceTypeConfigService configService,
+                                        BalanceStore balanceStore,
+                                        AccountMetaStore accountMetaStore) {
         return args -> {
+            // Register balance types
             configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                     "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
             configStore.put("TRADE_AHEAD_BALANCE", new BalanceTypeConfig(
@@ -185,6 +188,21 @@ public class LedgerConfig {
                     SignConvention.NORMAL_DEBIT, 1));
             configService.registerType(new BalanceTypeConfig(
                     "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+
+            // Bootstrap institutional accounts — exist on every node
+            String[] bootstrapAccounts = {"COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD"};
+            for (String id : bootstrapAccounts) {
+                if (!accountMetaStore.contains(id)) {
+                    accountMetaStore.put(id, new com.ibank.ledger.domain.model.Account(
+                            id, com.ibank.ledger.domain.model.AccountType.COMPANY,
+                            "Bootstrap " + id, null,
+                            com.ibank.ledger.domain.model.AccountStatus.ACTIVE, null,
+                            java.time.Instant.now()));
+                    balanceStore.initialize(new com.ibank.ledger.domain.model.AccountBalanceKey(
+                            id, "AVAILABLE_BALANCE", "USD"));
+                    log.info("Bootstrap account created: {}", id);
+                }
+            }
         };
     }
 }

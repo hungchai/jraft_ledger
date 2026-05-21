@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mysql:
     image: mysql:8.4
@@ -104,6 +102,8 @@ services:
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
     depends_on:
+      ledger1:
+        condition: service_started
       mysql:
         condition: service_healthy
       kafka:
@@ -132,6 +132,8 @@ services:
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
     depends_on:
+      ledger2:
+        condition: service_started
       mysql:
         condition: service_healthy
       kafka:
