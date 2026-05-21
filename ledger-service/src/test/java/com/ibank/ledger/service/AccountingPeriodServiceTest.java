@@ -101,7 +101,9 @@ class AccountingPeriodServiceTest {
                 "req-009", "TEST", "test-ref", oldDate,
                 List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
                         new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Old")
+                                EntryType.DEBIT, new BigDecimal("100.00"), "Old"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
+                                EntryType.CREDIT, new BigDecimal("100.00"), "Old credit")
                 )))
         );
         String journalId = stateMachine.applyPosting(postCmd).journalId();

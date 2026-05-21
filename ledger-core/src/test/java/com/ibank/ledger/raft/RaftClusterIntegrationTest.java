@@ -76,10 +76,10 @@ class RaftClusterIntegrationTest {
     @Test
     @DisplayName("Cluster survives follower restart")
     void cluster_survivesFollowerRestart() throws Exception {
-        String peers2 = "127.0.0.1:28081,127.0.0.1:28082,127.0.0.1:28083";
-        node1 = createNode(peers2, "127.0.0.1:28081", "node1");
-        node2 = createNode(peers2, "127.0.0.1:28082", "node2");
-        node3 = createNode(peers2, "127.0.0.1:28083", "node3");
+        String peers2 = "127.0.0.1:18091,127.0.0.1:18092,127.0.0.1:18093";
+        node1 = createNode(peers2, "127.0.0.1:18091", "node1");
+        node2 = createNode(peers2, "127.0.0.1:18092", "node2");
+        node3 = createNode(peers2, "127.0.0.1:18093", "node3");
 
         RaftNodeManager leader = waitForLeader(5000);
         assertThat(leader).isNotNull();
@@ -98,7 +98,7 @@ class RaftClusterIntegrationTest {
         assertThat(follower).isNotNull();
 
         follower.close();
-        Thread.sleep(500);
+        Thread.sleep(3000);
 
         BalanceStore bs = new BalanceStore();
         AccountMetaStore ams = new AccountMetaStore();

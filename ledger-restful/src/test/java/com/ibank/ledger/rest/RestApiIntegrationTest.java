@@ -76,8 +76,10 @@ class RestApiIntegrationTest {
     @Test
     @DisplayName("Create posting via REST")
     void createPosting() throws Exception {
-        // First create account with balance
         createTestAccount("ACC_POST_001");
+        createTestAccount("ACC_POST_002");
+        seedBalance("ACC_POST_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+        seedBalance("ACC_POST_002", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
 
         String body = """
         {
@@ -97,6 +99,14 @@ class RestApiIntegrationTest {
                             "entryType": "CREDIT",
                             "amount": "500.00",
                             "description": "REST credit"
+                        },
+                        {
+                            "accountId": "ACC_POST_002",
+                            "balanceType": "AVAILABLE_BALANCE",
+                            "currency": "USD",
+                            "entryType": "DEBIT",
+                            "amount": "500.00",
+                            "description": "REST debit"
                         }
                     ]
                 }
@@ -116,6 +126,8 @@ class RestApiIntegrationTest {
     @DisplayName("Posting with insufficient balance returns 400")
     void postingInsufficientBalance() throws Exception {
         createTestAccount("ACC_INSF_001");
+        createTestAccount("ACC_INSF_002");
+        seedBalance("ACC_INSF_002", "AVAILABLE_BALANCE", "USD", new BigDecimal("10000.00"));
 
         String body = """
         {
@@ -135,6 +147,14 @@ class RestApiIntegrationTest {
                             "entryType": "DEBIT",
                             "amount": "9999.00",
                             "description": "Too much"
+                        },
+                        {
+                            "accountId": "ACC_INSF_002",
+                            "balanceType": "AVAILABLE_BALANCE",
+                            "currency": "USD",
+                            "entryType": "CREDIT",
+                            "amount": "9999.00",
+                            "description": "Counterparty"
                         }
                     ]
                 }
@@ -168,6 +188,9 @@ class RestApiIntegrationTest {
     @DisplayName("Journal query by requestId via REST")
     void journalQueryByRequestId() throws Exception {
         createTestAccount("ACC_JNL_001");
+        createTestAccount("ACC_JNL_002");
+        seedBalance("ACC_JNL_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+        seedBalance("ACC_JNL_002", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
 
         String postBody = """
         {
@@ -187,6 +210,14 @@ class RestApiIntegrationTest {
                             "entryType": "CREDIT",
                             "amount": "100.00",
                             "description": "Journal test"
+                        },
+                        {
+                            "accountId": "ACC_JNL_002",
+                            "balanceType": "AVAILABLE_BALANCE",
+                            "currency": "USD",
+                            "entryType": "DEBIT",
+                            "amount": "100.00",
+                            "description": "Journal test debit"
                         }
                     ]
                 }
@@ -209,6 +240,9 @@ class RestApiIntegrationTest {
     @DisplayName("Reversal via REST")
     void reversal() throws Exception {
         createTestAccount("ACC_REV_001");
+        createTestAccount("ACC_REV_002");
+        seedBalance("ACC_REV_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+        seedBalance("ACC_REV_002", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
 
         // Create a posting first
         String postBody = """
@@ -229,6 +263,14 @@ class RestApiIntegrationTest {
                             "entryType": "CREDIT",
                             "amount": "200.00",
                             "description": "To reverse"
+                        },
+                        {
+                            "accountId": "ACC_REV_002",
+                            "balanceType": "AVAILABLE_BALANCE",
+                            "currency": "USD",
+                            "entryType": "DEBIT",
+                            "amount": "200.00",
+                            "description": "To reverse debit"
                         }
                     ]
                 }
@@ -244,14 +286,14 @@ class RestApiIntegrationTest {
 
         String journalId = objectMapper.readTree(postResponse).get("journalId").asText();
 
-        String revBody = String.format("""
+        String revBody = """
         {
             "requestId": "rest-rev-001",
             "reversalReason": "Test reversal",
             "reversalReasonCode": "CANCELLATION",
             "valueDate": "2026-05-18"
         }
-        """);
+        """;
 
         mockMvc.perform(post("/ledger/journals/{journalId}/reversal", journalId)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -358,6 +400,11 @@ class RestApiIntegrationTest {
                         .content("{\"date\": \"2026-05-17\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CLOSED"));
+    }
+
+    private void seedBalance(String accountId, String balanceType, String currency, BigDecimal amount) {
+        balanceStore.put(new AccountBalanceKey(accountId, balanceType, currency),
+                new BalanceEntry(amount, 0, 1, "", Instant.now()));
     }
 
     private void createTestAccount(String accountId) throws Exception {

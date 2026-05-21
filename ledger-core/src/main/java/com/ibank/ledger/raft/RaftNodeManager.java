@@ -110,6 +110,24 @@ public class RaftNodeManager implements AutoCloseable {
 
     @Override
     public void close() {
-        if (raftGroupService != null) raftGroupService.shutdown();
+        if (node != null) {
+            try {
+                node.shutdown();
+            } catch (Exception e) {
+                log.warn("Node shutdown error: {}", e.getMessage());
+            }
+        }
+        if (raftGroupService != null) {
+            try {
+                raftGroupService.shutdown();
+            } catch (Exception e) {
+                log.warn("RaftGroupService shutdown error: {}", e.getMessage());
+            }
+        }
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

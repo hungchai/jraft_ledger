@@ -86,7 +86,7 @@ public class LedgerStateMachine {
 
     public void restoreFromSnapshot() throws Exception {
         if (rocksDB == null) return;
-        byte[] raw = rocksDB.get("sm_sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
+        byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
         if (raw == null) return;
         restoreFromBytes(raw);
     }

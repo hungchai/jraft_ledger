@@ -37,11 +37,6 @@ public class AdjustmentService {
     }
 
     public PostingCommand validateDraftForApproval(String draftId, String checkerId) {
-        CommandResult cached = approveResults.get(draftId);
-        if (cached != null && cached.isCompleted()) {
-            throw new IllegalArgumentException("Draft already approved: " + draftId);
-        }
-
         AdjustmentDraft draft = drafts.get(draftId);
         if (draft == null) {
             throw new IllegalArgumentException("Draft not found: " + draftId);
@@ -66,6 +61,10 @@ public class AdjustmentService {
     }
 
     public CommandResult approveDraft(String draftId, String checkerId, String approveRequestId) {
+        CommandResult cached = approveResults.get(approveRequestId);
+        if (cached != null) {
+            return cached;
+        }
         PostingCommand cmd = validateDraftForApproval(draftId, checkerId);
         CommandResult result = stateMachine.applyPosting(cmd);
         recordApproveResult(draftId, approveRequestId, result);
