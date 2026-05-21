@@ -134,7 +134,10 @@ public class LedgerConfig {
     public AccountingPeriodService accountingPeriodService() { return new AccountingPeriodService(); }
 
     @Bean(destroyMethod = "close")
-    public RaftNodeManager raftNodeManager(LedgerStateMachine ledgerStateMachine, NodeRole nodeRole) {
+    public RaftNodeManager raftNodeManager(
+            LedgerStateMachine ledgerStateMachine,
+            NodeRole nodeRole,
+            @org.springframework.beans.factory.annotation.Value("${ledger.raft.group-id:ledger-group-1}") String groupId) {
         String nodeId   = System.getenv("NODE_ID");
         String peers    = System.getenv("PEER_NODES");
         String raftPath = System.getenv().getOrDefault("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
@@ -160,7 +163,7 @@ public class LedgerConfig {
         String serverId = nodeId + ":" + raftPort;
         new File(raftPath).mkdirs(); // ensure dir exists before SOFAJRaft init
         RaftNodeManager mgr = new RaftNodeManager(
-                "ledger-group-1", serverId, raftPeers.toString(),
+                groupId, serverId, raftPeers.toString(),
                 raftPath, fsm);
         mgr.init();
         log.info("Raft node started: {} peers={}", serverId, raftPeers);

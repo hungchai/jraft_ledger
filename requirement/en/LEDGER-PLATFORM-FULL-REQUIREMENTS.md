@@ -630,12 +630,19 @@ SLA: Configuration change from write to full-node effective ≤ 5 seconds
 
 ## 6. Data Model
 
-### 6.1 balance_type_registry Table
+### 6.1 balance_type_registry Table (MySQL 8.0)
+
+All View Layer tables adopt the following audit column design:
+- `id BIGINT AUTO_INCREMENT PRIMARY KEY`: surrogate key for internal joins and sharding
+- `created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`: creation time
+- `updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)`: last update time
+- Business keys (e.g. `type_code`, `account_id`, `journal_id`) are `NOT NULL UNIQUE`, not used as primary keys
 
 ```sql
 CREATE TABLE balance_type_registry (
-  type_code                    VARCHAR(64)   PRIMARY KEY,
-  display_name                 JSONB         NOT NULL,
+  id                           BIGINT AUTO_INCREMENT PRIMARY KEY,
+  type_code                    VARCHAR(64)   NOT NULL UNIQUE,
+  display_name                 JSON          NOT NULL,
   description                  TEXT          NOT NULL,
   category                     VARCHAR(32)   NOT NULL,
   status                       VARCHAR(16)   NOT NULL DEFAULT 'ACTIVE',
@@ -643,60 +650,23 @@ CREATE TABLE balance_type_registry (
   allow_negative               BOOLEAN       NOT NULL DEFAULT FALSE,
   negative_semantics           VARCHAR(32),
   zero_floor_enforce           BOOLEAN       NOT NULL DEFAULT TRUE,
-  overdrawn_alert_threshold    DECIMAL(24,8),
-  composition_logic            VARCHAR(16)   NOT NULL,
-  formula                      TEXT,
   currency_scope               VARCHAR(32)   NOT NULL,
-  fx_revaluation_enabled       BOOLEAN       NOT NULL DEFAULT FALSE,
-  fx_revaluation_rate_source   VARCHAR(16),
-  visibility_scope             VARCHAR[]     NOT NULL,
-  queryable_by_client          BOOLEAN       NOT NULL DEFAULT FALSE,
-  required_permissions         VARCHAR[],
-  snapshot_enabled             BOOLEAN       NOT NULL DEFAULT FALSE,
-  snapshot_frequency           VARCHAR(32),
-  cache_enabled                BOOLEAN       NOT NULL DEFAULT TRUE,
-  cache_ttl_seconds            INTEGER       DEFAULT 30,
-  monitoring_enabled           BOOLEAN       NOT NULL DEFAULT FALSE,
-  effective_from               TIMESTAMPTZ   NOT NULL,
-  effective_to                 TIMESTAMPTZ,
   config_version               INTEGER       NOT NULL DEFAULT 1,
   created_by                   VARCHAR(64)   NOT NULL,
-  created_at                   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  created_at                   TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at                   TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   last_modified_by             VARCHAR(64),
-  last_modified_at             TIMESTAMPTZ,
+  last_modified_at             TIMESTAMP(6),
   change_reason                TEXT          NOT NULL
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-### 6.2 balance_type_composition_rules Table
-
-```sql
-CREATE TABLE balance_type_composition_rules (
-  id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  type_code                VARCHAR(64) NOT NULL REFERENCES balance_type_registry(type_code),
-  rule_sequence            INTEGER     NOT NULL,
-  included_posting_types   VARCHAR[]   NOT NULL,
-  excluded_posting_types   VARCHAR[],
-  included_entry_states    VARCHAR[]   NOT NULL,
-  sign                     VARCHAR(8)  NOT NULL,
-  UNIQUE (type_code, rule_sequence)
-);
-```
-
-### 6.3 balance_type_config_history Table
-
-```sql
-CREATE TABLE balance_type_config_history (
-  id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  type_code        VARCHAR(64) NOT NULL,
-  config_version   INTEGER     NOT NULL,
-  snapshot_json    JSONB       NOT NULL,
-  changed_by       VARCHAR(64) NOT NULL,
-  changed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  change_reason    TEXT        NOT NULL,
-  UNIQUE (type_code, config_version)
-);
-```
+> **Complete View Layer Schema**: See project root `init.sql`, containing full DDL for `journal`, `journal_line`, `account`, `account_balance`, and all other tables.
+>
+> **account_balance Special Columns**:
+> - `frozen_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`: frozen amount
+> - `locked_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`: locked amount
+> - Idempotent UPSERT uses `(account_id, balance_type, currency)` as UNIQUE KEY; updates preserve frozen_amount / locked_amount
 
 ---
 
@@ -1970,19 +1940,24 @@ GET /ledger/journals/{journalId}/chain
 
 ## 5. MySQL View Layer Index Design
 
-To support the above query performance, the following indexes must be created on MySQL journal and journal_line tables:
+To support the above query performance, the following indexes must be created on MySQL journal and journal_line tables. Complete DDL (including `id BIGINT AUTO_INCREMENT PRIMARY KEY`, `created_at`, `updated_at`) is in project root `init.sql`.
 
 ```sql
 -- journal table
-CREATE INDEX idx_journal_account_booked  ON journal_line (account_id, booked_at DESC);
-CREATE INDEX idx_journal_biz_event       ON journal      (business_event_ref);
-CREATE INDEX idx_journal_request_id      ON journal      (request_id);
-CREATE INDEX idx_journal_value_date      ON journal      (value_date, account_id);
-CREATE INDEX idx_journal_type_status     ON journal      (journal_type, status);
+CREATE INDEX idx_request_id       ON journal (request_id);
+CREATE INDEX idx_business_event_ref ON journal (business_event_ref);
+CREATE INDEX idx_created_at       ON journal (created_at);
 
 -- journal_line table
-CREATE INDEX idx_line_journal_id         ON journal_line (journal_id);
-CREATE INDEX idx_line_account_currency   ON journal_line (account_id, currency, balance_type);
+CREATE INDEX idx_journal_id       ON journal_line (journal_id);
+CREATE INDEX idx_account_id       ON journal_line (account_id);
+CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, currency);
+
+-- account table
+CREATE INDEX idx_owner_id         ON account (owner_id);
+
+-- account_balance table (includes frozen_amount, locked_amount)
+CREATE INDEX idx_account_id       ON account_balance (account_id);
 ```
 
 ---
@@ -2590,7 +2565,9 @@ Raft Learner
   MySQL View Layer
     ├─ journal (for F-006 Journal Query)
     ├─ journal_line (for F-006 Journal Query)
-    ├─ account_balance (for F-007 Reconciliation)
+    ├─ account (account data, for F-010 Account Query)
+    ├─ account_balance (for F-007 Reconciliation; includes frozen_amount, locked_amount)
+    ├─ balance_type_registry (Balance Type configuration)
     └─ balance_snapshot (for F-005 As-of Query)
 ```
 
@@ -2607,7 +2584,8 @@ To avoid Learner becoming a bottleneck, Learner adopts batch write strategy:
 ```
 Learner buffers 500ms or 1000 Raft Log entries (whichever comes first)
 → Batch INSERT INTO journal_line VALUES (...)
-→ Batch UPDATE account_balance SET ...
+→ Batch UPSERT account_balance SET amount, account_seq, last_journal_id
+  (frozen_amount, locked_amount preserved and not overwritten)
 → commit
 ```
 

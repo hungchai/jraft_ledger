@@ -61,6 +61,7 @@ kafka:
     group-id: ledger-projection
     auto-offset-reset: earliest
   topics:
+    account-created: ledger.account.v1
     balance-change: ledger.balance.change.v1
 ```
 
@@ -74,7 +75,24 @@ kafka:
 
 ## 4. Projection Logic
 
-### 4.1 BalanceChangeEvent → MySQL
+### 4.1 AccountCreatedEvent → MySQL
+
+```
+Receive AccountCreatedEvent {
+  accountId, accountType, displayName, ownerId,
+  status, balanceTypes, createdAt, ...
+}
+       │
+       ▼
+1. UPSERT INTO account (idempotent: ON DUPLICATE KEY UPDATE)
+   - account_id, account_type, display_name, owner_id, status, created_at
+
+2. If no account_balance row exists, auto-initialize one record per balanceType:
+   - account_id, balance_type, currency=default, amount=0,
+     frozen_amount=0, locked_amount=0, account_seq=0
+```
+
+### 4.2 BalanceChangeEvent → MySQL
 
 ```
 Receive BalanceChangeEvent {
@@ -86,26 +104,43 @@ Receive BalanceChangeEvent {
        │
        ▼
 1. INSERT INTO journal (idempotent: ON DUPLICATE KEY IGNORE)
-   - journal_id, journal_type, request_id, business_event_ref,
-     value_date, status, created_at
+   - journal_id, journal_type, request_id, business_event_type, business_event_ref,
+     value_date, status, cross_period, created_at
 
 2. INSERT INTO journal_line (idempotent: ON DUPLICATE KEY IGNORE)
-   - journal_line_id, journal_id, account_id, balance_type, currency,
-     entry_type, amount, balance_before, balance_after, created_at
+   - journal_line_id, journal_id, leg_id, account_id, balance_type, currency,
+     entry_type, amount, balance_before, balance_after, config_version, created_at
 
-3. Log projection status (DEBUG level)
+3. UPSERT INTO account_balance (idempotent: ON DUPLICATE KEY UPDATE)
+   - account_id, balance_type, currency, amount, account_seq, last_journal_id
+   - frozen_amount and locked_amount are preserved (not overwritten)
+
+4. Log projection status (DEBUG level)
 ```
 
-### 4.2 Idempotency Guarantee
+### 4.3 Balance Type Registry Initialization
+
+On startup, the Projection Service automatically checks and inserts default balance_type_registry records (e.g. `AVAILABLE`, `PENDING_SETTLEMENT`) for queries and auditing.
+
+### 4.4 Idempotency Guarantee
 
 ```sql
--- journal table uses journal_id as PRIMARY KEY
+-- journal table uses journal_id as UNIQUE KEY, id as auto-increment PK
 -- when consuming the same event again, INSERT ... ON DUPLICATE KEY skips without exception
 INSERT INTO journal (...) VALUES (...);
 
--- journal_line table uses journal_line_id as PRIMARY KEY
+-- journal_line table uses journal_line_id as UNIQUE KEY, id as auto-increment PK
 -- also idempotent
 INSERT INTO journal_line (...) VALUES (...);
+
+-- account table uses account_id as UNIQUE KEY
+-- on duplicate creation, updates account_type, status, display_name
+INSERT INTO account (...) VALUES (...)
+ON DUPLICATE KEY UPDATE account_type = VALUES(account_type), status = VALUES(status), display_name = VALUES(display_name);
+
+-- account_balance table uses (account_id, balance_type, currency) as UNIQUE KEY
+INSERT INTO account_balance (...) VALUES (...)
+ON DUPLICATE KEY UPDATE amount = VALUES(amount), account_seq = VALUES(account_seq), last_journal_id = VALUES(last_journal_id);
 ```
 
 ---
@@ -164,3 +199,6 @@ projection:
 | AC-03 | After Projection crashes and restarts, it resumes consumption from the last committed offset with no data loss | Failure Recovery Test |
 | AC-04 | Multiple Projection instances share the same consumer group; partitions are evenly distributed | Scaling Test |
 | AC-05 | When MySQL is unavailable, Projection does not crash; it pauses consumption and waits for MySQL to recover | Fault Tolerance Test |
+| AC-06 | After an AccountCreatedEvent arrives, the account table and account_balance initialization records are written correctly | Functional Test |
+| AC-07 | Consuming the same AccountCreatedEvent again (same accountId) updates status and display_name without creating duplicates | Idempotency Test |
+| AC-08 | frozen_amount and locked_amount in account_balance remain unchanged after BalanceChangeEvent projection | Consistency Test |

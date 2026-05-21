@@ -1,0 +1,15 @@
+# ShardingSphere-JDBC configuration for journal_line horizontal sharding.
+# Activate with: --spring.profiles.active=sharding
+#
+# Prerequisites:
+# 1. Create physical tables journal_line_0 .. journal_line_{shard-count-1} (see init.sql)
+# 2. Set env SNOWFLAKE_WORKER_ID per projection instance (0-1023)
+#
+# Sharding strategy:
+# - journal_line is sharded by account_id hash into 4 physical tables (configurable)
+# - All other tables are broadcast / single-table
+
+spring:
+  datasource:
+    url: jdbc:shardingsphere:classpath:sharding-config.yaml
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver

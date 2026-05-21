@@ -2,10 +2,8 @@ spring:
   application:
     name: ledger-projection
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
-    username: ${SPRING_DATASOURCE_USERNAME:ledger}
-    password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:shardingsphere:classpath:sharding-config.yaml
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:

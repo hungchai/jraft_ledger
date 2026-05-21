@@ -86,12 +86,14 @@ class ProjectionIntegrationTest {
         assertThat(mysql.isRunning()).isTrue();
         assertThat(kafka.isRunning()).isTrue();
 
-        // Direct MySQL insert and verify
-        journalMapper.insertJournal("JNL-PROJ-001", "NORMAL", "proj-test-001",
+        // Direct MySQL insert and verify (use snowflake IDs)
+        long id1 = System.currentTimeMillis();
+        long id2 = System.currentTimeMillis() + 1;
+        journalMapper.insertJournal(id1, "JNL-PROJ-001", "NORMAL", "proj-test-001",
                 "POSTING", "PROJ-001", LocalDate.of(2026, 5, 18),
                 "CONFIRMED", false, java.time.LocalDateTime.now());
 
-        journalMapper.insertJournalLine("JNL-PROJ-001-01", "JNL-PROJ-001", "leg-1",
+        journalMapper.insertJournalLine(id2, "JNL-PROJ-001-01", "JNL-PROJ-001", "leg-1",
                 "ACC_001", "AVAILABLE_BALANCE", "USD", "DEBIT",
                 new BigDecimal("100.00"), new BigDecimal("1000.00"),
                 new BigDecimal("900.00"), 1, java.time.LocalDateTime.now());

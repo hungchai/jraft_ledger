@@ -1,0 +1,41 @@
+# ShardingSphere-JDBC configuration: journal_line sharded by account_id
+# Docs: https://shardingsphere.apache.org/document/current/en/user-manual/shardingsphere-jdbc/yaml-config/
+
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false
+    username: ledger
+    password: ledger123
+
+rules:
+- !SINGLE
+  tables:
+    - "*.*"
+- !SHARDING
+  tables:
+    journal_line:
+      actualDataNodes: ds_0.journal_line_${0..3}
+      tableStrategy:
+        standard:
+          shardingColumn: account_id
+          shardingAlgorithmName: account-id-hash
+      keyGenerateStrategy:
+        column: id
+        keyGeneratorName: snowflake
+
+  shardingAlgorithms:
+    account-id-hash:
+      type: INLINE
+      props:
+        algorithm-expression: journal_line_${Math.abs(account_id.hashCode() % 4)}
+
+  keyGenerators:
+    snowflake:
+      type: SNOWFLAKE
+      props:
+        worker-id: 0
+
+props:
+  sql-show: true

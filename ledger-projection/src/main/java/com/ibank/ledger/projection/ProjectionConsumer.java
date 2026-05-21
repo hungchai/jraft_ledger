@@ -7,6 +7,7 @@ import com.ibank.ledger.dao.mapper.AccountBalanceMapper;
 import com.ibank.ledger.dao.mapper.AccountMapper;
 import com.ibank.ledger.dao.mapper.BalanceTypeMapper;
 import com.ibank.ledger.dao.mapper.JournalMapper;
+import com.ibank.ledger.utils.SnowflakeIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -27,6 +28,7 @@ public class ProjectionConsumer {
     private final AccountMapper accountMapper;
     private final AccountBalanceMapper accountBalanceMapper;
     private final BalanceTypeMapper balanceTypeMapper;
+    private final SnowflakeIdGenerator idGenerator;
 
     public ProjectionConsumer(JournalMapper journalMapper,
                               AccountMapper accountMapper,
@@ -36,6 +38,7 @@ public class ProjectionConsumer {
         this.accountMapper = accountMapper;
         this.accountBalanceMapper = accountBalanceMapper;
         this.balanceTypeMapper = balanceTypeMapper;
+        this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
     }
 
     @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection")
@@ -81,6 +84,7 @@ public class ProjectionConsumer {
             // Idempotent journal insert
             try {
                 journalMapper.insertJournal(
+                        idGenerator.nextId(),
                         journalId,
                         "REVERSAL".equals(commandType) ? "REVERSAL" : "NORMAL",
                         requestId, commandType, businessRef,
@@ -92,6 +96,7 @@ public class ProjectionConsumer {
             // Idempotent journal line insert
             try {
                 journalMapper.insertJournalLine(
+                        idGenerator.nextId(),
                         journalLineId, journalId, "",
                         accountId, balanceType, currency, entryType,
                         amount, preBalance, postBalance, 1, LocalDateTime.now());
@@ -102,7 +107,7 @@ public class ProjectionConsumer {
             // Upsert account balance
             try {
                 accountBalanceMapper.upsertBalance(
-                        accountId, balanceType, currency, postBalance, accountSeq, journalId, LocalDateTime.now());
+                        accountId, balanceType, currency, postBalance, accountSeq, journalId);
             } catch (Exception e) {
                 log.error("Failed to upsert balance for {} {} {}", accountId, balanceType, currency, e);
             }

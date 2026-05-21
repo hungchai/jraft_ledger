@@ -49,6 +49,9 @@
         <testcontainers.version>1.20.6</testcontainers.version>
         <assertj.version>3.27.3</assertj.version>
 
+        <!-- ShardingSphere -->
+        <shardingsphere.version>5.5.1</shardingsphere.version>
+
         <!-- Misc -->
         <protobuf.version>3.25.5</protobuf.version>
     </properties>
@@ -106,6 +109,13 @@
                 <version>${spring.cloud.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+
+            <!-- ShardingSphere JDBC -->
+            <dependency>
+                <groupId>org.apache.shardingsphere</groupId>
+                <artifactId>shardingsphere-jdbc</artifactId>
+                <version>${shardingsphere.version}</version>
             </dependency>
 
             <!-- Protobuf -->

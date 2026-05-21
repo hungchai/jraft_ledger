@@ -14,7 +14,7 @@ Projection Service 是 CQRS 架構中的 **讀路徑同步服務**。它獨立�
 **核心原則**：
 - **獨立部署**：不嵌入 Ledger 節點，crash 不影響入帳
 - **At-least-once 消費**：通過 idempotent insert 保證不重複寫入
-- **僅投影必要數據**：journal + journal_line；balance 由 in-memory StateMachine 提供
+- **投影數據**：journal + journal_line + account + account_balance；讀路徑 API 直接查詢 MySQL 分擔 Raft 節點壓力
 
 ---
 
@@ -61,6 +61,7 @@ kafka:
     group-id: ledger-projection
     auto-offset-reset: earliest
   topics:
+    account-created: ledger.account.v1
     balance-change: ledger.balance.change.v1
 ```
 
@@ -74,7 +75,24 @@ kafka:
 
 ## 4. 投影邏輯
 
-### 4.1 BalanceChangeEvent → MySQL
+### 4.1 AccountCreatedEvent → MySQL
+
+```
+收到 AccountCreatedEvent {
+  accountId, accountType, displayName, ownerId,
+  status, balanceTypes, createdAt, ...
+}
+       │
+       ▼
+1. UPSERT INTO account (idempotent: ON DUPLICATE KEY UPDATE)
+   - account_id, account_type, display_name, owner_id, status, created_at
+
+2. 若 account_balance 記錄不存在，自動為每個 balanceType 初始化一條記錄：
+   - account_id, balance_type, currency=default, amount=0,
+     frozen_amount=0, locked_amount=0, account_seq=0
+```
+
+### 4.2 BalanceChangeEvent → MySQL
 
 ```
 收到 BalanceChangeEvent {
@@ -86,26 +104,43 @@ kafka:
        │
        ▼
 1. INSERT INTO journal (idempotent: ON DUPLICATE KEY IGNORE)
-   - journal_id, journal_type, request_id, business_event_ref,
-     value_date, status, created_at
+   - journal_id, journal_type, request_id, business_event_type, business_event_ref,
+     value_date, status, cross_period, created_at
 
 2. INSERT INTO journal_line (idempotent: ON DUPLICATE KEY IGNORE)
-   - journal_line_id, journal_id, account_id, balance_type, currency,
-     entry_type, amount, balance_before, balance_after, created_at
+   - journal_line_id, journal_id, leg_id, account_id, balance_type, currency,
+     entry_type, amount, balance_before, balance_after, config_version, created_at
 
-3. Log projection status (DEBUG level)
+3. UPSERT INTO account_balance (idempotent: ON DUPLICATE KEY UPDATE)
+   - account_id, balance_type, currency, amount, account_seq, last_journal_id
+   - 同時保留 frozen_amount、locked_amount 不被覆蓋
+
+4. Log projection status (DEBUG level)
 ```
 
-### 4.2 冪等性保證
+### 4.3 Balance Type Registry 初始化
+
+Projection Service 啟動時，自動檢查並寫入預設 balance_type_registry 記錄（如 `AVAILABLE`、`PENDING_SETTLEMENT`），供查詢與審計使用。
+
+### 4.4 冪等性保證
 
 ```sql
--- journal 表以 journal_id 為 PRIMARY KEY
+-- journal 表以 journal_id 為 UNIQUE KEY，id 為自增主鍵
 -- 重複消費同一事件時，INSERT ... ON DUPLICATE KEY 直接跳過，不拋出異常
 INSERT INTO journal (...) VALUES (...);
 
--- journal_line 表以 journal_line_id 為 PRIMARY KEY
+-- journal_line 表以 journal_line_id 為 UNIQUE KEY，id 為自增主鍵
 -- 同樣 idempotent
 INSERT INTO journal_line (...) VALUES (...);
+
+-- account 表以 account_id 為 UNIQUE KEY
+-- 重複創建時更新 account_type、status、display_name
+INSERT INTO account (...) VALUES (...)
+ON DUPLICATE KEY UPDATE account_type = VALUES(account_type), status = VALUES(status), display_name = VALUES(display_name);
+
+-- account_balance 表以 (account_id, balance_type, currency) 為 UNIQUE KEY
+INSERT INTO account_balance (...) VALUES (...)
+ON DUPLICATE KEY UPDATE amount = VALUES(amount), account_seq = VALUES(account_seq), last_journal_id = VALUES(last_journal_id);
 ```
 
 ---
@@ -164,3 +199,6 @@ projection:
 | AC-03 | Projection 崩潰重啟後，從上次 committed offset 繼續消費，無數據丟失 | 故障恢復測試 |
 | AC-04 | 多個 Projection 實例共享同一 consumer group，partition 均勻分配 | 擴展測試 |
 | AC-05 | MySQL 不可用時，Projection 不崩潰，暫停消費等待 MySQL 恢復 | 容錯測試 |
+| AC-06 | AccountCreatedEvent 到達後，account 表與 account_balance 初始化記錄正確寫入 | 功能測試 |
+| AC-07 | 重複消費 AccountCreatedEvent（相同 accountId），status 與 display_name 更新但不產生重複記錄 | 冪等測試 |
+| AC-08 | account_balance 的 frozen_amount、locked_amount 在 BalanceChangeEvent 投影後保持不變 | 一致性測試 |
