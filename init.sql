@@ -43,6 +43,18 @@ CREATE TABLE IF NOT EXISTS account (
     INDEX idx_owner_id (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS account_balance (
+    account_id       VARCHAR(64) NOT NULL,
+    balance_type     VARCHAR(64) NOT NULL,
+    currency         VARCHAR(8) NOT NULL,
+    amount           DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
+    account_seq      BIGINT NOT NULL DEFAULT 0,
+    last_journal_id  VARCHAR(64),
+    updated_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (account_id, balance_type, currency),
+    INDEX idx_account_id (account_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS balance_type_registry (
     type_code            VARCHAR(64) PRIMARY KEY,
     display_name         JSON NOT NULL,

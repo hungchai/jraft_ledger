@@ -2,6 +2,7 @@ package com.ibank.ledger.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ibank.ledger.domain.event.AccountCreatedEvent;
 import com.ibank.ledger.domain.event.BalanceChangeEvent;
 import com.ibank.ledger.domain.event.LedgerEventListener;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -23,13 +24,20 @@ public class KafkaEventPublisher implements LedgerEventListener {
 
     private static final Logger log = LoggerFactory.getLogger(KafkaEventPublisher.class);
     private static final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule());
+            .registerModule(new JavaTimeModule())
+            .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     private final KafkaProducer<String, String> producer;
-    private final String topic;
+    private final String balanceChangeTopic;
+    private final String accountTopic;
 
-    public KafkaEventPublisher(String bootstrapServers, String topic) {
-        this.topic = topic;
+    public KafkaEventPublisher(String bootstrapServers, String balanceChangeTopic) {
+        this(bootstrapServers, balanceChangeTopic, "ledger.account.v1");
+    }
+
+    public KafkaEventPublisher(String bootstrapServers, String balanceChangeTopic, String accountTopic) {
+        this.balanceChangeTopic = balanceChangeTopic;
+        this.accountTopic = accountTopic;
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
@@ -44,14 +52,29 @@ public class KafkaEventPublisher implements LedgerEventListener {
         try {
             String key = event.accountId() + ":" + event.balanceType() + ":" + event.currency();
             String value = mapper.writeValueAsString(event);
-            ProducerRecord<String, String> record = new ProducerRecord<>(topic, key, value);
+            ProducerRecord<String, String> record = new ProducerRecord<>(balanceChangeTopic, key, value);
             producer.send(record, (metadata, exception) -> {
                 if (exception != null) {
-                    log.error("Failed to publish event {}: {}", event.eventId(), exception.getMessage());
+                    log.error("Failed to publish balance event {}: {}", event.eventId(), exception.getMessage());
                 }
             });
         } catch (Exception e) {
-            log.error("Failed to serialize event {}", event.eventId(), e);
+            log.error("Failed to serialize balance event {}", event.eventId(), e);
+        }
+    }
+
+    @Override
+    public void onAccountCreated(AccountCreatedEvent event) {
+        try {
+            String value = mapper.writeValueAsString(event);
+            ProducerRecord<String, String> record = new ProducerRecord<>(accountTopic, event.accountId(), value);
+            producer.send(record, (metadata, exception) -> {
+                if (exception != null) {
+                    log.error("Failed to publish account event {}: {}", event.eventId(), exception.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to serialize account event {}", event.eventId(), e);
         }
     }
 

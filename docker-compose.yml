@@ -154,6 +154,9 @@ services:
       - "8089:8089"
     environment:
       SERVER_PORT: 8089
+      SPRING_DATASOURCE_URL: jdbc:mysql://ledger-mysql:3306/ledger_view
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
     depends_on:
       mysql:

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ibank.ledger.domain.command.*;
+import com.ibank.ledger.domain.event.AccountCreatedEvent;
 import com.ibank.ledger.domain.event.BalanceChangeEvent;
 import com.ibank.ledger.domain.event.LedgerEventListener;
 import com.ibank.ledger.domain.exception.*;
@@ -419,6 +420,22 @@ public class LedgerStateMachine {
         for (var init : cmd.balanceInitializations()) {
             AccountBalanceKey key = new AccountBalanceKey(cmd.accountId(), init.balanceType(), init.currency());
             balanceStore.initialize(key);
+        }
+
+        // Publish account creation event
+        if (eventListener != null) {
+            eventListener.onAccountCreated(new AccountCreatedEvent(
+                    UUID.randomUUID().toString(),
+                    AccountCreatedEvent.EVENT_TYPE,
+                    AccountCreatedEvent.EVENT_VERSION,
+                    Instant.now(),
+                    cmd.accountId(),
+                    cmd.accountType().name(),
+                    cmd.displayName(),
+                    cmd.ownerId(),
+                    AccountStatus.ACTIVE.name(),
+                    Set.copyOf(allowedBalanceTypes),
+                    Instant.now()));
         }
 
         return CommandResult.completed(null);

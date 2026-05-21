@@ -171,7 +171,8 @@ public class LedgerConfig {
     CommandLineRunner initDefaultTypes(BalanceTypeConfigStore configStore,
                                         BalanceTypeConfigService configService,
                                         BalanceStore balanceStore,
-                                        AccountMetaStore accountMetaStore) {
+                                        AccountMetaStore accountMetaStore,
+                                        LedgerStateMachine ledgerStateMachine) {
         return args -> {
             // Register balance types
             configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
@@ -189,17 +190,16 @@ public class LedgerConfig {
             configService.registerType(new BalanceTypeConfig(
                     "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
 
-            // Bootstrap institutional accounts — exist on every node
+            // Bootstrap institutional accounts — routed through state machine so events are emitted
             String[] bootstrapAccounts = {"COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD"};
             for (String id : bootstrapAccounts) {
                 if (!accountMetaStore.contains(id)) {
-                    accountMetaStore.put(id, new com.ibank.ledger.domain.model.Account(
-                            id, com.ibank.ledger.domain.model.AccountType.COMPANY,
+                    ledgerStateMachine.applyAccountCreate(new com.ibank.ledger.domain.command.AccountCreateCommand(
+                            "bootstrap-" + id, id,
+                            com.ibank.ledger.domain.model.AccountType.COMPANY,
                             "Bootstrap " + id, null,
-                            com.ibank.ledger.domain.model.AccountStatus.ACTIVE, null,
-                            java.time.Instant.now()));
-                    balanceStore.initialize(new com.ibank.ledger.domain.model.AccountBalanceKey(
-                            id, "AVAILABLE_BALANCE", "USD"));
+                            java.util.List.of(new com.ibank.ledger.domain.command.AccountCreateCommand.BalanceInitialization(
+                                    "AVAILABLE_BALANCE", "USD"))));
                     log.info("Bootstrap account created: {}", id);
                 }
             }

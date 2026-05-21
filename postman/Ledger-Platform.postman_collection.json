@@ -61,7 +61,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"COMPANY_FX_ACC\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Company FX Account\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"COMPANY_TEST_001\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Company Test Account\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
           }
@@ -85,7 +85,7 @@
           }
         },
         {
-          "name": "Close Account",
+          "name": "Close Account (must have zero balance)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -175,7 +175,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"10.00\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"10.00\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"idem-test-001\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"10.00\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"10.00\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -537,19 +537,6 @@
               }
             }
           ]
-        }
-      ]
-    },
-    {
-      "name": "Balance Type Registry",
-      "item": [
-        {
-          "name": "Get Balance Type Config",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": { "raw": "{{base_url}}/admin/ledger/balance-types/AVAILABLE_BALANCE", "host": ["{{base_url}}"], "path": ["admin", "ledger", "balance-types", "AVAILABLE_BALANCE"] }
-          }
         }
       ]
     },

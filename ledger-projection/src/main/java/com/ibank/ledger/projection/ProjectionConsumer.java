@@ -3,6 +3,9 @@ package com.ibank.ledger.projection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.ibank.ledger.dao.mapper.AccountBalanceMapper;
+import com.ibank.ledger.dao.mapper.AccountMapper;
+import com.ibank.ledger.dao.mapper.BalanceTypeMapper;
 import com.ibank.ledger.dao.mapper.JournalMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,9 +24,38 @@ public class ProjectionConsumer {
             .registerModule(new JavaTimeModule());
 
     private final JournalMapper journalMapper;
+    private final AccountMapper accountMapper;
+    private final AccountBalanceMapper accountBalanceMapper;
+    private final BalanceTypeMapper balanceTypeMapper;
 
-    public ProjectionConsumer(JournalMapper journalMapper) {
+    public ProjectionConsumer(JournalMapper journalMapper,
+                              AccountMapper accountMapper,
+                              AccountBalanceMapper accountBalanceMapper,
+                              BalanceTypeMapper balanceTypeMapper) {
         this.journalMapper = journalMapper;
+        this.accountMapper = accountMapper;
+        this.accountBalanceMapper = accountBalanceMapper;
+        this.balanceTypeMapper = balanceTypeMapper;
+    }
+
+    @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection")
+    public void onAccountCreated(String message) {
+        try {
+            JsonNode event = mapper.readTree(message);
+
+            String accountId   = event.get("accountId").asText();
+            String accountType = event.get("accountType").asText();
+            String displayName = event.has("displayName") ? event.get("displayName").asText() : "";
+            String ownerId     = event.has("ownerId") && !event.get("ownerId").isNull() ? event.get("ownerId").asText() : null;
+            String status      = event.get("status").asText();
+            LocalDateTime createdAt = toLocalDateTime(event.get("createdAt"));
+
+            accountMapper.upsertAccount(accountId, accountType, displayName, ownerId, status, createdAt);
+            log.info("Projected account: {} type={} status={}", accountId, accountType, status);
+
+        } catch (Exception e) {
+            log.error("Failed to project account event: {}", message, e);
+        }
     }
 
     @KafkaListener(topics = "ledger.balance.change.v1", groupId = "ledger-projection")
@@ -67,7 +99,15 @@ public class ProjectionConsumer {
                 log.debug("JournalLine {} already exists", journalLineId);
             }
 
-            log.info("Projected: {} {} {} {} seq={}", journalId, accountId, entryType, amount, accountSeq);
+            // Upsert account balance
+            try {
+                accountBalanceMapper.upsertBalance(
+                        accountId, balanceType, currency, postBalance, accountSeq, journalId, LocalDateTime.now());
+            } catch (Exception e) {
+                log.error("Failed to upsert balance for {} {} {}", accountId, balanceType, currency, e);
+            }
+
+            log.info("Projected: {} {} {} {} seq={} balance={}", journalId, accountId, entryType, amount, accountSeq, postBalance);
 
         } catch (Exception e) {
             log.error("Failed to project event: {}", message, e);
@@ -82,10 +122,26 @@ public class ProjectionConsumer {
 
     private static LocalDate toLocalDate(JsonNode node) {
         if (node == null) return LocalDate.now();
-        // Jackson serializes LocalDate as [2026,5,18]
         if (node.isArray() && node.size() >= 3) {
             return LocalDate.of(node.get(0).asInt(), node.get(1).asInt(), node.get(2).asInt());
         }
         return LocalDate.parse(node.asText());
+    }
+
+    private static LocalDateTime toLocalDateTime(JsonNode node) {
+        if (node == null) return LocalDateTime.now();
+        if (node.isArray() && node.size() == 2) {
+            // Jackson serializes Instant as [epochSecond, nano]
+            return java.time.Instant.ofEpochSecond(node.get(0).asLong(), node.get(1).asLong())
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime();
+        }
+        String text = node.asText();
+        if (text.endsWith("Z")) {
+            return java.time.Instant.parse(text).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime();
+        }
+        if (text.contains("T")) {
+            return LocalDateTime.parse(text);
+        }
+        return LocalDateTime.of(toLocalDate(node), java.time.LocalTime.MIN);
     }
 }
