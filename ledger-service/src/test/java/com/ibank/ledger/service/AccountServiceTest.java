@@ -63,19 +63,21 @@ class AccountServiceTest {
     }
 
     @Test
-    @DisplayName("TC-F010-02 createAccount duplicate accountId throws AccountAlreadyExistsException")
-    void createAccount_duplicateAccountId_throwsAccountAlreadyExistsException() {
+    @DisplayName("TC-F010-02 createAccount duplicate accountId returns rejected")
+    void createAccount_duplicateAccountId_returnsRejected() {
         accountService.createAccount(new AccountCreateCommand(
                 "req-001", "CLIENT_ACC_001", AccountType.CLIENT,
                 "Client", "CUST-001",
                 List.of(new AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))
         ));
 
-        assertThatThrownBy(() -> accountService.createAccount(new AccountCreateCommand(
+        CommandResult result = accountService.createAccount(new AccountCreateCommand(
                 "req-002", "CLIENT_ACC_001", AccountType.CLIENT,
                 "Client Dup", "CUST-002",
                 List.of(new AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))
-        ))).isInstanceOf(AccountAlreadyExistsException.class);
+        ));
+        assertThat(result.isRejected()).isTrue();
+        assertThat(result.errorCodes()).contains("ACCOUNT_ALREADY_EXISTS");
     }
 
     @Test

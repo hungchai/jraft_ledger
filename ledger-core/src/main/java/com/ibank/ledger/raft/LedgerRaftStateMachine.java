@@ -83,6 +83,19 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     }
                 } catch (Exception e) {
                     log.error("Failed to apply raft command", e);
+                    // Complete the pending future so the HTTP thread gets a response
+                    if (pendingCommands != null) {
+                        RaftCommand cmd = null;
+                        try {
+                            cmd = CommandSerializer.deserialize(bytes);
+                        } catch (Exception ignored) {}
+                        if (cmd != null) {
+                            var future = pendingCommands.remove(cmd.requestId());
+                            if (future != null) {
+                                future.complete(CommandResult.rejected("RAFT_APPLY_ERROR: " + e.getMessage()));
+                            }
+                        }
+                    }
                     if (done != null) {
                         done.run(new Status(RaftError.EIO, e.getMessage()));
                     }

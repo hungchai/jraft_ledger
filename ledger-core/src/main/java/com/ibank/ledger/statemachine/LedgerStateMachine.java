@@ -392,8 +392,15 @@ public class LedgerStateMachine {
     // ── Account Management ─────────────────────────────────────
 
     public CommandResult applyAccountCreate(AccountCreateCommand cmd) {
-        if (accountMetaStore.contains(cmd.accountId())) {
-            throw new AccountAlreadyExistsException(cmd.accountId());
+        var existing = accountMetaStore.get(cmd.accountId());
+        if (existing.isPresent()) {
+            Account acc = existing.get();
+            // Idempotent: same type and owner → accept as no-op
+            if (acc.accountType() == cmd.accountType()
+                    && Objects.equals(acc.ownerId(), cmd.ownerId())) {
+                return CommandResult.completed(null);
+            }
+            return CommandResult.rejected("ACCOUNT_ALREADY_EXISTS");
         }
 
         Set<String> allowedBalanceTypes = new HashSet<>();
