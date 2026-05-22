@@ -183,7 +183,9 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
 
 ## 4. Complete Configuration Examples
 
-### 4.1 AVAILABLE_BALANCE (Formula-based, negative not allowed)
+### 4.1 AVAILABLE_BALANCE (Independent posting bucket, negative not allowed)
+
+> **Current implementation**: `INDEPENDENT` only. `FORMULA` composition is documented as a future design target but not yet supported.
 
 ```json
 {
@@ -194,8 +196,7 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
   "signConvention": "NORMAL_CREDIT",
   "allowNegative": false,
   "zeroFloorEnforce": true,
-  "compositionLogic": "FORMULA",
-  "formula": "CURRENT_BALANCE - HOLD_BALANCE - PENDING_BALANCE",
+  "compositionLogic": "INDEPENDENT",
   "currencyScope": "SINGLE_CCY",
   "fxRevaluationEnabled": false,
   "visibilityScope": ["PRODUCT_API", "CLIENT_FACING"],
@@ -212,6 +213,8 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
 
 ### 4.2 TRADE_AHEAD_BALANCE (Negative ledger type, always negative or zero)
 
+> **Current implementation**: `INDEPENDENT` only. `SUM` composition is documented as a future design target but not yet supported.
+
 ```json
 {
   "typeCode": "TRADE_AHEAD_BALANCE",
@@ -223,14 +226,7 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
   "negativeSemantics": "PRE_AUTHORIZED",
   "zeroFloorEnforce": false,
   "overdrawnAlertThreshold": -500000.00,
-  "compositionLogic": "SUM",
-  "compositionRules": [
-    {
-      "includedPostingTypes": ["TRADE_COMMITMENT", "TRADE_EXECUTION"],
-      "includedEntryStates": ["CONFIRMED", "PENDING"],
-      "sign": "SUBTRACT"
-    }
-  ],
+  "compositionLogic": "INDEPENDENT",
   "currencyScope": "SINGLE_CCY",
   "fxRevaluationEnabled": false,
   "visibilityScope": ["INTERNAL_ONLY", "PRODUCT_API"],
@@ -249,6 +245,8 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
 
 ### 4.3 HOLD_BALANCE (Freeze type, negative not allowed)
 
+> **Current implementation**: `INDEPENDENT` only. `SUM` composition is documented as a future design target but not yet supported.
+
 ```json
 {
   "typeCode": "HOLD_BALANCE",
@@ -258,14 +256,7 @@ overdrawnAlertThreshold = -500000     → alert triggered only when exceeding th
   "signConvention": "NORMAL_CREDIT",
   "allowNegative": false,
   "zeroFloorEnforce": true,
-  "compositionLogic": "SUM",
-  "compositionRules": [
-    {
-      "includedPostingTypes": ["COMPLIANCE_FREEZE", "LEGAL_HOLD", "COLLATERAL_PLEDGE"],
-      "includedEntryStates": ["CONFIRMED"],
-      "sign": "ADD"
-    }
-  ],
+  "compositionLogic": "INDEPENDENT",
   "currencyScope": "SINGLE_CCY",
   "fxRevaluationEnabled": false,
   "visibilityScope": ["INTERNAL_ONLY", "REGULATORY"],
