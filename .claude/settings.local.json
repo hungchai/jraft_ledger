@@ -49,7 +49,8 @@
       "Bash(xargs cat)",
       "Bash(sort -t: -k1,1)",
       "Bash(curl -sf http://localhost:8089/projection/accounts/COMPANY_FX_ACC/balances)",
-      "Bash(curl -sf http://localhost:8089/actuator/health)"
+      "Bash(curl -sf http://localhost:8089/actuator/health)",
+      "Bash(git *)"
     ]
   }
 }
