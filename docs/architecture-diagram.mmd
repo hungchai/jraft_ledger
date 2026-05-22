@@ -1,0 +1,95 @@
+graph TB
+    subgraph Client["CLIENT LAYER"]
+        C[HTTP/gRPC Client]
+    end
+
+    subgraph WriteDomain["LEDGER WRITE DOMAIN - Raft Cluster"]
+        subgraph Controller["Ledger RESTful Controller"]
+            AQ[AccountQueueManager<br/>LinkedBlockingQueue per account + Virtual Thread]
+        end
+
+        subgraph RaftCluster["SOFAJRaft Cluster"]
+            L[Leader<br/>RocksDB]
+            F[Follower<br/>RocksDB]
+            LR[Learner<br/>non-voting]
+        end
+
+        subgraph RaftSM["LedgerRaftStateMachine"]
+            OA[onApply]
+            SS[snapshotSave/Load]
+        end
+
+        subgraph LedgerSM["LedgerStateMachine"]
+            AP[applyPosting]
+            AR[applyReversal]
+            BS[balanceStore]
+            JS[journalStore]
+            IS[idempotencyStore]
+        end
+
+        RDB[(RocksDB<br/>WAL + Snapshot)]
+        KP[Kafka Producer]
+    end
+
+    subgraph ReadDomain["PROJECTION / READ DOMAIN"]
+        subgraph PC["ProjectionConsumer<br/>Kafka Listener"]
+            OBC[onBalanceChange]
+            OAC[onAccountCreated]
+        end
+
+        PQC[ProjectionQueryController<br/>/query/journal /query/balance]
+
+        subgraph MySQL["MySQL View Layer<br/>ShardingSphere-JDBC"]
+            JT[(journal<br/>single)]
+            ABT[(account_balance<br/>single)]
+            JLT0[(journal_line_0)]
+            JLT1[(journal_line_1)]
+            JLT2[(journal_line_2)]
+            JLT3[(journal_line_3)]
+        end
+    end
+
+    C -->|Write: Posting/Rev/Adj| AQ
+    C -->|Read: Balance Query| L
+    C -->|Read: Journal Query| PQC
+
+    AQ -->|submit| OA
+    L <-->|Raft Log| F
+    L -->|async sync| LR
+    LR -->|emit events| KP
+
+    OA -->|execute| AP
+    OA -->|execute| AR
+    AP -->|update| BS
+    AP -->|create| JS
+    AP -->|check| IS
+    AR -->|update| BS
+    AR -->|create| JS
+
+    BS -->|persist| RDB
+    JS -->|persist| RDB
+    IS -->|persist| RDB
+
+    KP -->|ledger.balance.change.v1| OBC
+    KP -->|ledger.account.v1| OAC
+
+    OBC -->|insert| JT
+    OBC -->|insert| JLT0
+    OBC -->|insert| JLT1
+    OBC -->|insert| JLT2
+    OBC -->|insert| JLT3
+    OBC -->|upsert| ABT
+    OAC -->|upsert| ABT
+
+    PQC -->|query| JT
+    PQC -->|query| ABT
+    PQC -->|query| JLT0
+    PQC -->|query| JLT1
+    PQC -->|query| JLT2
+    PQC -->|query| JLT3
+
+    style Client fill:#e1f5fe
+    style WriteDomain fill:#fff3e0
+    style ReadDomain fill:#e8f5e9
+    style RaftCluster fill:#fce4ec
+    style MySQL fill:#f3e5f5

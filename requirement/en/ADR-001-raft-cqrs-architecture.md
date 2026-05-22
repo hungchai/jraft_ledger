@@ -5,6 +5,7 @@
 **Decision Maker**: Ledger Platform Team
 **Scope**: F-002 Posting, F-003 Manual Adjustment, F-004 Reversal, F-005 Balance Query, F-006 Journal Query, F-007 Reconciliation, F-008 State Machine
 
+> **v0.4 Change Summary**: Replaced Section 2.3 with a comprehensive full-system architecture diagram covering all layers, components, and query paths.
 > **v0.3 Change Summary**: Added Section 6.3 MySQL View Layer Sharding (ShardingSphere-JDBC configuration for journal_line).
 > **v0.2 Change Summary**: Section 3.2 supplemented with full Multi-Account Coordinator implementation specification (Leader election mechanism, Timeout handling, N-account generic design); added Section 3.3 Multi-Account Task data structure; added risk items in Section 8.
 
@@ -41,38 +42,95 @@ Adopt **SOFAJRaft** (Ant Group / Alibaba open source), reasons:
 - Production validated (same technology stack as Ant Financial)
 - Supports Learner role, suitable for CQRS read-write separation
 
-### 2.3 Overall Architecture
+### 2.3 Overall Architecture [v0.4 Updated]
 
 ```
-Client Request
-      │
-      ▼
-┌─────────────────────────────────────────────────┐
-│              Ledger Write Domain                 │
-│                                                  │
-│  ┌────────────┐   ┌──────────────────────────┐  │
-│  │   Network  │   │       Raft Cluster        │  │
-│  │   Layer    │   │  ┌────────┐  ┌─────────┐ │  │
-│  │ (gRPC/HTTP)│   │  │ Leader │  │Follower │ │  │
-│  └─────┬──────┘   │  │        │  │         │ │  │
-│        │          │  │RocksDB │  │ RocksDB │ │  │
-│  ┌─────▼──────┐   │  └────────┘  └─────────┘ │  │
-│  │   Ledger   │◄──►       ↕ Raft Log          │  │
-│  │   Layer    │   │  ┌─────────┐              │  │
-│  │            │   │  │ Learner │ non-voting   │  │
-│  │  Account   │   │  └────┬────┘              │  │
-│  │  Queue     │   └───────│───────────────────┘  │
-│  │  (per acct)│           │ async push            │
-│  │            │           ▼                      │
-│  │  State     │   ┌───────────────┐              │
-│  │  Machine   │   │  View Layer   │              │
-│  │ (in-memory │   │  (MySQL)      │              │
-│  │  balance)  │   │  journal_line │              │
-│  └────────────┘   │  account_bal  │              │
-│                   │  snapshot     │              │
-└───────────────────┴───────────────┴──────────────┘
-         ↑ Write                  ↑ Read
-    Posting / Rev / Adj      Journal / Recon / Report
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              CLIENT LAYER                                    │
+│          HTTP/gRPC  →  Posting / Reversal / Adjustment / Query               │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+         ┌────────────────────┐          ┌────────────────────┐
+         │   Write Request    │          │   Read Request     │
+         │  (Posting/Rev/Adj) │          │ (Balance / Journal)│
+         └─────────┬──────────┘          └─────────┬──────────┘
+                   │                               │
+                   ▼                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LEDGER WRITE DOMAIN (Raft Cluster)                    │
+│                                                                              │
+│   ┌─────────────────────────────┐   ┌───────────────────────────────────┐   │
+│   │   Ledger RESTful Controller │   │        SOFAJRaft Cluster          │   │
+│   │  ┌─────────────────────┐    │   │  ┌────────┐    ┌─────────────┐   │   │
+│   │  │ AccountQueueManager │    │   │  │ Leader │◄──►│  Follower   │   │   │
+│   │  │(LinkedBlockingQueue │    │   │  │        │    │             │   │   │
+│   │  │ per account + VT)   │    │   │  │ RocksDB│    │  RocksDB    │   │   │
+│   │  └──────────┬──────────┘    │   │  └───┬────┘    └──────┬──────┘   │   │
+│   │             │               │   │      │                │          │   │
+│   │             ▼               │   │      │  Raft Log      │          │   │
+│   │  ┌─────────────────────┐    │   │      ▼                ▼          │   │
+│   │  │ LedgerRaftStateMach │◄───┼───┼────►┌─────────────────────────┐  │   │
+│   │  │ · onApply()         │    │   │     │      Learner (non-voting)│  │   │
+│   │  │ · snapshotSave/Load │    │   │     │  Async sync → Kafka      │  │   │
+│   │  └──────────┬──────────┘    │   │     └─────────────────────────┘  │   │
+│   │             │               │   └───────────────────────────────────┘   │
+│   │             ▼               │                                           │
+│   │  ┌─────────────────────┐    │                                           │
+│   │  │  LedgerStateMachine │    │                                           │
+│   │  │  · applyPosting()   │    │                                           │
+│   │  │  · applyReversal()  │    │                                           │
+│   │  └──────────┬──────────┘    │                                           │
+│   │             │               │                                           │
+│   │    ┌────────┼────────┐      │                                           │
+│   │    ▼        ▼        ▼      │                                           │
+│   │ ┌──────┐ ┌──────┐ ┌────────┐│                                           │
+│   │ │balSt │ │jourSt│ │idempSt ││                                           │
+│   │ └──┬───┘ └──┬───┘ └───┬────┘│                                           │
+│   │    │        │         │     │                                           │
+│   │    ▼        ▼         │     │                                           │
+│   │ ┌────────┐ ┌────────┐ │     │                                           │
+│   │ │RocksDB │ │ Kafka  │◄┘     │                                           │
+│   │ │(WAL)   │ │ Producer      │                                           │
+│   │ └────────┘ └────────┘       │                                           │
+│   └─────────────────────────────┘                                           │
+│                                                                              │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PROJECTION / READ DOMAIN                              │
+│                                                                              │
+│   ┌─────────────────────────────┐   ┌───────────────────────────────────┐   │
+│   │   ProjectionConsumer        │   │   ProjectionQueryController       │   │
+│   │   (Kafka Listener)          │   │   · /query/journal                │   │
+│   │   · onBalanceChange()       │   │   · /query/balance                │   │
+│   │   · onAccountCreated()      │   └───────────────────────────────────┘   │
+│   └─────────────┬───────────────┘                                           │
+│                 │                                                            │
+│                 ▼                                                            │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │              ShardingSphere-JDBC  →  MySQL View Layer                │   │
+│   │                                                                      │   │
+│   │   ┌──────────┐  ┌──────────────┐  ┌──────────────────────────────┐   │   │
+│   │   │  journal │  │account_balance│  │ journal_line_0 .. _3 (sharded)│   │   │
+│   │   │ (single) │  │   (single)    │  │     by account_id hash       │   │   │
+│   │   └──────────┘  └──────────────┘  └──────────────────────────────┘   │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│   Query Paths:                                                               │
+│   ┌─────────────────┐      ┌─────────────────────────────────────────────┐   │
+│   │ Balance Query   │─────→│  Read Leader in-memory State Machine        │   │
+│   │ (real-time)     │      │  Strong consistency · P95 ≤ 2ms             │   │
+│   └─────────────────┘      └─────────────────────────────────────────────┘   │
+│                                                                              │
+│   ┌─────────────────┐      ┌─────────────────────────────────────────────┐   │
+│   │ Journal Query   │─────→│  Read MySQL View Layer                      │   │
+│   │ (eventual)      │      │  Eventual consistency · lag ≤ 1s            │   │
+│   └─────────────────┘      └─────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
