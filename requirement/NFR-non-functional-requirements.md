@@ -5,7 +5,7 @@
 **系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
 
-> **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）。
+> **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）與 NFR-17（節點同步監控）。
 > **v0.2 變更摘要**：新增 NFR-13（JVM & GC）、NFR-14（Account Queue）、NFR-15（accountSeq Overflow Policy）；NFR-9 Observability 補充 GC pause 告警和 accountSeq gap 告警。
 
 ---
@@ -398,3 +398,99 @@ Raft 協議的數據安全與一致性建基於過半數決（Quorum）機制：
 | NFR-5 一致性 | 強一致性依賴 Quorum 機制，投票節點數決定一致性安全邊界 |
 | NFR-11 災難恢復 | Learner 可部署為異地 DR 節點，不影響線上 Quorum |
 | ADR-001 §5.1 | 集群配置的架構決策背景與 Raft 庫選型理由 |
+
+---
+
+## 17. 節點同步監控 [v0.3 新增]
+
+Raft Quorum 保證已提交資料的持久性，但並不會自動以運維可用的格式暴露每個節點的複製延遲或 Follower 健康狀態。需要專用的監控端點與衍生指標，以便在影響可用性之前偵測腦裂、網路分區或慢速 Follower。
+
+### 17.1 端點
+
+```
+GET /ledger/cluster/raft-status
+```
+
+**回應範例（Follower 節點）：**
+
+```json
+{
+  "nodeId": "node2",
+  "isLeader": false,
+  "term": 5,
+  "lastAppliedIndex": 1247,
+  "peers": ["node1:28080", "node2:28080", "node3:28080"],
+  "alivePeers": []
+}
+```
+
+**回應範例（Leader 節點）：**
+
+```json
+{
+  "nodeId": "node1",
+  "isLeader": true,
+  "term": 5,
+  "lastAppliedIndex": 1248,
+  "peers": ["node1:28080", "node2:28080", "node3:28080"],
+  "alivePeers": ["node2:28080", "node3:28080"]
+}
+```
+
+### 17.2 指標語義
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| `nodeId` | string | 節點唯一識別碼（與設定中的 `ledger.group-id` 對應） |
+| `isLeader` | boolean | 此節點是否為當前 Raft Leader |
+| `term` | long | 當前 Raft term；跨節點 term 不一致表示正在選舉或發生腦裂 |
+| `lastAppliedIndex` | long | 此節點 State Machine 已套用的最後一筆 Log Index |
+| `peers` | string[] | 已配置的 Peer 清單（來自 `PEER_NODES` 環境變數或預設為自身） |
+| `alivePeers` | string[] | Leader 視為存活的 Peer（Follower 上為空，因 SOFAJRaft 僅向 Leader 暴露此資訊） |
+
+### 17.3 複製延遲判讀
+
+複製延遲透過輪詢同一端點後比較各節點的 `lastAppliedIndex` 得出：
+
+```
+lag(node) = leader.lastAppliedIndex - node.lastAppliedIndex
+```
+
+| 延遲條件 | 含義 | 運維動作 |
+|---|---|---|
+| 所有節點 `lag == 0` | 集群完全同步 | 無 |
+| `0 < lag ≤ 10` 持續 ≤ 5 秒 | 正常瞬態延遲 | 持續觀察 |
+| `lag > 100` 持續 > 10 秒 | 慢速 Follower 或網路分區 | 調查 Follower GC / 網路；考慮重啟 Follower |
+| `lag` 單調遞增 | Follower 已停滯或當機 | 重啟 Follower 節點；若持續發生，替換節點並觸發 Snapshot 還原 |
+| 跨節點 `term` 不一致 | 腦裂或正在選舉 | 檢查 Quorum；確保多數節點可互相連線；切勿手動強制提升 Follower |
+
+### 17.4 告警閾值
+
+| 告警名稱 | 條件 | 嚴重程度 | 回應 |
+|---|---|---|---|
+| `RaftFollowerLagHigh` | 任一 Follower 的 `lastAppliedIndex` 落後 Leader > 100 筆，持續 > 30 秒 | WARNING | 通知 on-call；調查 Follower 效能 |
+| `RaftFollowerLagCritical` | 任一 Follower 的 `lastAppliedIndex` 落後 Leader > 1000 筆，持續 > 60 秒 | CRITICAL | 通知 on-call；準備重啟或替換 Follower |
+| `RaftTermDivergence` | 任兩節點回報的 `term` 不一致持續 > 10 秒 | CRITICAL | 通知 on-call；可能發生腦裂——採取行動前須先確認 Quorum |
+| `RaftLeaderMissing` | 連續 > 30 秒無任何節點回報 `isLeader == true` | CRITICAL | 通知 on-call；集群已失去領導者——檢查網路分區，必要時重啟節點 |
+| `RaftAlivePeersLow` | Leader 的 `alivePeers` 數量 < (`peers` 數量 / 2)，持續 > 10 秒 | WARNING | 通知 on-call；集群處於少數狀態，有失去 Quorum 的風險 |
+
+### 17.5 與可觀測性整合
+
+- **Prometheus**：Sidecar 或應用本身應將 `ledger_raft_last_applied_index{node_id}` 以 Gauge 形式暴露。延遲可在 PromQL 中計算：
+  ```promql
+  max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index
+  ```
+- **健康檢查**：`/actuator/health`（或同等端點）應包含 Raft 指示器；若啟動後 > 60 秒 `lastAppliedIndex` 仍為 0，表示節點尚未加入集群，狀態應回傳 `DOWN`。
+- **儀表板**：Grafana 面板顯示每節點的 `lastAppliedIndex`、Leader term 與存活 Peer 數量。
+
+### 17.6 Standalone 模式
+
+當 Raft 停用（單節點開發 / 測試）時，端點回傳：
+
+```json
+{
+  "mode": "standalone"
+}
+```
+
+此模式下不應觸發任何複製延遲告警。

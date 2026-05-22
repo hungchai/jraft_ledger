@@ -5,7 +5,7 @@
 **System**: Next-Gen Internal Ledger Platform
 **Status**: Draft for Review
 
-> **v0.3 Change Summary**: Added NFR-16 (Raft cluster size and fault tolerance).
+> **v0.3 Change Summary**: Added NFR-16 (Raft cluster size and fault tolerance) and NFR-17 (Node sync monitoring).
 > **v0.2 Change Summary**: Added NFR-13 (JVM & GC), NFR-14 (Account Queue), NFR-15 (accountSeq Overflow Policy); NFR-9 Observability supplemented with GC pause alert and accountSeq gap alert.
 
 ---
@@ -398,3 +398,99 @@ Beyond 5 Voting Nodes, every additional 2 nodes only tolerates 1 more failure, b
 | NFR-5 Consistency | Strong consistency relies on Quorum mechanism; voting node count determines consistency safety boundary |
 | NFR-11 Disaster Recovery | Learner can be deployed as remote DR node without affecting online Quorum |
 | ADR-001 §5.1 | Architecture decision background for cluster configuration and Raft library selection |
+
+---
+
+## 17. Node Sync Monitoring [v0.3 New]
+
+Raft quorum guarantees committed data durability, but it does not automatically expose per-node replication lag or follower health in a format usable by operators. A dedicated monitoring endpoint and derived metrics are required to detect split-brain, network partitions, or slow followers before they impact availability.
+
+### 17.1 Endpoint
+
+```
+GET /ledger/cluster/raft-status
+```
+
+**Response example (follower node):**
+
+```json
+{
+  "nodeId": "node2",
+  "isLeader": false,
+  "term": 5,
+  "lastAppliedIndex": 1247,
+  "peers": ["node1:28080", "node2:28080", "node3:28080"],
+  "alivePeers": []
+}
+```
+
+**Response example (leader node):**
+
+```json
+{
+  "nodeId": "node1",
+  "isLeader": true,
+  "term": 5,
+  "lastAppliedIndex": 1248,
+  "peers": ["node1:28080", "node2:28080", "node3:28080"],
+  "alivePeers": ["node2:28080", "node3:28080"]
+}
+```
+
+### 17.2 Metric Semantics
+
+| Field | Type | Description |
+|---|---|---|
+| `nodeId` | string | Unique node identifier (matches `ledger.group-id` in config) |
+| `isLeader` | boolean | Whether this node is the current Raft Leader |
+| `term` | long | Current Raft term; diverging terms across nodes indicate election activity or split-brain |
+| `lastAppliedIndex` | long | Index of the last log entry applied to this node's State Machine |
+| `peers` | string[] | Configured peer list (from `PEER_NODES` env var or fallback to self) |
+| `alivePeers` | string[] | Peers the Leader considers alive (empty on followers because SOFAJRaft only exposes this to Leader) |
+
+### 17.3 Replication Lag Interpretation
+
+Replication lag is derived by comparing `lastAppliedIndex` across nodes polled via the same endpoint:
+
+```
+lag(node) = leader.lastAppliedIndex - node.lastAppliedIndex
+```
+
+| Lag Condition | Meaning | Operator Action |
+|---|---|---|
+| `lag == 0` on all nodes | Fully synced cluster | None |
+| `0 < lag ≤ 10` for ≤ 5s | Normal transient lag | Monitor |
+| `lag > 100` for > 10s | Slow follower or network partition | Investigate follower GC / network; consider restarting follower |
+| `lag increases monotonically` | Follower is stalled or has crashed | Restart follower node; if persists, replace node and trigger snapshot restore |
+| `term differs across nodes` | Split-brain or ongoing election | Check quorum; ensure majority nodes can reach each other; do not force-promote a follower manually |
+
+### 17.4 Alert Thresholds
+
+| Alert Name | Condition | Severity | Response |
+|---|---|---|---|
+| `RaftFollowerLagHigh` | Any follower's `lastAppliedIndex` lags leader by > 100 entries for > 30s | WARNING | Page on-call; investigate follower performance |
+| `RaftFollowerLagCritical` | Any follower's `lastAppliedIndex` lags leader by > 1000 entries for > 60s | CRITICAL | Page on-call; prepare follower restart or replacement |
+| `RaftTermDivergence` | Any two nodes report different `term` for > 10s | CRITICAL | Page on-call; possible split-brain — verify quorum before taking action |
+| `RaftLeaderMissing` | No node reports `isLeader == true` for > 30s | CRITICAL | Page on-call; cluster has lost leadership — check network partition, restart nodes if necessary |
+| `RaftAlivePeersLow` | Leader's `alivePeers` count < (`peers` count / 2) for > 10s | WARNING | Page on-call; minority cluster, at risk of losing quorum |
+
+### 17.5 Integration with Observability Stack
+
+- **Prometheus**: A sidecar or the application itself should expose `ledger_raft_last_applied_index{node_id}` as a Gauge. Lag can be computed in PromQL:
+  ```promql
+  max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index
+  ```
+- **Health Checks**: The `/actuator/health` endpoint (or equivalent) should include a Raft indicator that returns `DOWN` when `lastAppliedIndex` is 0 for > 60s after startup (indicating the node has not joined the cluster).
+- **Dashboards**: Grafana panel showing `lastAppliedIndex` per node, leader term, and alive peer count.
+
+### 17.6 Standalone Mode
+
+When Raft is disabled (single-node dev / test), the endpoint returns:
+
+```json
+{
+  "mode": "standalone"
+}
+```
+
+No replication lag alerts should fire in this mode.
