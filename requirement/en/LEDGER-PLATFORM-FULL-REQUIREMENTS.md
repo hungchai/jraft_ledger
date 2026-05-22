@@ -439,6 +439,8 @@ overdrawnAlertThreshold = -500000     → alert only when exceeding this value
 
 > **Formula Safety Limit**: formula only supports arithmetic references to existing `typeCode`, no arbitrary expressions. Circular references are validated and rejected at configuration write time.
 
+> **Implementation Status**: As of the current codebase, only `INDEPENDENT` balance types are supported. `FORMULA` composition logic (e.g. `CURRENT_BALANCE - HOLD_BALANCE - PENDING_BALANCE`) is documented here as the intended design but is **not yet implemented**. All balance types are currently treated as directly-postable buckets.
+
 ### 3.4 Currency Attributes
 
 | Attribute | Type | Required | Description |

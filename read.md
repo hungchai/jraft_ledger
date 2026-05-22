@@ -289,11 +289,12 @@ allowNegative=true  → posting must not make balance > 0   → BALANCE_CEILING_
 
 ### 4.3 Example: Three Built-in Balance Types
 
-**AVAILABLE_BALANCE** — formula-based, client-facing, no negatives:
+**AVAILABLE_BALANCE** — client-facing, no negatives:
 ```
-signConvention=NORMAL_CREDIT  allowNegative=false  compositionLogic=FORMULA
-formula = CURRENT_BALANCE - HOLD_BALANCE - PENDING_BALANCE
+signConvention=NORMAL_CREDIT  allowNegative=false
 ```
+
+> **Note**: The requirements document describes a `FORMULA` composition mode (`CURRENT_BALANCE - HOLD_BALANCE - PENDING_BALANCE`), but this is **not yet implemented**. Currently `AVAILABLE_BALANCE` is treated as an independent, directly-postable bucket.
 
 **TRADE_AHEAD_BALANCE** — debit-direction, always negative-or-zero (pre-authorized):
 ```

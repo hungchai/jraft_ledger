@@ -10,6 +10,7 @@ import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.rocksdb.OutboxStore;
 import com.tomma8.ledger.rocksdb.RocksDBManager;
 import com.tomma8.ledger.service.*;
+import com.tomma8.ledger.rest.controller.ClusterController;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
@@ -132,6 +133,11 @@ public class LedgerConfig {
     public ReconciliationService reconciliationService(LedgerStateMachine sm) { return new ReconciliationService(sm); }
     @Bean
     public AccountingPeriodService accountingPeriodService() { return new AccountingPeriodService(); }
+
+    @Bean
+    public ClusterController clusterController(NodeRole nodeRole, RaftNodeManager raftNodeManager) {
+        return new ClusterController(nodeRole, raftNodeManager);
+    }
 
     @Bean(destroyMethod = "close")
     public RaftNodeManager raftNodeManager(

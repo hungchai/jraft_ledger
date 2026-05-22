@@ -439,6 +439,8 @@ overdrawnAlertThreshold = -500000     → 超過此值才觸發告警
 
 > **Formula 安全限制**：formula 只支持對已存在的 `typeCode` 做四則運算引用，不支持任意表達式。循環引用在配置寫入時校驗並拒絕。
 
+> **實現狀態**：目前程式碼僅支援 `INDEPENDENT`（獨立直接記帳）的 balance type。`FORMULA` 組合邏輯（例如 `CURRENT_BALANCE - HOLD_BALANCE - PENDING_BALANCE`）在此文件記載為設計目標，但**尚未實作**。所有 balance type 目前皆視為可直接記帳的獨立桶子。
+
 ### 3.4 貨幣屬性
 
 | 屬性名 | 類型 | 必填 | 說明 |

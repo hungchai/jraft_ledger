@@ -6,6 +6,7 @@ import com.alipay.sofa.jraft.Status;
 import com.alipay.sofa.jraft.core.StateMachineAdapter;
 import com.alipay.sofa.jraft.entity.LeaderChangeContext;
 import com.alipay.sofa.jraft.error.RaftError;
+import com.alipay.sofa.jraft.error.RaftError;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
 import com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand;
@@ -36,12 +37,17 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     private final LedgerStateMachine ledgerStateMachine;
     private final AtomicLong leaderTerm = new AtomicLong(-1);
+    private final AtomicLong lastAppliedIndex = new AtomicLong(0);
     private volatile boolean isLeader;
     private NodeRole nodeRole;
     private java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands;
 
     public LedgerRaftStateMachine(LedgerStateMachine ledgerStateMachine) {
         this.ledgerStateMachine = ledgerStateMachine;
+    }
+
+    public long getLastAppliedIndex() {
+        return lastAppliedIndex.get();
     }
 
     public void setPendingCommands(java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands) {
@@ -64,6 +70,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     @Override
     public void onApply(Iterator iter) {
         while (iter.hasNext()) {
+            long index = iter.getIndex();
             Closure done = iter.done();
             ByteBuffer data = iter.getData();
 
@@ -105,6 +112,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     done.run(Status.OK());
                 }
             }
+            lastAppliedIndex.set(index);
             iter.next();
         }
     }
@@ -180,6 +188,16 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         this.leaderTerm.set(-1);
         if (nodeRole != null) nodeRole.setFollower(serverIdStr());
         log.info("Stepped down as leader: {}", status);
+    }
+
+    @Override
+    public void onStartFollowing(LeaderChangeContext ctx) {
+        this.isLeader = false;
+        this.leaderTerm.set(ctx.getTerm());
+        if (nodeRole != null) {
+            nodeRole.setFollower(serverIdStr(), ctx.getTerm());
+        }
+        log.info("Started following leader {} at term {}", ctx.getLeaderId(), ctx.getTerm());
     }
 
     private String serverIdStr() {

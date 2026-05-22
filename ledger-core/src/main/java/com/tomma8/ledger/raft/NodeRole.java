@@ -19,6 +19,12 @@ public class NodeRole {
         this.nodeId = nodeId;
     }
 
+    public void setFollower(String nodeId, long term) {
+        this.leader = false;
+        this.term = term;
+        this.nodeId = nodeId;
+    }
+
     public boolean isLeader() { return leader; }
     public long getTerm() { return term; }
     public String getNodeId() { return nodeId; }
