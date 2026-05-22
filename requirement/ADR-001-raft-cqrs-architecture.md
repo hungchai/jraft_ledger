@@ -5,6 +5,7 @@
 **決策人**: Ledger Platform Team
 **影響範圍**: F-002 Posting, F-003 Manual Adjustment, F-004 Reversal, F-005 Balance Query, F-006 Journal Query, F-007 Reconciliation, F-008 State Machine
 
+> **v0.3 變更摘要**：新增 Section 6.3 MySQL View Layer 分片設計（ShardingSphere-JDBC journal_line 分片配置）。
 > **v0.2 變更摘要**：Section 3.2 補充 Multi-Account Coordinator 完整實現規格（Leader 選舉機制、Timeout 處理、N 帳戶通用設計）；新增 Section 3.3 Multi-Account Task 資料結構；Section 8 新增風險項。
 
 ---
@@ -328,7 +329,96 @@ Leader 宕機 → Raft 自動選舉新 Leader
 - 儲存完整 journal、account_balance snapshot、reconciliation 報表
 - 只做讀取用途，不在寫路徑上
 
-### 6.3 資料保證
+### 6.3 MySQL View Layer 分片設計 [v0.3 新增]
+
+MySQL View Layer 使用 **ShardingSphere-JDBC** 對 `journal_line` 表進行水平分片。寫路徑雖然完全由 Raft + RocksDB 處理，但 View Layer 必須支援高吞吐的 Journal 查詢與對帳，不能成為讀取瓶頸。
+
+#### 為何只對 `journal_line` 分片
+
+根據 NFR-10 容量規劃，系統每日產生約 2,000 萬筆 `journal_line`。查詢模式以帳戶為中心（例如「查詢帳戶 X 的所有流水」）。以 `account_id` 分片可確保：
+
+- **單帳戶查詢只命中一個分片**，查詢延遲可控
+- **寫入均勻分佈**（基於 Hash，非 Range），避免熱點分片
+- **其他表維持單表** — `journal`、`account_balance`、`account`、`balance_type_registry` 數據量較小或透過 `UPSERT` 更新，無需分片
+
+#### 分片拓撲
+
+| 邏輯表 | 物理表 | 分片鍵 | 算法 | 分片數 |
+|---|---|---|---|---|
+| `journal_line` | `journal_line_0` .. `journal_line_3` | `account_id` | `Math.abs(account_id.hashCode() % 4)` | 4（可配置） |
+| `journal` | `journal`（單表） | — | — | 1 |
+| `account_balance` | `account_balance`（單表） | — | — | 1 |
+| `account` | `account`（單表） | — | — | 1 |
+
+#### ShardingSphere-JDBC 配置（`sharding-config.yaml`）
+
+```yaml
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false
+    username: ledger
+    password: ledger123
+
+rules:
+- !SINGLE
+  tables:
+    - "*.*"
+- !SHARDING
+  tables:
+    journal_line:
+      actualDataNodes: ds_0.journal_line_${0..3}
+      tableStrategy:
+        standard:
+          shardingColumn: account_id
+          shardingAlgorithmName: account-id-hash
+      keyGenerateStrategy:
+        column: id
+        keyGeneratorName: snowflake
+
+  shardingAlgorithms:
+    account-id-hash:
+      type: INLINE
+      props:
+        algorithm-expression: journal_line_${Math.abs(account_id.hashCode() % 4)}
+
+  keyGenerators:
+    snowflake:
+      type: SNOWFLAKE
+      props:
+        worker-id: 0
+
+props:
+  sql-show: true
+```
+
+#### 設計要點
+
+1. **單一數據源（`ds_0`）** — 分片層級為表級，非庫級。若 MySQL 實例成為瓶頸，可升級實例規格或改為庫級分片（`ds_0`、`ds_1`…），無需改動應用程式碼。
+2. **`!SINGLE` 規則** — 除 `journal_line` 外所有表視為廣播 / 單表。ShardingSphere 將它們路由至預設數據源，不會改寫 SQL。
+3. **Snowflake ID** — `id` 欄位由 ShardingSphere 內建 SNOWFLAKE 算法自動生成。每個 projection 實例必須設定唯一的 `worker-id`（透過環境變數 `SNOWFLAKE_WORKER_ID`，範圍 0–1023），以避免 ID 碰撞。
+4. **邏輯表抽象** — 應用程式碼（MyBatis Mapper）統一引用 `journal_line`；ShardingSphere 在運行期將 SQL 改寫至正確的物理表。
+
+#### 啟用方式
+
+```bash
+# Spring Boot profile
+--spring.profiles.active=sharding
+
+# 每個實例的 Worker ID（多個 projection consumer 並行時必填）
+export SNOWFLAKE_WORKER_ID=1
+```
+
+#### 運維前提
+
+- 物理表 `journal_line_0` 至 `journal_line_{N-1}` 必須預先建立（見 `init.sql`）
+- `journal_line` 的結構變更必須同步應用到**所有**物理表
+- 重新分片（例如從 4 片改為 8 片）需要數據遷移；請在投產前規劃
+
+---
+
+### 6.4 資料保證
 
 ```
 RocksDB：強持久性，是帳務的唯一真相（source of truth）
