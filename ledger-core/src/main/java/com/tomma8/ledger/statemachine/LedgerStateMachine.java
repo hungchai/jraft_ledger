@@ -16,6 +16,7 @@ import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 import com.tomma8.ledger.store.IdempotencyStore;
+import com.tomma8.ledger.util.FastIdGenerator;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -42,6 +43,13 @@ public class LedgerStateMachine {
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
+
+    // Reusable collections to avoid per-posting allocation on the hot path
+    private final List<LineWithLeg> reusableLines = new ArrayList<>(64);
+    private final Set<String> reusableAccountSet = new HashSet<>(16);
+    private final Map<AccountBalanceKey, BigDecimal> reusableAfterBalances = new HashMap<>(64);
+    private final List<JournalLine> reusableJournalLines = new ArrayList<>(64);
+    private final List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
 
     private LedgerEventListener eventListener;
     private RocksDBManager rocksDB;
@@ -182,6 +190,11 @@ public class LedgerStateMachine {
     // ── Posting ────────────────────────────────────────────────
 
     public synchronized CommandResult applyPosting(PostingCommand cmd) {
+        reusableLines.clear();
+        reusableAccountSet.clear();
+        reusableAfterBalances.clear();
+        reusableJournalLines.clear();
+
         // 1. Idempotency check
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
@@ -193,21 +206,19 @@ public class LedgerStateMachine {
         }
 
         // 2. Extract all lines with their legId
-        List<LineWithLeg> allLines = new ArrayList<>();
         for (var leg : cmd.legs()) {
             for (var line : leg.lines()) {
-                allLines.add(new LineWithLeg(leg.legId(), line));
+                reusableLines.add(new LineWithLeg(leg.legId(), line));
             }
         }
 
         // Collect unique accounts
-        Set<String> uniqueAccounts = new HashSet<>();
-        for (var lwl : allLines) {
-            uniqueAccounts.add(lwl.line().accountId());
+        for (var lwl : reusableLines) {
+            reusableAccountSet.add(lwl.line().accountId());
         }
 
         // 3. Account status check (before balance checks)
-        for (String accountId : uniqueAccounts) {
+        for (String accountId : reusableAccountSet) {
             var account = accountMetaStore.get(accountId);
             if (account.isEmpty()) {
                 var result = CommandResult.rejected("ACCOUNT_NOT_FOUND");
@@ -259,8 +270,7 @@ public class LedgerStateMachine {
         }
 
         // 5. Balance validation (compute after values, check rules)
-        Map<AccountBalanceKey, BigDecimal> afterBalances = new HashMap<>();
-        for (var lwl : allLines) {
+        for (var lwl : reusableLines) {
             var line = lwl.line();
             BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
                     .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
@@ -290,7 +300,7 @@ public class LedgerStateMachine {
                         IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
                 return result;
             }
-            afterBalances.put(key, after);
+            reusableAfterBalances.put(key, after);
         }
 
         // 6. Generate journal
@@ -299,39 +309,38 @@ public class LedgerStateMachine {
         String journalId = String.format("JNL-%04d", seq);
         Instant now = Instant.now();
 
-        List<JournalLine> journalLines = new ArrayList<>();
-        for (var lwl : allLines) {
+        for (var lwl : reusableLines) {
             var line = lwl.line();
             AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.currency());
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            BigDecimal after = afterBalances.get(key);
+            BigDecimal after = reusableAfterBalances.get(key);
             BalanceTypeConfig config = balanceTypeConfigStore.getOrThrow(line.balanceType());
 
-            String journalLineId = journalId + "-" + String.format("%02d", journalLines.size() + 1);
+            String journalLineId = journalId + "-" + String.format("%02d", reusableJournalLines.size() + 1);
             JournalLine jl = new JournalLine(
                     journalLineId, journalId, lwl.legId(),
                     line.accountId(), line.balanceType(), line.currency(),
                     line.entryType(), line.amount(),
                     current.amount(), after,
                     config.configVersion(), now);
-            journalLines.add(jl);
+            reusableJournalLines.add(jl);
         }
 
         Journal journal = new Journal(
                 journalId, JournalType.NORMAL, cmd.requestId(),
                 cmd.businessEventType(), cmd.businessEventRef(),
                 cmd.valueDate(), JournalStatus.CONFIRMED,
-                List.copyOf(journalLines), false, now);
+                List.copyOf(reusableJournalLines), false, now);
 
         journalStore.put(journalId, journal);
 
         // 7. Atomic balance update with accountSeq increment + event publishing
-        for (int i = 0; i < allLines.size(); i++) {
-            var lwl = allLines.get(i);
+        for (int i = 0; i < reusableLines.size(); i++) {
+            var lwl = reusableLines.get(i);
             var line = lwl.line();
             AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.currency());
             BigDecimal before = balanceStore.get(key).orElse(BalanceEntry.zero()).amount();
-            BigDecimal after = afterBalances.get(key);
+            BigDecimal after = reusableAfterBalances.get(key);
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
             long prevSeq = current.accountSeq();
             long nextSeq = prevSeq + 1;
@@ -349,9 +358,9 @@ public class LedgerStateMachine {
                 BigDecimal delta = line.entryType() == EntryType.DEBIT
                         ? line.amount().negate()
                         : line.amount();
-                JournalLine jl = journalLines.get(i);
+                JournalLine jl = reusableJournalLines.get(i);
                 BalanceChangeEvent event = new BalanceChangeEvent(
-                        UUID.randomUUID().toString(),
+                        FastIdGenerator.nextId(),
                         BalanceChangeEvent.EVENT_TYPE,
                         BalanceChangeEvent.EVENT_VERSION,
                         now,
@@ -425,7 +434,7 @@ public class LedgerStateMachine {
         // Publish account creation event
         if (eventListener != null) {
             eventListener.onAccountCreated(new AccountCreatedEvent(
-                    UUID.randomUUID().toString(),
+                    FastIdGenerator.nextId(),
                     AccountCreatedEvent.EVENT_TYPE,
                     AccountCreatedEvent.EVENT_VERSION,
                     Instant.now(),
@@ -479,6 +488,7 @@ public class LedgerStateMachine {
     // ── Reversal (F-008 Section 4.2) ──────────────────────────────
 
     public synchronized CommandResult applyReversal(ReversalCommand cmd) {
+        reusableMirroredLines.clear();
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
             var entry = existing.get();
@@ -518,7 +528,6 @@ public class LedgerStateMachine {
         Instant now = Instant.now();
 
         // Mirror each original line: DEBIT ↔ CREDIT, no balance check
-        List<JournalLine> mirroredLines = new ArrayList<>();
         for (var origLine : originalJournal.lines()) {
             EntryType mirrored = origLine.entryType() == EntryType.DEBIT ? EntryType.CREDIT : EntryType.DEBIT;
             AccountBalanceKey key = new AccountBalanceKey(origLine.accountId(), origLine.balanceType(), origLine.currency());
@@ -535,14 +544,14 @@ public class LedgerStateMachine {
 
             balanceStore.put(key, new BalanceEntry(after, index, nextSeq, reversalJournalId, now));
 
-            String journalLineId = reversalJournalId + "-" + String.format("%02d", mirroredLines.size() + 1);
+            String journalLineId = reversalJournalId + "-" + String.format("%02d", reusableMirroredLines.size() + 1);
             JournalLine jl = new JournalLine(
                     journalLineId, reversalJournalId, origLine.legId(),
                     origLine.accountId(), origLine.balanceType(), origLine.currency(),
                     mirrored, origLine.amount(),
                     current.amount(), after,
                     origLine.configVersion(), now);
-            mirroredLines.add(jl);
+            reusableMirroredLines.add(jl);
 
             // Publish BalanceChangeEvent for reversal
             if (eventListener != null) {
@@ -550,7 +559,7 @@ public class LedgerStateMachine {
                         ? jl.amount().negate()
                         : jl.amount();
                 BalanceChangeEvent event = new BalanceChangeEvent(
-                        UUID.randomUUID().toString(),
+                        FastIdGenerator.nextId(),
                         BalanceChangeEvent.EVENT_TYPE,
                         BalanceChangeEvent.EVENT_VERSION,
                         now,
@@ -587,7 +596,7 @@ public class LedgerStateMachine {
                 reversalJournalId, JournalType.REVERSAL, cmd.requestId(),
                 originalJournal.businessEventType(), originalJournal.businessEventRef(),
                 cmd.valueDate(), JournalStatus.CONFIRMED,
-                List.copyOf(mirroredLines), crossPeriod, now);
+                List.copyOf(reusableMirroredLines), crossPeriod, now);
 
         journalStore.put(reversalJournalId, reversalJournal);
 

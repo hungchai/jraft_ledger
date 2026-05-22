@@ -42,6 +42,11 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private NodeRole nodeRole;
     private java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands;
 
+    // Reusable deserialization buffer to avoid per-command byte[] allocation on hot path
+    private static final int DESER_BUFFER_SIZE = 16384;
+    private static final ThreadLocal<byte[]> DESER_BUFFER =
+            ThreadLocal.withInitial(() -> new byte[DESER_BUFFER_SIZE]);
+
     public LedgerRaftStateMachine(LedgerStateMachine ledgerStateMachine) {
         this.ledgerStateMachine = ledgerStateMachine;
     }
@@ -75,10 +80,17 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             ByteBuffer data = iter.getData();
 
             if (data != null && data.hasRemaining()) {
-                byte[] bytes = new byte[data.remaining()];
-                data.get(bytes);
+                int len = data.remaining();
+                byte[] bytes;
+                if (len <= DESER_BUFFER_SIZE) {
+                    bytes = DESER_BUFFER.get();
+                    data.get(bytes, 0, len);
+                } else {
+                    bytes = new byte[len];
+                    data.get(bytes);
+                }
                 try {
-                    RaftCommand cmd = CommandSerializer.deserialize(bytes);
+                    RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                     CommandResult result = executeCommand(cmd);
                     // Propagate result back to submitter
                     if (pendingCommands != null) {
@@ -94,7 +106,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     if (pendingCommands != null) {
                         RaftCommand cmd = null;
                         try {
-                            cmd = CommandSerializer.deserialize(bytes);
+                            cmd = CommandSerializer.deserialize(bytes, len);
                         } catch (Exception ignored) {}
                         if (cmd != null) {
                             var future = pendingCommands.remove(cmd.requestId());
