@@ -37,6 +37,7 @@
 | F-008 | State Machine Design | Raft State Machine 核心設計 |
 | F-009 | Accounting Period / EOD | 帳期管理與 EOD 關期流程 |
 | F-010 | Account Management | 帳戶生命週期管理 |
+| OPS-001 | SRE 運維指南 | RocksDB 壓實、Raft 復原、MySQL 同步修復 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
 
 ---

@@ -37,6 +37,7 @@ This document contains the complete technical requirements specification for the
 | F-008 | State Machine Design | Core Raft State Machine design |
 | F-009 | Accounting Period / EOD | Accounting period management and EOD closing flow |
 | F-010 | Account Management | Account lifecycle management |
+| OPS-001 | SRE Operational Guidelines | RocksDB compaction, Raft recovery, MySQL sync recovery |
 | NFR | Non-Functional Requirements | Performance, availability, consistency, security, capacity |
 
 ---
