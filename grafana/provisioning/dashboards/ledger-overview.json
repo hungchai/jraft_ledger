@@ -1,0 +1,182 @@
+{
+  "dashboard": {
+    "title": "Ledger Platform Overview",
+    "uid": "ledger-overview",
+    "tags": ["ledger", "raft", "observability"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 0,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Posting P95 Latency",
+        "type": "gauge",
+        "gridPos": {"x": 0, "y": 0, "w": 8, "h": 4},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m])) * 1000",
+            "legendFormat": "P95 (ms)",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 3, "color": "yellow"},
+                {"value": 10, "color": "red"}
+              ]
+            },
+            "unit": "ms"
+          }
+        },
+        "description": "NFR target: ≤ 3ms P95"
+      },
+      {
+        "id": 2,
+        "title": "Balance Query P95 Latency (Live)",
+        "type": "gauge",
+        "gridPos": {"x": 8, "y": 0, "w": 8, "h": 4},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"live\"}[5m])) * 1000",
+            "legendFormat": "P95 Live (ms)",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 2, "color": "yellow"},
+                {"value": 5, "color": "red"}
+              ]
+            },
+            "unit": "ms"
+          }
+        },
+        "description": "NFR target: ≤ 2ms P95 (live)"
+      },
+      {
+        "id": 3,
+        "title": "Raft Leader Status",
+        "type": "stat",
+        "gridPos": {"x": 16, "y": 0, "w": 8, "h": 4},
+        "targets": [
+          {
+            "expr": "ledger_raft_is_leader",
+            "legendFormat": "{{node_id}}",
+            "refId": "A"
+          }
+        ],
+        "description": "1 = Leader, 0 = Follower"
+      },
+      {
+        "id": 4,
+        "title": "Account Queue Depth (Top 5)",
+        "type": "bargauge",
+        "gridPos": {"x": 0, "y": 4, "w": 12, "h": 4},
+        "targets": [
+          {
+            "expr": "topk(5, ledger_account_queue_depth)",
+            "legendFormat": "{{accountId}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 500, "color": "yellow"},
+                {"value": 1000, "color": "red"}
+              ]
+            },
+            "max": 1000
+          }
+        },
+        "description": "NFR: queue < 500 normal, > 1000 backpressure"
+      },
+      {
+        "id": 5,
+        "title": "GC Pause Max",
+        "type": "gauge",
+        "gridPos": {"x": 12, "y": 4, "w": 12, "h": 4},
+        "targets": [
+          {
+            "expr": "max(jvm_gc_pause_seconds_max) * 1000",
+            "legendFormat": "Max GC Pause (ms)",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 1, "color": "yellow"},
+                {"value": 5, "color": "red"}
+              ]
+            },
+            "unit": "ms"
+          }
+        },
+        "description": "NFR: ZGC pause < 1ms normal, > 5ms alert"
+      },
+      {
+        "id": 6,
+        "title": "Posting Throughput (TPS)",
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 8, "w": 24, "h": 6},
+        "targets": [
+          {
+            "expr": "rate(ledger_posting_duration_seconds_count[1m])",
+            "legendFormat": "{{node_id}}",
+            "refId": "A"
+          }
+        ],
+        "description": "NFR target: ≥ 10,000 TPS peak"
+      },
+      {
+        "id": 7,
+        "title": "Raft Last Applied Index",
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 14, "w": 24, "h": 6},
+        "targets": [
+          {
+            "expr": "ledger_raft_last_applied_index",
+            "legendFormat": "{{node_id}}",
+            "refId": "A"
+          }
+        ],
+        "description": "Lag = max - node value. Alert if > 100 sustained"
+      },
+      {
+        "id": 8,
+        "title": "JVM Heap Usage",
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 20, "w": 24, "h": 6},
+        "targets": [
+          {
+            "expr": "jvm_memory_used_bytes{area=\"heap\"}",
+            "legendFormat": "{{node_id}} - Used",
+            "refId": "A"
+          },
+          {
+            "expr": "jvm_memory_max_bytes{area=\"heap\"}",
+            "legendFormat": "{{node_id}} - Max",
+            "refId": "B"
+          }
+        ],
+        "description": "Heap configured: 2GB per node"
+      }
+    ]
+  }
+}
