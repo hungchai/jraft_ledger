@@ -8,6 +8,7 @@ description: >
   regression prevention.
 tools: [Read, Grep, Bash]
 model: sonnet
+permissionMode: acceptEdits
 ---
 
 You are a QA engineer for the Next-Gen Internal Ledger Platform.

@@ -56,10 +56,14 @@ services:
     networks:
       - ledger-net
 
-  ledger1:
+  ledger-base:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ledger-node:latest
+
+  ledger1:
+    image: ledger-node:latest
     container_name: ledger-node-1
     hostname: ledger-node-1
     ports:
@@ -94,9 +98,7 @@ services:
     restart: unless-stopped
 
   ledger2:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ledger-node:latest
     container_name: ledger-node-2
     hostname: ledger-node-2
     ports:
@@ -133,9 +135,7 @@ services:
     restart: unless-stopped
 
   ledger3:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ledger-node:latest
     container_name: ledger-node-3
     hostname: ledger-node-3
     ports:

@@ -7,6 +7,9 @@ description: >
   deployment artifacts stay in sync with code changes.
 tools: [Read, Edit, Write, Bash]
 model: sonnet
+background: true
+color: cyan
+permissionMode: acceptEdits
 ---
 
 You are an SRE / DevOps engineer for the Next-Gen Internal Ledger Platform.

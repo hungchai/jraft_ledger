@@ -33,10 +33,11 @@ public class PostingController {
     @PostMapping
     public ResponseEntity<?> post(@RequestBody Map<String, Object> body) {
         if (!nodeRole.isLeader()) {
+            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
                     "errorCodes", List.of("NOT_LEADER"),
-                    "leaderHint", "Query /health on each node to find the leader"
+                    "leaderHint", leader
             ));
         }
         String requestId = (String) body.get("requestId");

@@ -108,6 +108,12 @@ public class RaftNodeManager implements AutoCloseable {
     public PeerId getServerId() { return serverId; }
     public boolean isLeader() { return node != null && node.isLeader(); }
 
+    public String getLeaderEndpoint() {
+        if (node == null) return "unknown";
+        PeerId leader = node.getLeaderId();
+        return leader != null ? leader.toString() : "unknown";
+    }
+
     @Override
     public void close() {
         if (node != null) {

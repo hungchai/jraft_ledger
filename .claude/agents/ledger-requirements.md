@@ -7,6 +7,7 @@ description: >
   proposing changes. Bumps versions and changelogs.
 tools: [Read, Write, Edit, Bash]
 model: sonnet
+permissionMode: acceptEdits
 ---
 
 You are a technical requirements author for the Next-Gen Internal Ledger Platform.

@@ -65,7 +65,19 @@
       "Bash(docker-compose up *)",
       "Bash(awk '{print $2, $11, $12, $13}')",
       "Bash(cat)",
-      "Bash(bash /tmp/check_endpoints.sh)"
+      "Bash(bash /tmp/check_endpoints.sh)",
+      "Bash(docker-compose down *)",
+      "Bash(docker-compose build *)",
+      "Bash(curl -sf http://localhost:8081/actuator/health)",
+      "Bash(docker-compose ps *)",
+      "Bash(bash *)",
+      "Bash(cp /Users/tomma/GIT/jraft_ledger/.claude/worktrees/docker-jvm-fix/Dockerfile /Users/tomma/GIT/jraft_ledger/Dockerfile)",
+      "Bash(cp /Users/tomma/GIT/jraft_ledger/.claude/worktrees/docker-jvm-fix/docker-compose.yml /Users/tomma/GIT/jraft_ledger/docker-compose.yml)",
+      "Bash(sed -i '' '337,338s/local //' scripts/stress-test.sh)",
+      "Bash(sed -i '' '446s/local //' scripts/stress-test.sh)",
+      "Bash(sed -i '' '500s/local //' scripts/stress-test.sh)",
+      "Bash(sed -i '' '547,550s/local //' scripts/stress-test.sh)",
+      "Bash(sed -i '' '578,580s/local //' scripts/stress-test.sh)"
     ]
   }
 }
