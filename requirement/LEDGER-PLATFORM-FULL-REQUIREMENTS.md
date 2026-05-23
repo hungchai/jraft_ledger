@@ -1,7 +1,7 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.3  
+**版本**: v0.4  
 **日期**: 2026-05-23  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
@@ -27,6 +27,7 @@
 | v0.1 | 2026-05-16 | 初稿 | Ledger Platform Team |
 | v0.2 | 2026-05-22 | ADR-001 2.2 節：新增 sofa-common-tools 版本相容性說明（解決 Spring Boot 3.4.4 + SOFAJRaft 1.3.15 的 logback 衝突） | Ledger Platform Team |
 | v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
+| v0.4 | 2026-05-23 | 新增 Core Concepts 章節：定義 Account、BalanceType、Position 三大核心概念與關聯功能 | Ledger Platform Team |
 
 ---
 
@@ -34,6 +35,7 @@
 
 | 文件 | 章節 | 說明 |
 |---|---|---|
+| Core Concepts | 核心概念 | Account、BalanceType、Position 定義與關係 |
 | ADR-001 | 架構決策 | Raft + CQRS + Account-Level Queue 選型理由 |
 | F-001 | Balance Type Registry | Balance Type 配置化管理，不改代碼新增 type |
 | F-002 | Posting API v2 | 核心入帳 API，支持 Multi-Account 原子 Posting |
@@ -47,6 +49,151 @@
 | F-010 | Account Management | 帳戶生命週期管理 |
 | OPS-001 | SRE 運維指南 | RocksDB 壓實、Raft 復原、MySQL 同步修復 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
+
+---
+
+## Core Concepts（核心概念）
+
+本節定義 Ledger Platform 的三大核心概念：Account、BalanceType、Position。這些概念貫穿所有功能需求（F-001 至 F-011）。
+
+### Account（帳戶）
+
+Account 代表帳務實體，如客戶帳戶、公司帳戶、Nostro 帳戶、Suspense 帳戶。
+
+**核心屬性：**
+- `accountId`: 唯一識別碼（如 `CLIENT_ACC_001`, `COMPANY_FX_ACC`）
+- `status`: 生命週期狀態（`ACTIVE` → `FROZEN` → `CLOSED`）
+- `balanceTypes`: 支援的餘額類型列表（初始化時配置）
+- `currencies`: 支援的幣種列表
+- `metadata`: 客戶資訊、法人代碼、產品代碼等
+
+**生命週期：**
+
+```
+CREATE → ACTIVE → FROZEN → CLOSED
+          ↑         ↓
+        UNFREEZE
+```
+
+- **CREATE**: 建立 Account，初始化 BalanceType（F-010）
+- **ACTIVE**: 可接受 Posting、Query
+- **FROZEN**: 暫停所有操作（AML 調查、法務凍結）
+- **CLOSED**: 餘額為 0 才可關閉，不可再操作
+
+**詳細規格見 F-010 Account Management。**
+
+---
+
+### BalanceType（餘額類型）
+
+BalanceType 定義餘額的業務語義與約束規則。每個 Account 可有多個 BalanceType。
+
+**核心屬性：**
+- `typeCode`: 餘額類型代碼（如 `AVAILABLE_BALANCE`, `TRADEAHEAD_BALANCE`）
+- `allowNegative`: 是否允許負餘額（overdraft）
+- `zeroFloorEnforce`: 是否強制餘額 ≥ 0
+- `overdrawnAlertThreshold`: 負餘額告警門檻（如 -500,000）
+- `creditLimit`: 正餘額上限（如 1,000,000）
+
+**預設 BalanceType：**
+
+| typeCode | allowNegative | zeroFloorEnforce | overdrawnAlertThreshold | 用途 |
+|---|---|---|---|---|
+| AVAILABLE_BALANCE | false | true | N/A | 可用餘額（結算、提款） |
+| TRADEAHEAD_BALANCE | true | false | -500,000 | 交易預留（RFQ 前置扣款） |
+| LOCKED_BALANCE | false | false | N/A | Maker-Checker 待審餘額 |
+| FROZEN_BALANCE | false | false | N/A | 法規凍結餘額 |
+
+**約束規則：**
+
+```
+allowNegative=false:
+  → Posting 時若 afterBalance < 0，拒絕（INSUFFICIENT_BALANCE）
+
+allowNegative=true:
+  → 允許負餘額至 overdrawnAlertThreshold
+  → 超過門檻觸發 PagerDuty 告警
+
+zeroFloorEnforce=true:
+  → 強制 balance ≥ 0，即使是 allowNegative=true 也適用
+```
+
+**詳細規格見 F-001 Balance Type Registry。**
+
+---
+
+### Position（餘額位置）
+
+Position 是 v0.4 新增欄位，用於區分同一 BalanceType 的不同子餘額狀態。
+
+**Position 類型：**
+
+| Position | 說明 | 使用場景 |
+|---|---|---|
+| CURRENT | 即時可用餘額 | 正常交易、結算、提款 |
+| LOCKED | 鎖定待審餘額 | Maker-Checker 調帳草稿待批准 |
+| FROZEN | 法規凍結餘額 | AML 調查、法院命令、監管凍結 |
+
+**JournalLine 結構（v0.4）：**
+
+```json
+{
+  "accountId": "CLIENT_ACC_001",
+  "balanceType": "AVAILABLE_BALANCE",
+  "position": "CURRENT",      // 新增欄位
+  "currency": "USD",
+  "entryType": "DEBIT",
+  "amount": "1000.00"
+}
+```
+
+**AccountBalanceKey 擴展：**
+
+```
+AccountBalanceKey = (accountId, balanceType, position, currency)
+```
+
+每個 Account 在每個 BalanceType + Position + Currency 組合下維護獨立餘額。
+
+**餘額聚合查詢：**
+
+```
+GET /ledger/balances?accountId=X&balanceType=AVAILABLE&position=CURRENT
+  → 返回 CURRENT 子餘額
+
+GET /ledger/balances?accountId=X&aggregate=true
+  → 返回所有 Position 總和（CURRENT + LOCKED + FROZEN）
+```
+
+**詳細規格見 F-002 Posting API v2 §3.4 Position Field、F-005 Balance Query v2。**
+
+---
+
+### Core Concepts 總結表
+
+| 概念 | 定義 | 關聯功能 |
+|---|---|---|
+| Account | 帳務實體，生命週期 ACTIVE/FROZEN/CLOSED | F-010 Account Management |
+| BalanceType | 餘額類型，定義 overdraft/creditLimit 規則 | F-001 Balance Type Registry |
+| Position | 子餘額位置 CURRENT/LOCKED/FROZEN | F-002 Posting v2, F-005 Balance Query |
+
+**三者關係：**
+
+```
+Account
+  └─ balanceTypes: [AVAILABLE, TRADEAHEAD, LOCKED, FROZEN]
+      └─ positions: [CURRENT, LOCKED, FROZEN]
+          └─ currencies: [USD, HKD, EUR]
+              └─ balance: 5000.00
+```
+
+每個餘額由四維鍵唯一定位：
+
+```
+(accountId, balanceType, position, currency) → balance
+```
+
+---
 
 ---
 
