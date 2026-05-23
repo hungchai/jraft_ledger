@@ -701,6 +701,30 @@
               "query": [{ "key": "query", "value": "max(jvm_gc_pause_seconds_max)" }]
             }
           }
+        },
+        {
+          "name": "Raft Status Node 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8081/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8081" }
+          }
+        },
+        {
+          "name": "Raft Status Node 2",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8082/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8082" }
+          }
+        },
+        {
+          "name": "Raft Status Node 3",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8083/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8083" }
+          }
         }
       ]
     }
