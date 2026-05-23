@@ -33,12 +33,5 @@ EXPOSE 8080 28080
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
-ENTRYPOINT ["java", \
-    "-XX:+UseZGC", \
-    "-XX:MaxGCPauseMillis=1", \
-    "-Xms2g", "-Xmx2g", \
-    "-Xlog:gc*:file=/var/log/ledger/gc.log:time,uptime:filecount=10,filesize=50m", \
-    "-Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info", \
-    "-Dmanagement.metrics.export.prometheus.enabled=true", \
-    "-Dserver.shutdown.grace-period=30s", \
-    "-jar", "/app/ledger-restful.jar"]
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/ledger-restful.jar"]

@@ -73,6 +73,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      JAVA_OPTS: >-
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+        -XX:MaxRAMPercentage=75.0
+        -XX:+ExitOnOutOfMemoryError
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
     depends_on:
       mysql:
         condition: service_healthy
@@ -101,6 +110,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      JAVA_OPTS: >-
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+        -XX:MaxRAMPercentage=75.0
+        -XX:+ExitOnOutOfMemoryError
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
     depends_on:
       ledger1:
         condition: service_started
@@ -131,6 +149,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      JAVA_OPTS: >-
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+        -XX:MaxRAMPercentage=75.0
+        -XX:+ExitOnOutOfMemoryError
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
     depends_on:
       ledger2:
         condition: service_started
