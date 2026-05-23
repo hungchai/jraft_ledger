@@ -1,10 +1,11 @@
 # NFR — Non-Functional Requirements Specification
 
-**Document Version**: v0.3
+**Document Version**: v0.4
 **Function**: Non-Functional Requirements (NFR)
 **System**: Next-Gen Internal Ledger Platform
 **Status**: Draft for Review
 
+> **v0.4 Change Summary**: NFR-9 added Prometheus/Grafana implementation details (endpoints, services, dashboard configuration).
 > **v0.3 Change Summary**: Added NFR-16 (Raft cluster size and fault tolerance) and NFR-17 (Node sync monitoring).
 > **v0.2 Change Summary**: Added NFR-13 (JVM & GC), NFR-14 (Account Queue), NFR-15 (accountSeq Overflow Policy); NFR-9 Observability supplemented with GC pause alert and accountSeq gap alert.
 
@@ -99,12 +100,15 @@
 
 ---
 
-## 9. Observability [v0.2 Update]
+## 9. Observability [v0.3 Update]
 
 | Requirement | Description |
 |---|---|
 | Distributed tracing | All requests carry traceId / spanId, integrated with Jaeger / Zipkin |
 | Metrics | Prometheus exposes TPS, P50/P95/P99 latency, Queue backlog, Raft term, Learner lag, **GC pause time, Account Queue depth per account** |
+| Prometheus endpoint | `/actuator/prometheus` — exposed by all ledger nodes (8081–8083) and projection (8089) |
+| Prometheus Server | `http://localhost:9090` — scrape interval 15s, targets: ledger-node-1/2/3:8080, ledger-projection:8089 |
+| Grafana | `http://localhost:3000` — default dashboard includes Posting P95, Balance Query latency, Raft leader status, Queue depth, GC pause |
 | Alerts (original) | Posting P99 > 50ms, Queue backlog > 1000, Learner lag > 10s, L1 reconciliation failure → PagerDuty |
 | Alerts (new) | **Any single GC pause > 5ms → PagerDuty**; **BalanceChangeEvent accountSeq gap detection failure → PagerDuty**; **Any accountSeq ≥ Long.MAX_VALUE × 80% → PagerDuty (theoretical warning, should never trigger)** |
 | Logs | Structured JSON logs with journalId, requestId, accountId, traceId |

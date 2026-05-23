@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.3
+**版本**: v0.4
 **日期**: 2026-05-23
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.4 變更摘要**：新增 Module 13（F-013 Idempotency & Hotspot Account Concurrency），新增 TC-F013-01~10。TDD 執行計劃補充 Phase 6.5。
+>
 > **v0.3 變更摘要**：新增 position 字段支持（AccountBalanceKey 複合鍵擴展）。新增 TC-F002-11~15（Posting position）、TC-F005-07~10（Balance Query position）、TC-F008-27~30（State Machine position 驗證規則 V-13）。更新現有測試用例以反映新鍵格式 (accountId, balanceType, currency, position)。
 >
 > **v0.2 變更摘要**：新增 Module 3 Section 3.4（TC-F008-19 ~ TC-F008-26，accountSeq State Machine）、Module 11 Section 11.1（TC-F011-01 ~ TC-F011-07，BalanceChangeEvent accountSeq），TDD 執行計劃補充 Phase 3.5。
@@ -863,6 +865,68 @@ TC-KAFKA-02  multiplePostings_produceSequentialAccountSeq
 
 ---
 
+## Module 17：Idempotency & Hotspot Account Concurrency（F-013）
+
+### 17.1 Idempotency
+
+```
+TC-F013-01  duplicateRequestId_returnsCachedResult_noReExecution
+            Given: Posting req-001 completed, journalId=JNL-001
+            When:  重複發送相同 req-001
+            Then:  返回原結果（journalId=JNL-001），State Machine 不重新 apply
+
+TC-F013-02  duplicateRequestId_rejected_returnsOriginalErrors
+            Given: Posting req-002 rejected（INSUFFICIENT_BALANCE）
+            When:  重複發送 req-002
+            Then:  返回原錯誤碼（INSUFFICIENT_BALANCE），不做餘額校驗
+
+TC-F013-03  idempotencySurvivesLeaderFailover
+            Given: Leader 完成 req-003 apply → idempotencyStore.put → Leader 宕機
+            When:  新 Leader 選出後，Client 重試 req-003
+            Then:  從 RocksDB 恢復的 idempotencyStore 命中 → 返回原結果
+
+TC-F013-04  idempotencyEntry_expiredAfterTTL_treatedAsNewRequest
+            Given: idempotencyStore TTL=1s，req-004 completed → 等待 2s
+            When:  重試 req-004
+            Then:  idempotencyStore 已淘汰 → 視為新請求，重新執行帳務變動
+
+TC-F013-05  concurrentDuplicateRequestIds_onlyOneExecuted
+            Given: 兩個线程同時發送 req-005
+            When:  同時到達 Account Queue
+            Then:  只生成 1 筆 Journal，另一個返回快取結果
+```
+
+### 17.2 Hotspot Account Concurrency
+
+```
+TC-F013-06  hotspotAccount_1000ConcurrentPostings_noBalanceInconsistency
+            Given: COMPANY_FX_ACC balance=1,000,000，1000 並發 DEBIT 1
+            When:  1000 並發 Posting（不同 CLIENT_ACC → 同一 COMPANY_FX_ACC）
+            Then:  最終 COMPANY_FX_ACC balance=0，無重複扣款，無負數
+
+TC-F013-07  hotspotAccount_1000ConcurrentPostings_p95Under3ms
+            Given: COMPANY_FX_ACC，1000 並發 RFQ Posting
+            When:  測量 Posting P95 延遲
+            Then:  P95 ≤ 3ms
+
+TC-F013-08  accountQueueDepthExceedsMaxSize_returnsQueueFull
+            Given: MAX_QUEUE_SIZE=10，queue("COMPANY_FX_ACC") 已有 10 個 pending
+            When:  第 11 個請求到達
+            Then:  返回 HTTP 429 QUEUE_FULL
+
+TC-F013-09  multiAccountCoordination_deadlockPrevention_orderedTokenAcquisition
+            Given: RFQ 涉及 CLIENT_ACC_001 + COMPANY_FX_ACC
+            When:  兩個 RFQ 同時執行，反向帳戶順序
+            Then:  無死鎖，兩者均成功（按 accountId 升序取 Token）
+
+TC-F013-10  virtualThreadWorkerCrash_queueRecoversAndResumesConsumption
+            Given: Account Queue Worker-3（COMPANY_FX_ACC）運行中
+            When:  模擬 Worker thread 中斷/崩潰
+            Then:  系統自動重建 Worker-3，queue 中 pending 請求繼續被消費
+```
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
@@ -899,4 +963,7 @@ Phase 5 — 持久性與性能
 Phase 6 — 並發安全
   TC-F002-08~09（並發 Posting）
   TC-NFR-04~05（冪等 + 並發）
+
+Phase 6.5 — Idempotency & Hotspot Account【v0.4 新增】
+  TC-F013-01~10（Idempotency + Hotspot Concurrency）
 ```

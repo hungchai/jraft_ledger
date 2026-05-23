@@ -1,8 +1,8 @@
 # OPS-001 SRE / DevOps Operational Guidelines
 
-**Version**: v0.1  
-**Date**: 2026-05-22  
-**Status**: Draft for Review  
+**Version**: v0.1
+**Date**: 2026-05-22
+**Status**: Draft for Review
 **Audience**: SRE, Platform Engineers, On-call Engineers
 
 ---
@@ -12,6 +12,7 @@
 1. [RocksDB Compaction](#1-rocksdb-compaction)
 2. [Raft Node Out-of-Sync Recovery](#2-raft-node-out-of-sync-recovery)
 3. [MySQL View Layer Out-of-Sync Recovery](#3-mysql-view-layer-out-of-sync-recovery)
+4. [Prometheus / Grafana Monitoring](#4-prometheus--grafana-monitoring)
 
 ---
 
@@ -470,6 +471,89 @@ If Kafka retention is shorter than the corruption window:
 | MySQL replication (optional) | Deploy MySQL read replica for reporting queries; keep primary for projection writes |
 | Kafka retention | `retention.ms = 7 days` minimum; ensures enough history for rebuilds |
 | EOD reconciliation | L1 reconciliation (RocksDB vs MySQL) runs every night; catches drift within T+0 |
+
+---
+
+## 4. Prometheus / Grafana Monitoring
+
+### 4.1 Access Endpoints
+
+| Service | URL | Default Account |
+|---|---|---|
+| Prometheus | http://localhost:9090 | None |
+| Grafana | http://localhost:3000 | admin / admin123 |
+| Node 1 metrics | http://localhost:8081/actuator/prometheus | None |
+| Node 2 metrics | http://localhost:8082/actuator/prometheus | None |
+| Node 3 metrics | http://localhost:8083/actuator/prometheus | None |
+| Projection metrics | http://localhost:8089/actuator/prometheus | None |
+
+### 4.2 Prometheus Targets Status
+
+Check all scrape targets are UP:
+
+```bash
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job:.labels.job,health:.health}'
+```
+
+Expected output:
+
+```
+{"job": "ledger-nodes", "health": "up"}
+{"job": "projection", "health": "up"}
+{"job": "prometheus", "health": "up"}
+```
+
+If target status is `down`, check:
+
+- Docker container is running: `docker ps`
+- Actuator endpoint is exposed: `curl http://ledger-node-1:8080/actuator/prometheus`
+- Prometheus config loaded correctly: `docker exec ledger-prometheus cat /etc/prometheus/prometheus.yml`
+
+### 4.3 Grafana Dashboard
+
+Default dashboard (`grafana/provisioning/dashboards/ledger-overview.json`) contains the following panels:
+
+| Panel | Metrics | NFR Target |
+|---|---|---|
+| Posting P95 latency | `ledger_posting_duration_seconds{quantile="0.95"}` | ≤ 3ms |
+| Balance Query latency | `ledger_balance_query_duration_seconds{quantile="0.95",queryType="live"}` | ≤ 2ms |
+| Raft Leader status | `ledger_raft_is_leader` | 1 (single node = 1) |
+| Account Queue depth | `ledger_account_queue_depth` | < 500 |
+| GC Pause time | `jvm_gc_pause_seconds_max` | < 5ms |
+| Kafka consumer lag | `kafka_consumer_lag` | < 1000 |
+
+Dashboard JSON configuration: `grafana/provisioning/dashboards/ledger-overview.json`.
+
+### 4.4 Common PromQL Queries
+
+```promql
+# Posting P95 last 5 minutes
+histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m]))
+
+# Balance Query P95 (live)
+histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType="live"}[5m]))
+
+# Max GC pause last 1 minute
+max(jvm_gc_pause_seconds_max)
+
+# Raft Leader node
+max_by (node_id) (ledger_raft_is_leader)
+
+# Deepest account queues
+topk(5, ledger_account_queue_depth)
+```
+
+### 4.5 Alert Rules Configuration
+
+Prometheus AlertManager must be configured with the following rules (see `prometheus/alert-rules.yml`):
+
+| Alert Name | Condition | Severity |
+|---|---|---|
+| PostingP95High | histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m])) > 0.003 | WARNING |
+| PostingP99Critical | histogram_quantile(0.99, rate(ledger_posting_duration_seconds_bucket[5m])) > 0.05 | CRITICAL |
+| GCPauseTooLong | jvm_gc_pause_seconds_max > 0.005 | CRITICAL |
+| QueueBacklogHigh | ledger_account_queue_depth > 500 | WARNING |
+| RaftFollowerLagHigh | max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index > 100 | WARNING |
 
 ---
 

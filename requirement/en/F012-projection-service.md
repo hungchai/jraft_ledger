@@ -14,7 +14,7 @@ Projection Service is the **read-path synchronization service** in the CQRS arch
 **Core Principles**:
 - **Independent deployment**: not embedded in Ledger nodes; crashes do not affect posting
 - **At-least-once consumption**: guarantees no duplicate writes through idempotent inserts
-- **Only project necessary data**: journal + journal_line; balances are provided by the in-memory StateMachine
+- **Projected data**: journal + journal_line + account + account_balance; read-path APIs query MySQL to offload Raft nodes
 
 ---
 

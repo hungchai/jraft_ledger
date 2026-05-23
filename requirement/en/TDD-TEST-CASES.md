@@ -1,10 +1,14 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**Version**: v0.2
-**Date**: 2026-05-18
+**Version**: v0.4
+**Date**: 2026-05-23
 **Method**: Test-Driven Development (Red → Green → Refactor)
 **Framework**: JUnit 5 + Mockito + AssertJ + Testcontainers (MySQL) + RocksDB embedded
 
+> **v0.4 Change Summary**: Added Module 17 (F-013 Idempotency & Hotspot Account Concurrency), added TC-F013-01~10. TDD execution plan supplemented with Phase 6.5.
+>
+> **v0.3 Change Summary**: Added position field support (AccountBalanceKey composite key extension). Added TC-F002-11~15 (Posting position), TC-F005-07~10 (Balance Query position), TC-F008-27~30 (State Machine position validation rule V-13). Updated existing test cases to reflect new key format (accountId, balanceType, currency, position).
+>
 > **v0.2 Change Summary**: Added Module 3 Section 3.4 (TC-F008-19 ~ TC-F008-26, accountSeq State Machine), Module 11 Section 11.1 (TC-F011-01 ~ TC-F011-07, BalanceChangeEvent accountSeq), TDD execution plan supplemented with Phase 3.5.
 
 ---
@@ -297,6 +301,37 @@ TC-F008-26  restartNode_accountSeqResumesFromRocksDB
                    must not reset to 0 or 1
 ```
 
+### 3.5 LedgerStateMachine — Position Validation Rule V-13 [v0.3 New]
+
+```
+TC-F008-27  applyPosting_lockedPositionDebitToNegative_rejected
+            Given: AVAILABLE_BALANCE/USD/LOCKED = 50.00, allowNegative=false
+            When:  apply PostingCommand{ position=LOCKED, DEBIT 100.00 }
+            Then:  CommandResult.status=REJECTED, errorCode=INSUFFICIENT_BALANCE
+                   balance remains 50.00 unchanged
+                   (Validation rule V-13: LOCKED position cannot be negative)
+
+TC-F008-28  applyPosting_frozenPositionDebitToNegative_rejected
+            Given: AVAILABLE_BALANCE/USD/FROZEN = 30.00, allowNegative=false
+            When:  apply PostingCommand{ position=FROZEN, DEBIT 50.00 }
+            Then:  CommandResult.status=REJECTED, errorCode=INSUFFICIENT_BALANCE
+                   balance remains 30.00 unchanged
+                   (Validation rule V-13: FROZEN position cannot be negative)
+
+TC-F008-29  applyPosting_currentPositionDebitToNegative_allowNegativeFalse_rejected
+            Given: AVAILABLE_BALANCE/USD/CURRENT = 100.00, allowNegative=false
+            When:  apply PostingCommand{ position=CURRENT, DEBIT 200.00 }
+            Then:  CommandResult.status=REJECTED, errorCode=INSUFFICIENT_BALANCE
+                   (CURRENT position follows allowNegative config)
+
+TC-F008-30  applyPosting_positionInJournalLine_correctlyRecorded
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT = 1000.00
+            When:  apply PostingCommand{ position=LOCKED, DEBIT 100.00 }
+            Then:  JournalLine.position=LOCKED
+                   AccountBalanceKey = (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
+                   balance updated correctly
+```
+
 ---
 
 ## Module 4: Posting API (F-002)
@@ -353,6 +388,34 @@ TC-F002-10  post_inactiveBalanceType_returnsBadRequest
             Given: balanceType="OLD_TYPE" status=INACTIVE
             When:  post(request)
             Then:  HTTP 400 / errorCode=BALANCE_TYPE_NOT_FOUND
+
+TC-F002-11  post_withPositionCurrent_defaultPositionUsed
+            Given: PostingRequest.Line does not specify position
+            When:  post(request)
+            Then:  JournalLine.position=CURRENT, AccountBalanceKey uses position=CURRENT
+
+TC-F002-12  post_withPositionLocked_lockedBalanceUpdated
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/LOCKED = 500.00
+            When:  post(request with position=LOCKED, DEBIT 100)
+            Then:  LOCKED balance = 400.00, CURRENT balance unchanged
+
+TC-F002-13  post_lockedPositionDebitToNegative_returnsRejected
+            Given: AVAILABLE_BALANCE/USD/LOCKED = 50.00, allowNegative=false
+            When:  post(request with position=LOCKED, DEBIT 100)
+            Then:  PostingResult.status=REJECTED, errorCode=INSUFFICIENT_BALANCE
+                   (Validation rule V-13: LOCKED position cannot be negative)
+
+TC-F002-14  post_frozenPositionDebitToNegative_returnsRejected
+            Given: AVAILABLE_BALANCE/USD/FROZEN = 30.00, allowNegative=false
+            When:  post(request with position=FROZEN, DEBIT 50)
+            Then:  PostingResult.status=REJECTED, errorCode=INSUFFICIENT_BALANCE
+                   (Validation rule V-13: FROZEN position cannot be negative)
+
+TC-F002-15  post_multiPositionSameAccount_independentBalances
+            Given: CLIENT_ACC_001 has AVAILABLE_BALANCE/USD/CURRENT=1000,
+                   AVAILABLE_BALANCE/USD/LOCKED=200, AVAILABLE_BALANCE/USD/FROZEN=50
+            When:  post(simultaneously DEBIT CURRENT 100 + CREDIT LOCKED 50)
+            Then:  CURRENT=900, LOCKED=250, FROZEN=50 (all independent)
 ```
 
 ---
@@ -479,6 +542,28 @@ TC-F005-06  getAsOfBalance_historicalSnapshot_returnsSnapshotBalance
                    today balance=700.00
             When:  getAsOfBalance("CLIENT_ACC_001", asOf="2026-05-15")
             Then:  amount=500.00, dataSource=EOD_SNAPSHOT
+
+TC-F005-07  getBalance_withPosition_returnsPositionBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT=1000,
+                   AVAILABLE_BALANCE/USD/LOCKED=200
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", position=LOCKED)
+            Then:  amount=200.00, position=LOCKED
+
+TC-F005-08  getBalance_defaultPosition_returnsCurrentBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT=1000,
+                   AVAILABLE_BALANCE/USD/LOCKED=200
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD") (position not specified)
+            Then:  amount=1000.00, position=CURRENT (default)
+
+TC-F005-09  getBalance_allPositions_returnsPositionsMap
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD has CURRENT=1000, LOCKED=200, FROZEN=50
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", includeAllPositions=true)
+            Then:  BalanceQueryResult.positions = {CURRENT: 1000, LOCKED: 200, FROZEN: 50}
+
+TC-F005-10  getBatchBalances_withPositionKeys_allReturnedCorrectly
+            Given: 3 accounts each have CURRENT/LOCKED/FROZEN position balance
+            When:  getBatchBalances([3 AccountBalanceKey with different positions])
+            Then:  returns 3 correct balances, each includes position info
 ```
 
 ---
@@ -611,14 +696,15 @@ TC-ROCKS-03  columnFamilyIsolation_writeToOneCF_notAffectOthers
              Then:  CF_BALANCE unaffected, keys do not conflict
 ```
 
-### 11.1 BalanceChangeEvent — accountSeq [v0.2 New]
+### 11.1 BalanceChangeEvent — accountSeq + position [v0.2 New, v0.3 Updated]
 
 ```
 TC-F011-01  publishEvent_firstPosting_accountSeqIsOne
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD first posting
-            When:  State Machine apply → publish BalanceChangeEvent
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT first posting
+            When:  State Machine apply → publish BalanceChangeEvent (version 1.2)
             Then:  event.accountSeq == 1
                    event.prevAccountSeq == 0 (represents no predecessor)
+                   event.position == CURRENT
 
 TC-F011-02  publishEvent_subsequentPosting_accountSeqIncremented
             Given: previous event accountSeq == 41
@@ -654,12 +740,27 @@ TC-F011-06  restartNode_outboxResend_accountSeqUnchanged
 
 TC-F011-07  multiBalanceType_samePosting_seqIndependentPerKey
             Given: one RFQ Posting simultaneously updates:
-                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD (previous seq=10)
-                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD (previous seq=5)
+                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT (previous seq=10)
+                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD/CURRENT (previous seq=5)
             When:  publish two BalanceChangeEvents
             Then:  AVAILABLE_BALANCE event.accountSeq == 11
                    TRADE_AHEAD_BALANCE event.accountSeq == 6
                    (seq for two keys increment independently, no mutual impact)
+
+TC-F011-08  publishEvent_withPosition_eventContainsPosition [v0.3 New]
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/LOCKED = 500.00
+            When:  Posting apply with position=LOCKED → publish
+            Then:  event.position == LOCKED
+                   event.accountBalanceKey == (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
+
+TC-F011-09  multiPosition_sameAccount_independentSeqPerPosition [v0.3 New]
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD has:
+                   CURRENT position accountSeq == 10
+                   LOCKED position accountSeq == 5
+            When:  same Posting updates CURRENT + LOCKED respectively
+            Then:  CURRENT event.accountSeq == 11
+                   LOCKED event.accountSeq == 6
+                   (seq for different positions increment independently, no mutual impact)
 ```
 
 ---
@@ -764,6 +865,68 @@ TC-KAFKA-02  multiplePostings_produceSequentialAccountSeq
 
 ---
 
+## Module 17: Idempotency & Hotspot Account Concurrency (F-013)
+
+### 17.1 Idempotency
+
+```
+TC-F013-01  duplicateRequestId_returnsCachedResult_noReExecution
+            Given: Posting req-001 completed, journalId=JNL-001
+            When:  retry same req-001
+            Then:  returns original result (journalId=JNL-001), State Machine does not re-apply
+
+TC-F013-02  duplicateRequestId_rejected_returnsOriginalErrors
+            Given: Posting req-002 rejected (INSUFFICIENT_BALANCE)
+            When:  retry req-002
+            Then:  returns original error code (INSUFFICIENT_BALANCE), no balance re-validation
+
+TC-F013-03  idempotencySurvivesLeaderFailover
+            Given: Leader completes req-003 apply → idempotencyStore.put → Leader crashes
+            When:  new Leader elected, Client retries req-003
+            Then:  idempotencyStore recovered from RocksDB hits → returns original result
+
+TC-F013-04  idempotencyEntry_expiredAfterTTL_treatedAsNewRequest
+            Given: idempotencyStore TTL=1s, req-004 completed → wait 2s
+            When:  retry req-004
+            Then:  idempotencyStore evicted → treated as new request, re-executes ledger mutation
+
+TC-F013-05  concurrentDuplicateRequestIds_onlyOneExecuted
+            Given: two threads simultaneously send req-005
+            When:  arrive at Account Queue at the same time
+            Then:  only 1 Journal generated, the other returns cached result
+```
+
+### 17.2 Hotspot Account Concurrency
+
+```
+TC-F013-06  hotspotAccount_1000ConcurrentPostings_noBalanceInconsistency
+            Given: COMPANY_FX_ACC balance=1,000,000, 1000 concurrent DEBIT 1
+            When:  1000 concurrent Postings (different CLIENT_ACC → same COMPANY_FX_ACC)
+            Then:  final COMPANY_FX_ACC balance=0, no duplicate deduction, no negative
+
+TC-F013-07  hotspotAccount_1000ConcurrentPostings_p95Under3ms
+            Given: COMPANY_FX_ACC, 1000 concurrent RFQ Postings
+            When:  measure Posting P95 latency
+            Then:  P95 ≤ 3ms
+
+TC-F013-08  accountQueueDepthExceedsMaxSize_returnsQueueFull
+            Given: MAX_QUEUE_SIZE=10, queue("COMPANY_FX_ACC") already has 10 pending
+            When:  11th request arrives
+            Then:  returns HTTP 429 QUEUE_FULL
+
+TC-F013-09  multiAccountCoordination_deadlockPrevention_orderedTokenAcquisition
+            Given: RFQ involves CLIENT_ACC_001 + COMPANY_FX_ACC
+            When:  two RFQs execute simultaneously with reversed account order
+            Then:  no deadlock, both succeed (tokens acquired in accountId ascending order)
+
+TC-F013-10  virtualThreadWorkerCrash_queueRecoversAndResumesConsumption
+            Given: Account Queue Worker-3 (COMPANY_FX_ACC) running
+            When:  simulate Worker thread interrupt/crash
+            Then:  system auto-rebuilds Worker-3, pending requests in queue continue to be consumed
+```
+
+---
+
 ## Recommended Test Execution Order (TDD Red-Green Order)
 
 ```
@@ -776,13 +939,18 @@ Phase 2 — Core Write Path
   TC-F004-01~07 (Reversal API)
   TC-F003-01~08 (Manual Adjustment)
 
+Phase 2.5 — Position support [v0.3 New]
+  TC-F002-11~15 (Posting position)
+  TC-F008-27~30 (State Machine position validation rule V-13)
+  TC-F005-07~10 (Balance Query position)
+
 Phase 3 — Read Path
   TC-F005-* (Balance Query)
   TC-F006-* (Journal Query)
 
 Phase 3.5 — accountSeq [v0.2 New]
   TC-F008-19~26 (State Machine accountSeq)
-  TC-F011-01~07 (BalanceChangeEvent accountSeq)
+  TC-F011-01~09 (BalanceChangeEvent accountSeq + position)
 
 Phase 4 — Reconciliation and Accounting Period
   TC-F007-* (Reconciliation)
@@ -795,4 +963,7 @@ Phase 5 — Durability and Performance
 Phase 6 — Concurrency Safety
   TC-F002-08~09 (Concurrent Posting)
   TC-NFR-04~05 (Idempotency + Concurrency)
+
+Phase 6.5 — Idempotency & Hotspot Account [v0.4 New]
+  TC-F013-01~10 (Idempotency + Hotspot Concurrency)
 ```

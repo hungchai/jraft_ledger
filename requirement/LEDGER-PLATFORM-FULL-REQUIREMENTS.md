@@ -1,7 +1,7 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.4  
+**版本**: v0.5  
 **日期**: 2026-05-23  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
@@ -28,6 +28,7 @@
 | v0.2 | 2026-05-22 | ADR-001 2.2 節：新增 sofa-common-tools 版本相容性說明（解決 Spring Boot 3.4.4 + SOFAJRaft 1.3.15 的 logback 衝突） | Ledger Platform Team |
 | v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
 | v0.4 | 2026-05-23 | 新增 Core Concepts 章節：定義 Account、BalanceType、Position 三大核心概念與關聯功能 | Ledger Platform Team |
+| v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 
 ---
 
@@ -47,8 +48,13 @@
 | F-008 | State Machine Design | Raft State Machine 核心設計 |
 | F-009 | Accounting Period / EOD | 帳期管理與 EOD 關期流程 |
 | F-010 | Account Management | 帳戶生命週期管理 |
+| F-011 | Balance Change Event / Kafka Outbox | Kafka 餘額變動事件發布 |
+| F-013 | Idempotency & Hotspot Concurrency | 冪等性與熱點帳戶併發處理 |
 | OPS-001 | SRE 運維指南 | RocksDB 壓實、Raft 復原、MySQL 同步修復 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
+| Appendix A | Module Dependency & Docker Compose | 模組依賴圖與部署架構 |
+| Appendix B | Detailed Persistence Flow | 詳細落帳持久化流程 |
+| Appendix C | Overall Architecture (English) | 英文版整體架構參考 |
 
 ---
 
@@ -3345,6 +3351,366 @@ POST /ledger/accounts/{accountId}/balance-types
 | 消息總線 | Kafka（Learner 同步輸出帳務事件供下游系統消費） |
 | 禁止使用 | Hibernate / JPA / Redis（寫路徑）/ 直接寫 MySQL 繞過 Raft |
 
+
+---
+
+# Appendix A — Module Dependency Graph & Docker Compose Stack
+
+> 本附錄合併自 `docs/architecture.md`，補充 ADR-001 的部署視圖與模組依賴。
+
+## A.1 Docker Compose Service Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Docker Compose Stack                    │
+│                                                          │
+│  ledger-node-1   :8081,28081    Raft Leader/Follower     │
+│  ledger-node-2   :8082,28082    Raft Leader/Follower     │
+│  ledger-node-3   :8083,28083    Raft Leader/Follower     │
+│  ledger-mysql    :3306          MySQL 8.4 View Layer     │
+│  ledger-kafka    :9092          Kafka Broker             │
+│  ledger-projection :8089        Projection Consumer      │
+│                                                          │
+│  Host mounts: ./jraft_ledger/{node1,node2,node3,mysql,kafka} │
+│  Network: ledger-net (bridge)                            │
+└─────────────────────────────────────────────────────────┘
+```
+
+## A.2 Module Dependency Graph
+
+```
+ledger-core        ← domain, state machine, rocksdb, stores
+    ↑
+ledger-dao         ← MyBatis mappers (depends on core)
+    ↑
+ledger-service     ← business services (depends on core + dao)
+    ↑
+ledger-restful     ← Spring Boot + REST controllers (depends on service)
+ledger-feign        ← OpenFeign clients (depends on core)
+ledger-projection   ← Kafka consumer → MySQL (depends on core + dao)
+```
+
+---
+
+# Appendix B — Detailed Persistence Flow (Posting API)
+
+> 本附錄合併自 `docs/persistence-flow.md`，補充 F-002 的詳細落帳持久化流程。
+
+## B.1 完整持久化流程圖
+
+```
+                          ┌─────────────────────────────┐
+                          │         Client / Caller       │
+                          └─────────────┬───────────────┘
+                                        │ POST /ledger/postings
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         REST Layer (any node)                            │
+│                                                                          │
+│  ┌──────────────────────────────────┐                                    │
+│  │       PostingController          │  1. Deserialize JSON → PostingCmd │
+│  │                                  │  2. Check NodeRole.isLeader()     │
+│  │   ❌ FOLLOWER → HTTP 503         │     (writes only on leader)       │
+│  │   ✅ LEADER  → delegate          │                                    │
+│  └──────────────┬───────────────────┘                                    │
+│                 │                                                        │
+│  ┌──────────────▼───────────────────┐                                    │
+│  │        PostingService            │  Thin wrapper → delegates         │
+│  └──────────────┬───────────────────┘                                    │
+└─────────────────┼────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     LedgerStateMachine.applyPosting()                     │
+│                    (synchronized — single-threaded)                       │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 1. IDEMPOTENCY CHECK                                             │   │
+│  │    idempotencyStore.contains(requestId)?                         │   │
+│  │    → YES: return cached result (no re-execution)                 │   │
+│  │    → NO:  continue                                               │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 2. ACCOUNT STATUS CHECK                                          │   │
+│  │    accountMetaStore.get(accountId).status == ACTIVE?             │   │
+│  │    → FROZEN: reject ACCOUNT_FROZEN                               │   │
+│  │    → CLOSED: reject ACCOUNT_CLOSED                               │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 3. PER-LEG BALANCE CHECK                                         │   │
+│  │    DEBIT total == CREDIT total per leg?                          │   │
+│  │    → unbalanced: reject JOURNAL_UNBALANCED                       │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 4. BALANCE VALIDATION (in-memory)                                │   │
+│  │    for each JournalLine:                                         │   │
+│  │      config = balanceTypeConfigStore.get(type)                   │   │
+│  │      after = computeAfterBalance(current, entryType, amount)     │   │
+│  │      if !allowNegative && after < 0 → INSUFFICIENT_BALANCE      │   │
+│  │      if  allowNegative && after > 0 → CREDIT_EXCEEDS_LIMIT      │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 5. GENERATE JOURNAL                                              │   │
+│  │    journalId = "JNL-NNNN"                                        │   │
+│  │    for each line:                                                │   │
+│  │      journalLineId = journalId + "-01"                           │   │
+│  │      JournalLine{ balanceBefore, balanceAfter, amount, ... }     │   │
+│  │    Journal{ journalType=NORMAL, status=CONFIRMED, lines, ... }   │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 6. ATOMIC BALANCE UPDATE (in-memory)                             │   │
+│  │    for each line:                                                │   │
+│  │      nextSeq = current.accountSeq + 1                             │   │
+│  │      balanceStore.put(key, BalanceEntry{after, nextSeq, ...})    │   │
+│  │    (accountSeq overflow check: if >= 80% Long.MAX_VALUE → alert) │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 7. EVENT PUBLISHING (in-memory → outbox)                         │   │
+│  │    for each line:                                                │   │
+│  │      event = BalanceChangeEvent{accountSeq, prevAccountSeq, ...} │   │
+│  │      eventListener.onEvent(event)   ← Kafka / test capture       │   │
+│  │      outboxStore.enqueue(event)     ← RocksDB outbox             │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 8. IDEMPOTENCY RECORD                                            │   │
+│  │    idempotencyStore.put(requestId, COMPLETED)                    │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 9. PERSIST (if persistAfterApply=true)                           │   │
+│  │    takeSnapshot() → serialize ALL state to RocksDB:              │   │
+│  │                                                                   │   │
+│  │    ┌─────────────────────────────────────────────────────────┐   │   │
+│  │    │                   RocksDB (Source of Truth)              │   │   │
+│  │    │                                                          │   │   │
+│  │    │  CF_JOURNAL       → journalId → Journal JSON             │   │   │
+│  │    │  CF_JOURNAL_LINE  → journalLineId → JournalLine JSON     │   │   │
+│  │    │  CF_BALANCE       → key → BalanceEntry JSON (accountSeq) │   │   │
+│  │    │  CF_IDEMPOTENCY   → requestId → IdempotencyEntry JSON    │   │   │
+│  │    │  CF_ACCOUNT_META  → accountId → Account JSON             │   │   │
+│  │    │  CF_BALANCE_TYPE  → typeCode → BalanceTypeConfig JSON   │   │   │
+│  │    │  CF_SM_SNAPSHOT   → full state snapshot                  │   │   │
+│  │    │  CF_OUTBOX        → eventId → BalanceChangeEvent JSON    │   │   │
+│  │    │                                                          │   │   │
+│  │    │  📁 /var/lib/ledger/rocksdb (Docker)                    │   │   │
+│  │    │  📁 ./jraft_ledger/node1 (host mount)                    │   │   │
+│  │    └─────────────────────────────────────────────────────────┘   │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 10. RETURN                                                        │   │
+│  │     CommandResult{ status=COMPLETED, journalId="JNL-0001" }      │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+                  │
+                  │  (async, via Learner or sync service)
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       MySQL View Layer (Read-Only)                       │
+│                                                                          │
+│   journal (table)               journal_line (table)                     │
+│   ┌──────────────────┐          ┌──────────────────────────┐            │
+│   │ journal_id (PK)  │◄─────────│ journal_id (FK)          │            │
+│   │ journal_type      │          │ journal_line_id (PK)     │            │
+│   │ request_id        │          │ leg_id                  │            │
+│   │ business_event_ref │         │ account_id              │            │
+│   │ value_date        │          │ balance_type            │            │
+│   │ status            │          │ currency                │            │
+│   │ cross_period      │          │ entry_type              │            │
+│   │ created_at        │          │ amount                  │            │
+│   └──────────────────┘          │ balance_before          │            │
+│                                  │ balance_after           │            │
+│   account (table)                │ config_version          │            │
+│   ┌──────────────────┐          │ created_at              │            │
+│   │ account_id (PK)  │          └──────────────────────────┘            │
+│   │ account_type      │                                                  │
+│   │ owner_id          │   balance_type_registry (table)                  │
+│   │ status            │   ┌──────────────────────────┐                   │
+│   └──────────────────┘   │ type_code (PK)            │                   │
+│                           │ config_version            │                   │
+│                           └──────────────────────────┘                   │
+│                                                                          │
+│   Synced by: Raft Learner (async) or JournalSyncService                  │
+│   Used for:  Journal Query (F-006), Reconciliation (F-007)               │
+│   NOT used:  Balance Query (reads from in-memory StateMachine)           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## B.2 Kafka Outbox → Projection 流程
+
+```
+                          ┌─────────────────────┐
+                          │   Kafka (Event Bus)  │
+                          │                      │
+                          │  Topic:              │
+                          │  ledger.balance.     │
+                          │  change.v1           │
+                          │                      │
+                          │  64 partitions       │
+                          │  LZ4 compression     │
+                          │  acks=all            │
+                          └─────────────────────┘
+                               ▲
+                               │ AsyncKafkaPublisher
+                               │ (reads from CF_OUTBOX)
+                               │
+                          ┌────┴────────────┐
+                          │  OutboxStore     │
+                          │  (RocksDB CF)    │
+                          └─────────────────┘
+```
+
+## B.3 Recovery Flow (on restart)
+
+```
+  App Start
+      │
+      ▼
+  RocksDBManager.open(path)
+      │
+      ▼
+  LedgerStateMachine.restoreFromSnapshot()
+      │  reads CF_SM_SNAPSHOT → deserializes:
+      │    • balanceStore (with accountSeq)
+      │    • accountMetaStore
+      │    • balanceTypeConfigStore
+      │    • journalStore
+      │    • idempotencyStore
+      │    • raftLogIndex, journalSequence
+      │
+      ▼
+  StateMachine ready — all state restored
+      │
+      ▼
+  New writes persist via takeSnapshot() after each apply
+```
+
+---
+
+# Appendix C — Overall Architecture (English Reference)
+
+> 本附錄合併自 `docs/architecture.md`，提供英文版整體架構圖供跨團隊參考。
+
+## C.1 Architecture Diagram
+
+```
+                            ┌──────────────────────────────┐
+                            │         API Consumer          │
+                            │    (RFQ Engine, Withdrawal,   │
+                            │     Order Mgmt, Admin)        │
+                            └──────┬───────────┬───────────┘
+                                   │           │
+                         Writes   │           │  Reads (any node)
+                      (leader only)│           │
+                                   │           │
+        ┌──────────────────────────┼───────────┼──────────────────────────┐
+        │                          ▼           ▼                          │
+        │   ┌─────────────────────────────────────────────────────────┐   │
+        │   │              Raft Cluster (3 nodes)                      │   │
+        │   │                                                          │   │
+        │   │   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │   │
+        │   │   │  Ledger-1    │  │  Ledger-2    │  │  Ledger-3    │   │   │
+        │   │   │  (Leader)    │  │  (Follower)  │  │  (Follower)  │   │   │
+        │   │   │  :8081       │  │  :8082       │  │  :8083       │   │   │
+        │   │   │              │  │              │  │              │   │   │
+        │   │   │ ┌──────────┐ │  │ ┌──────────┐ │  │ ┌──────────┐ │   │   │
+        │   │   │ │StateMach │◄┼──┼─┤StateMach │ │  │ │StateMach │ │   │   │
+        │   │   │ │(in-mem)  │ │  │ │(in-mem)  │ │  │ │(in-mem)  │ │   │   │
+        │   │   │ └────┬─────┘ │  │ └──────────┘ │  │ └──────────┘ │   │   │
+        │   │   │      │       │  │              │  │              │   │   │
+        │   │   │ ┌────▼─────┐ │  │              │  │              │   │   │
+        │   │   │ │ RocksDB  │ │  │              │  │              │   │   │
+        │   │   │ │(persist) │ │  │              │  │              │   │   │
+        │   │   │ └──────────┘ │  │              │  │              │   │   │
+        │   │   └──────┬───────┘  └──────────────┘  └──────────────┘   │   │
+        │   │          │                                                 │   │
+        │   │          │ Raft Log Replication (Bolt RPC)                 │   │
+        │   │          │                                                 │   │
+        │   │   ┌──────▼──────────────────────────────────────────────┐ │   │
+        │   │   │                   Kafka Cluster                      │ │   │
+        │   │   │                                                      │ │   │
+        │   │   │  Topic: ledger.balance.change.v1      (per-line)     │ │   │
+        │   │   │  Topic: ledger.posting.completion.v1  (per-request)  │ │   │
+        │   │   │                                                      │ │   │
+        │   │   │  Partition Key: accountId:balanceType:currency       │ │   │
+        │   │   │  64 partitions, LZ4 compression, 7-day retention     │ │   │
+        │   │   └──────────┬───────────────────────────────────────────┘ │   │
+        │   │              │                                              │   │
+        │   │              │  Async consume (at-least-once)               │   │
+        │   │              ▼                                              │   │
+        │   │   ┌──────────────────────────────────────────────────────┐ │   │
+        │   │   │           Projection Service (CQRS Read Side)         │ │   │
+        │   │   │                                                       │ │   │
+        │   │   │  • Consumes Kafka balance.change.v1                  │ │   │
+        │   │   │  • Projects to MySQL: journal, journal_line, balance  │ │   │
+        │   │   │  • Idempotent (INSERT ... ON DUPLICATE KEY)           │ │   │
+        │   │   │  • Stateless — can scale horizontally                │ │   │
+        │   │   └──────────┬───────────────────────────────────────────┘ │   │
+        │   │              │                                              │   │
+        │   │              ▼                                              │   │
+        │   │   ┌──────────────────────────────────────────────────────┐ │   │
+        │   │   │               MySQL 8.4 (View Layer)                  │ │   │
+        │   │   │                                                       │ │   │
+        │   │   │  Tables: journal, journal_line, account,              │ │   │
+        │   │   │          balance_type_registry, balance_snapshot      │ │   │
+        │   │   │                                                       │ │   │
+        │   │   │  Used by: Journal Query, Reconciliation               │ │   │
+        │   │   │  NOT used by: Balance Query (reads in-memory)        │ │   │
+        │   │   └──────────────────────────────────────────────────────┘ │   │
+        │   └────────────────────────────────────────────────────────────┘   │
+        └────────────────────────────────────────────────────────────────────┘
+```
+
+## C.2 Data Flow
+
+```
+ POST /ledger/postings
+        │
+        ▼
+  PostingController (leader check)
+        │
+        ▼
+  LedgerStateMachine.applyPosting()
+        │
+        ├──1. Idempotency check (in-memory)
+        ├──2. Account status check (in-memory)
+        ├──3. Balance validation (in-memory)
+        ├──4. Generate Journal + JournalLines
+        ├──5. Update balanceStore (in-memory, accountSeq++)
+        ├──6. Publish BalanceChangeEvent → listener
+        ├──7. Enqueue event to OutboxStore (RocksDB CF_OUTBOX)
+        ├──8. Record idempotency
+        ├──9. takeSnapshot() → RocksDB (all CFs)
+        └──10. Return CommandResult
+                │
+                ▼
+         KafkaEventPublisher.onEvent(event)
+                │
+                ▼
+         Kafka Topic: ledger.balance.change.v1
+                │
+                ▼
+         ProjectionConsumer.onBalanceChange(message)
+                │
+                ▼
+         MySQL: INSERT journal + journal_line
+```
+
+## C.3 CQRS Read/Write Split
+
+| Operation | Which Node | Storage | Consistency |
+|---|---|---|---|
+| Posting / Reversal / Adjustment | **Leader only** | RocksDB | Strong (Raft Quorum) |
+| Balance Query | **Any node** | In-memory StateMachine | Eventual (~ms lag) |
+| Journal Query | **Any node** | MySQL (via Projection) | Eventual (~1s lag) |
+| Reconciliation | **Any node** | MySQL + in-memory | Eventual (T+0) |
 
 ---
 
