@@ -94,11 +94,12 @@ public class AdjustmentService {
         BigDecimal debitTotal = BigDecimal.ZERO;
         BigDecimal creditTotal = BigDecimal.ZERO;
         for (var leg : cmd.legs()) {
+            // Each leg's amount is applied to all its lines
             for (var line : leg.lines()) {
                 if (line.entryType() == EntryType.DEBIT) {
-                    debitTotal = debitTotal.add(line.amount());
+                    debitTotal = debitTotal.add(leg.amount());
                 } else {
-                    creditTotal = creditTotal.add(line.amount());
+                    creditTotal = creditTotal.add(leg.amount());
                 }
             }
         }

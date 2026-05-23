@@ -102,8 +102,8 @@ class AccountServiceTest {
                 )
         ));
 
-        AccountBalanceKey usdKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        AccountBalanceKey hkdKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "HKD");
+        AccountBalanceKey usdKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
+        AccountBalanceKey hkdKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "HKD");
 
         assertThat(balanceStore.get(usdKey)).isPresent();
         assertThat(balanceStore.getOrThrow(usdKey).amount()).isEqualByComparingTo(BigDecimal.ZERO);
@@ -160,7 +160,7 @@ class AccountServiceTest {
         ));
 
         // Set a non-zero balance
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("100.00"), 1, 1, "JNL-001", Instant.now()));
 
         assertThatThrownBy(() -> accountService.closeAccount("CLIENT_ACC_001", "req-004"))
@@ -208,7 +208,7 @@ class AccountServiceTest {
 
         accountService.addBalanceType("CLIENT_ACC_001", "BROKERAGE_BALANCE", "USD", "req-002");
 
-        AccountBalanceKey newKey = new AccountBalanceKey("CLIENT_ACC_001", "BROKERAGE_BALANCE", "USD");
+        AccountBalanceKey newKey = new AccountBalanceKey("CLIENT_ACC_001", "BROKERAGE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.get(newKey)).isPresent();
         assertThat(balanceStore.getOrThrow(newKey).amount()).isEqualByComparingTo(BigDecimal.ZERO);
     }

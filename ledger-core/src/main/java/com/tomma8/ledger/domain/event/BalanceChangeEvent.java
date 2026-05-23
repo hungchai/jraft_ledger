@@ -26,6 +26,7 @@ public record BalanceChangeEvent(
         String traceId,
         String accountId,
         String balanceType,
+        String position,
         String currency,
         EntryType entryType,
         BigDecimal amount,
@@ -41,17 +42,17 @@ public record BalanceChangeEvent(
         Map<String, String> metadata) {
 
     public static final String EVENT_TYPE = "BALANCE_CHANGE";
-    public static final String EVENT_VERSION = "1.1";
+    public static final String EVENT_VERSION = "1.2";
 
     public BalanceChangeEvent {
         Objects.requireNonNull(eventId, "eventId must not be null");
         Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
         Objects.requireNonNull(accountId, "accountId must not be null");
         Objects.requireNonNull(balanceType, "balanceType must not be null");
+        Objects.requireNonNull(position, "position must not be null");
         Objects.requireNonNull(currency, "currency must not be null");
         Objects.requireNonNull(preBalance, "preBalance must not be null");
         Objects.requireNonNull(postBalance, "postBalance must not be null");
-        // Negative accountSeq = 0 for first event (prevAccountSeq)
         if (accountSeq < 1) {
             throw new IllegalArgumentException("accountSeq must be >= 1");
         }

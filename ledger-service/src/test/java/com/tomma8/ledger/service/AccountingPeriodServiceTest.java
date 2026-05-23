@@ -48,7 +48,7 @@ class AccountingPeriodServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
@@ -99,11 +99,9 @@ class AccountingPeriodServiceTest {
         // Create posting with old valueDate
         PostingCommand postCmd = new PostingCommand(
                 "req-009", "TEST", "test-ref", oldDate,
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Old"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Old credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Old"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Old credit")
                 )))
         );
         String journalId = stateMachine.applyPosting(postCmd).journalId();
@@ -130,8 +128,8 @@ class AccountingPeriodServiceTest {
         periodService.triggerEOD(date);
 
         // After EOD, State Machine balances should be unchanged
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
+        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD");
 
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("700.00"));
         assertThat(balanceStore.getOrThrow(companyKey).amount()).isEqualByComparingTo(new BigDecimal("5000.00"));

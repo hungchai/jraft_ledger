@@ -47,7 +47,7 @@ class PostingServiceTest {
     }
 
     private void setBalance(String accountId, String type, String ccy, BigDecimal amount) {
-        balanceStore.put(new AccountBalanceKey(accountId, type, ccy),
+        balanceStore.put(new AccountBalanceKey(accountId, type, "CURRENT", ccy),
                 new BalanceEntry(amount, 0, 1, "", Instant.now()));
     }
 
@@ -59,11 +59,9 @@ class PostingServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-001", "RFQ_SETTLEMENT", "RFQ-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "Client pay"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "Company receive")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client pay"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company receive")
                 )))
         );
 
@@ -80,11 +78,9 @@ class PostingServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-002", "WITHDRAWAL", "WD-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "WITHDRAWAL", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("500.00"), "Withdraw"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("500.00"), "Settle")
+                List.of(new PostingCommand.Leg("leg-1", "WITHDRAWAL", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Withdraw"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Settle")
                 )))
         );
 
@@ -99,11 +95,9 @@ class PostingServiceTest {
     void post_unknownAccount_returnsRejectedResult() {
         PostingCommand cmd = new PostingCommand(
                 "req-003", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("GHOST_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Ghost"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("GHOST_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Ghost"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
 
@@ -121,11 +115,9 @@ class PostingServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-abc", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
 
@@ -136,27 +128,27 @@ class PostingServiceTest {
         assertThat(second).isEqualTo(first);
 
         // Balance unchanged by second call
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("900.00"));
     }
 
     @Test
-    @DisplayName("TC-F002-05 post unbalanced journal returns bad request")
+    @DisplayName("TC-F002-05 two-line leg with insufficient balance rejected")
     void post_unbalancedJournal_returnsBadRequest() {
+        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("50.00"));
+
         PostingCommand cmd = new PostingCommand(
                 "req-005", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("99.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
 
         CommandResult result = postingService.post(cmd);
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("JOURNAL_UNBALANCED");
+        assertThat(result.errorCodes()).contains("INSUFFICIENT_BALANCE");
     }
 
     @Test
@@ -167,11 +159,9 @@ class PostingServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-006", "RFQ_SETTLEMENT", "RFQ-002", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", new BigDecimal("800.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
 
@@ -181,8 +171,8 @@ class PostingServiceTest {
         Journal journal = stateMachine.getJournal(result.journalId());
         assertThat(journal.lines()).hasSize(2);
 
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
+        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("200.00"));
         assertThat(balanceStore.getOrThrow(companyKey).amount()).isEqualByComparingTo(new BigDecimal("5800.00"));
     }
@@ -196,11 +186,9 @@ class PostingServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-007", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
 

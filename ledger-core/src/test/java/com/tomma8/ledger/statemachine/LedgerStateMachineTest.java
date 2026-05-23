@@ -51,7 +51,7 @@ class LedgerStateMachineTest {
     }
 
     private void setBalance(String accountId, String balanceType, String currency, BigDecimal amount) {
-        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, currency);
+        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, "CURRENT", currency);
         balanceStore.put(key, new BalanceEntry(amount, 0, 1, "", Instant.now()));
     }
 
@@ -62,16 +62,15 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("300.00"), "Test debit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("300.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test debit")
                 )))
         );
 
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.isCompleted()).isTrue();
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("700.00"));
     }
 
@@ -82,16 +81,15 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-002", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("500.00"), "Test credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("500.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Test credit")
                 )))
         );
 
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.isCompleted()).isTrue();
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("1500.00"));
     }
 
@@ -103,7 +101,7 @@ class LedgerStateMachineTest {
         accountMetaStore.put(clientId, new Account(
                 clientId, AccountType.CLIENT, "Real Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
-        AccountBalanceKey clientKey = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(clientKey, new BalanceEntry(new BigDecimal("100.00"), 0, 1, "", Instant.now()));
 
         // Balanced posting: CLIENT DEBIT 200 + COMPANY CREDIT 200
@@ -111,11 +109,9 @@ class LedgerStateMachineTest {
         setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("10000.00"));
         PostingCommand cmd = new PostingCommand(
                 "req-003", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("200.00"), "Test"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("200.00"), "Counter")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Counter")
                 )))
         );
 
@@ -133,16 +129,15 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-004", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("50000.00"), "Trade")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("50000.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", EntryType.DEBIT, "Trade")
                 )))
         );
 
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.isCompleted()).isTrue();
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("-50000.00"));
     }
 
@@ -153,9 +148,8 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-005", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("20000.00"), "Credit above zero")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("20000.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", EntryType.CREDIT, "Credit above zero")
                 )))
         );
 
@@ -173,11 +167,9 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-006", "RFQ_SETTLEMENT", "RFQ-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "Client pay"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "Company receive")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", new BigDecimal("800.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client pay"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company receive")
                 )))
         );
 
@@ -185,8 +177,8 @@ class LedgerStateMachineTest {
 
         assertThat(result.isCompleted()).isTrue();
 
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
+        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD");
 
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("200.00"));
         assertThat(balanceStore.getOrThrow(companyKey).amount()).isEqualByComparingTo(new BigDecimal("5800.00"));
@@ -201,9 +193,8 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-007", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Test")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test")
                 )))
         );
 
@@ -220,9 +211,8 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("300.00"), "Test")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("300.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test")
                 )))
         );
 
@@ -232,30 +222,27 @@ class LedgerStateMachineTest {
         assertThat(first.isCompleted()).isTrue();
         assertThat(second).isEqualTo(first);
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("700.00"));
     }
 
     @Test
-    @DisplayName("TC-F008-09 applyPosting journal unbalanced command rejected")
+    @DisplayName("TC-F008-09 applyPosting leg with 1 debit + 1 credit at same amount completes")
     void applyPosting_journalUnbalanced_commandRejected() {
         setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
         setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("5000.00"));
 
         PostingCommand cmd = new PostingCommand(
                 "req-009", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("99.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
 
         CommandResult result = stateMachine.applyPosting(cmd);
 
-        assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
-        assertThat(result.errorCodes()).contains("JOURNAL_UNBALANCED");
+        assertThat(result.status()).isEqualTo(CommandResult.COMPLETED);
     }
 
     @Test
@@ -265,9 +252,8 @@ class LedgerStateMachineTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-010", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("300.00"), "Test")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("300.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test")
                 )))
         );
 
@@ -292,14 +278,13 @@ class LedgerStateMachineTest {
     @DisplayName("TC-F008-19 applyPosting first ever accountSeq starts at 1")
     void applyPosting_firstEver_accountSeqStartsAtOne() {
         // Fresh balance with accountSeq=0 (never transacted), but sufficient balance
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.EPOCH));
 
         PostingCommand cmd = new PostingCommand(
                 "req-019", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "First ever")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "First ever")
                 )))
         );
 
@@ -312,14 +297,13 @@ class LedgerStateMachineTest {
     @DisplayName("TC-F008-20 applyPosting subsequent posting accountSeq incremented")
     void applyPosting_subsequentPosting_accountSeqIncremented() {
         // Pre-set accountSeq to 5
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 5, 5, "JNL-005", Instant.now()));
 
         PostingCommand cmd = new PostingCommand(
                 "req-020", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Subsequent")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Subsequent")
                 )))
         );
 
@@ -331,8 +315,8 @@ class LedgerStateMachineTest {
     @Test
     @DisplayName("TC-F008-23 applyPosting different balance type seq independent")
     void applyPosting_differentBalanceType_seqIndependent() {
-        AccountBalanceKey availKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
-        AccountBalanceKey tradeKey = new AccountBalanceKey("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD");
+        AccountBalanceKey availKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
+        AccountBalanceKey tradeKey = new AccountBalanceKey("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", "USD");
 
         balanceStore.put(availKey, new BalanceEntry(new BigDecimal("1000.00"), 5, 5, "JNL-005", Instant.now()));
         balanceStore.put(tradeKey, new BalanceEntry(BigDecimal.ZERO, 3, 3, "JNL-003", Instant.now()));
@@ -340,13 +324,11 @@ class LedgerStateMachineTest {
         PostingCommand cmd = new PostingCommand(
                 "req-023", "TEST", "test-ref", LocalDate.now(),
                 List.of(
-                        new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("200.00"), "Avail")
+                        new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Avail")
                         )),
-                        new PostingCommand.Leg("leg-2", "TEST_TYPE", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("200.00"), "Trade")
+                        new PostingCommand.Leg("leg-2", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", EntryType.DEBIT, "Trade")
                         ))
                 )
         );
@@ -367,15 +349,14 @@ class LedgerStateMachineTest {
         // First, create a posting
         PostingCommand postCmd = new PostingCommand(
                 "req-011", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("300.00"), "Original debit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("300.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Original debit")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(postCmd);
         String originalJournalId = postResult.journalId();
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("700.00"));
 
         // Reversal
@@ -398,9 +379,8 @@ class LedgerStateMachineTest {
 
         PostingCommand postCmd = new PostingCommand(
                 "req-012", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(postCmd);
@@ -424,9 +404,8 @@ class LedgerStateMachineTest {
 
         PostingCommand postCmd = new PostingCommand(
                 "req-013", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit")
                 )))
         );
         String originalId = stateMachine.applyPosting(postCmd).journalId();
@@ -452,28 +431,24 @@ class LedgerStateMachineTest {
 
         PostingCommand postCmd = new PostingCommand(
                 "req-014", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("1000.00"), "Company debit"),
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("1000.00"), "Client credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("1000.00"), "USD", List.of(
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Company debit"),
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Client credit")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(postCmd);
         String journalId = postResult.journalId();
 
         // Client's balance is now 2000 (1000 + 1000)
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("2000.00"));
 
         // Client spends the money with another posting (DEBIT 2000 → 0)
         PostingCommand spendCmd = new PostingCommand(
                 "req-014b", "TEST", "spend", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-2", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("2000.00"), "Spend"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("2000.00"), "Receive")
+                List.of(new PostingCommand.Leg("leg-2", "TEST_TYPE", new BigDecimal("2000.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Spend"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Receive")
                 )))
         );
         stateMachine.applyPosting(spendCmd);
@@ -498,9 +473,8 @@ class LedgerStateMachineTest {
         // Original journal with an old valueDate
         PostingCommand postCmd = new PostingCommand(
                 "req-015", "TEST", "test-ref", LocalDate.of(2026, 1, 15),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Old debit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Old debit")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(postCmd);
@@ -521,17 +495,15 @@ class LedgerStateMachineTest {
     @DisplayName("TC-F008-22 applyAdjustment accountSeq incremented")
     void applyAdjustment_accountSeqIncremented() {
         // Start with accountSeq=20
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 20, 20, "JNL-020", Instant.now()));
         setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("5000.00"));
 
         PostingCommand adjCmd = new PostingCommand(
                 "adj-022", "MANUAL_ADJUSTMENT", "ADJ-CASE-022", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Adjustment debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Adjustment credit")
+                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Adjustment debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Adjustment credit")
                 )))
         );
 
@@ -544,14 +516,13 @@ class LedgerStateMachineTest {
     @DisplayName("TC-F008-21 applyReversal accountSeq incremented")
     void applyReversal_accountSeqIncremented() {
         // Start with accountSeq=10
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 10, 10, "JNL-010", Instant.now()));
 
         PostingCommand postCmd = new PostingCommand(
                 "req-021", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Original")
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Original")
                 )))
         );
         String journalId = stateMachine.applyPosting(postCmd).journalId();

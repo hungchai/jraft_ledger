@@ -46,9 +46,9 @@ class QueueAndOutboxIntegrationTest {
         accountMetaStore.put("COMPANY_FX_ACC", new Account(
                 "COMPANY_FX_ACC", AccountType.COMPANY, "Company",
                 null, AccountStatus.ACTIVE, null, Instant.now()));
-        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("10000.00"), 0, 1, "", Instant.now()));
-        balanceStore.put(new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("100000.00"), 0, 1, "", Instant.now()));
 
         // Wire event listener to capture events (simulating outbox)
@@ -77,11 +77,9 @@ class QueueAndOutboxIntegrationTest {
             new Thread(() -> {
                 PostingCommand cmd = new PostingCommand(
                         "int-req-" + idx, "RFQ", "RFQ-" + idx, LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, BigDecimal.ONE, "Debit"),
-                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.CREDIT, BigDecimal.ONE, "Credit")
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                         )))
                 );
                 queueManager.submit("CLIENT_ACC_001", cmd);
@@ -109,7 +107,7 @@ class QueueAndOutboxIntegrationTest {
         }
 
         // Final balance
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("9980.00"));
     }
 
@@ -125,7 +123,7 @@ class QueueAndOutboxIntegrationTest {
             accountMetaStore.put(clientId, new Account(
                     clientId, AccountType.COMPANY, "Client " + i,
                     "CUST-" + i, AccountStatus.ACTIVE, null, Instant.now()));
-            balanceStore.put(new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD"),
+            balanceStore.put(new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "CURRENT", "USD"),
                     new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.now()));
         }
 
@@ -135,11 +133,9 @@ class QueueAndOutboxIntegrationTest {
             new Thread(() -> {
                 PostingCommand cmd = new PostingCommand(
                         "hot-req-" + idx, "RFQ", "RFQ-HOT-" + idx, LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", List.of(
-                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("10.00"), "Client pays"),
-                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.CREDIT, new BigDecimal("10.00"), "Company receives")
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", new BigDecimal("10.00"), "USD", List.of(
+                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client pays"),
+                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company receives")
                         )))
                 );
                 queueManager.submit("COMPANY_FX_ACC", cmd);
@@ -151,7 +147,7 @@ class QueueAndOutboxIntegrationTest {
         Thread.sleep(2000);
 
         // Company balance = 100000 + 50 × 10 = 100500
-        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(companyKey).amount()).isEqualByComparingTo(new BigDecimal("100500.00"));
 
         // Events: 50 postings × 2 lines = 100 events

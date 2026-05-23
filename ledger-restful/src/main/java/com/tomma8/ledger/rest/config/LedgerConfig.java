@@ -73,6 +73,7 @@ public class LedgerConfig {
     }
 
     @Bean(destroyMethod = "close")
+    @Profile("!test")
     public KafkaEventPublisher kafkaEventPublisher() {
         String brokers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
         return new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
@@ -135,7 +136,8 @@ public class LedgerConfig {
     public AccountingPeriodService accountingPeriodService() { return new AccountingPeriodService(); }
 
     @Bean
-    public ClusterController clusterController(NodeRole nodeRole, RaftNodeManager raftNodeManager) {
+    public ClusterController clusterController(NodeRole nodeRole,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager) {
         return new ClusterController(nodeRole, raftNodeManager);
     }
 

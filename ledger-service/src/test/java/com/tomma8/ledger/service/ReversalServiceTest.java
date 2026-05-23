@@ -48,7 +48,7 @@ class ReversalServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
@@ -57,11 +57,9 @@ class ReversalServiceTest {
         setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("5000.00"));
         PostingCommand cmd = new PostingCommand(
                 "req-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
         return stateMachine.applyPosting(cmd).journalId();
@@ -156,11 +154,9 @@ class ReversalServiceTest {
         // Post a CREDIT to CLIENT
         PostingCommand postCmd = new PostingCommand(
                 "req-007", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("1000.00"), "Company"),
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("1000.00"), "Client")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("1000.00"), "USD", List.of(
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Company"),
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Client")
                 )))
         );
         String journalId = stateMachine.applyPosting(postCmd).journalId();
@@ -168,11 +164,9 @@ class ReversalServiceTest {
         // Client spends all 2000 (original 1000 + the 1000 credit), balance goes to 0
         PostingCommand spendCmd = new PostingCommand(
                 "req-007b", "TEST", "spend", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-2", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("2000.00"), "Spend all"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("2000.00"), "Receive")
+                List.of(new PostingCommand.Leg("leg-2", "TEST", new BigDecimal("2000.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Spend all"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Receive")
                 )))
         );
         stateMachine.applyPosting(spendCmd);
@@ -182,7 +176,7 @@ class ReversalServiceTest {
                 "rev-007", journalId, "Force reversal", "CANCEL", LocalDate.now()));
 
         assertThat(revResult.isCompleted()).isTrue();
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("-1000.00"));
     }
 }

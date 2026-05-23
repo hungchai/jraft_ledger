@@ -53,7 +53,7 @@ class KafkaIntegrationTest {
         accountMetaStore.put("CLIENT_ACC_001", new Account(
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
-        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "", Instant.now()));
 
         publisher = new KafkaEventPublisher(kafka.getBootstrapServers(), topic);
@@ -70,9 +70,8 @@ class KafkaIntegrationTest {
     void posting_publishesBalanceChangeEvent_toKafka() throws Exception {
         PostingCommand cmd = new PostingCommand(
                 "kafka-req-001", "TEST", "KAFKA-TEST-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Kafka test")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Kafka test")
                 )))
         );
         stateMachine.applyPosting(cmd);
@@ -106,9 +105,9 @@ class KafkaIntegrationTest {
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "kafka-seq-" + i, "TEST", "KAFKA-SEQ", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("10.00"), "Seq " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", BigDecimal.ONE, "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Seq " + i)
                     )))
             );
             stateMachine.applyPosting(cmd);

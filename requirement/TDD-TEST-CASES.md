@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.2
-**日期**: 2026-05-18
+**版本**: v0.3
+**日期**: 2026-05-23
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.3 變更摘要**：新增 position 字段支持（AccountBalanceKey 複合鍵擴展）。新增 TC-F002-11~15（Posting position）、TC-F005-07~10（Balance Query position）、TC-F008-27~30（State Machine position 驗證規則 V-13）。更新現有測試用例以反映新鍵格式 (accountId, balanceType, currency, position)。
+>
 > **v0.2 變更摘要**：新增 Module 3 Section 3.4（TC-F008-19 ~ TC-F008-26，accountSeq State Machine）、Module 11 Section 11.1（TC-F011-01 ~ TC-F011-07，BalanceChangeEvent accountSeq），TDD 執行計劃補充 Phase 3.5。
 
 ---
@@ -297,6 +299,37 @@ TC-F008-26  restartNode_accountSeqResumesFromRocksDB
                    不得重置為 0 或 1
 ```
 
+### 3.5 LedgerStateMachine — Position 驗證規則 V-13【v0.3 新增】
+
+```
+TC-F008-27  applyPosting_lockedPositionDebitToNegative_rejected
+            Given: AVAILABLE_BALANCE/USD/LOCKED = 50.00，allowNegative=false
+            When:  apply PostingCommand{ position=LOCKED, DEBIT 100.00 }
+            Then:  CommandResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   balance 保持 50.00 不變
+                   （驗證規則 V-13：LOCKED position 不能為負）
+
+TC-F008-28  applyPosting_frozenPositionDebitToNegative_rejected
+            Given: AVAILABLE_BALANCE/USD/FROZEN = 30.00，allowNegative=false
+            When:  apply PostingCommand{ position=FROZEN, DEBIT 50.00 }
+            Then:  CommandResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   balance 保持 30.00 不變
+                   （驗證規則 V-13：FROZEN position 不能為負）
+
+TC-F008-29  applyPosting_currentPositionDebitToNegative_allowNegativeFalse_rejected
+            Given: AVAILABLE_BALANCE/USD/CURRENT = 100.00，allowNegative=false
+            When:  apply PostingCommand{ position=CURRENT, DEBIT 200.00 }
+            Then:  CommandResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   （CURRENT position 遵循 allowNegative 配置）
+
+TC-F008-30  applyPosting_positionInJournalLine_correctlyRecorded
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT = 1000.00
+            When:  apply PostingCommand{ position=LOCKED, DEBIT 100.00 }
+            Then:  JournalLine.position=LOCKED
+                   AccountBalanceKey = (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
+                   balance 更新正確
+```
+
 ---
 
 ## Module 4：Posting API（F-002）
@@ -353,6 +386,34 @@ TC-F002-10  post_inactiveBalanceType_returnsBadRequest
             Given: balanceType="OLD_TYPE" status=INACTIVE
             When:  post(request)
             Then:  HTTP 400 / errorCode=BALANCE_TYPE_NOT_FOUND
+
+TC-F002-11  post_withPositionCurrent_defaultPositionUsed
+            Given: PostingRequest.Line 未指定 position
+            When:  post(request)
+            Then:  JournalLine.position=CURRENT，AccountBalanceKey 使用 position=CURRENT
+
+TC-F002-12  post_withPositionLocked_lockedBalanceUpdated
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/LOCKED = 500.00
+            When:  post(request with position=LOCKED, DEBIT 100)
+            Then:  LOCKED balance = 400.00，CURRENT balance 不變
+
+TC-F002-13  post_lockedPositionDebitToNegative_returnsRejected
+            Given: AVAILABLE_BALANCE/USD/LOCKED = 50.00，allowNegative=false
+            When:  post(request with position=LOCKED, DEBIT 100)
+            Then:  PostingResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   （驗證規則 V-13：LOCKED position 不能為負）
+
+TC-F002-14  post_frozenPositionDebitToNegative_returnsRejected
+            Given: AVAILABLE_BALANCE/USD/FROZEN = 30.00，allowNegative=false
+            When:  post(request with position=FROZEN, DEBIT 50)
+            Then:  PostingResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   （驗證規則 V-13：FROZEN position 不能為負）
+
+TC-F002-15  post_multiPositionSameAccount_independentBalances
+            Given: CLIENT_ACC_001 有 AVAILABLE_BALANCE/USD/CURRENT=1000，
+                   AVAILABLE_BALANCE/USD/LOCKED=200，AVAILABLE_BALANCE/USD/FROZEN=50
+            When:  post(同時 DEBIT CURRENT 100 + CREDIT LOCKED 50)
+            Then:  CURRENT=900，LOCKED=250，FROZEN=50（三者獨立）
 ```
 
 ---
@@ -479,6 +540,28 @@ TC-F005-06  getAsOfBalance_historicalSnapshot_returnsSnapshotBalance
                    今日 balance=700.00
             When:  getAsOfBalance("CLIENT_ACC_001", asOf="2026-05-15")
             Then:  amount=500.00，dataSource=EOD_SNAPSHOT
+
+TC-F005-07  getBalance_withPosition_returnsPositionBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT=1000，
+                   AVAILABLE_BALANCE/USD/LOCKED=200
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", position=LOCKED)
+            Then:  amount=200.00，position=LOCKED
+
+TC-F005-08  getBalance_defaultPosition_returnsCurrentBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT=1000，
+                   AVAILABLE_BALANCE/USD/LOCKED=200
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD")（未指定 position）
+            Then:  amount=1000.00，position=CURRENT（默認）
+
+TC-F005-09  getBalance_allPositions_returnsPositionsMap
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD 有 CURRENT=1000, LOCKED=200, FROZEN=50
+            When:  getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", includeAllPositions=true)
+            Then:  BalanceQueryResult.positions = {CURRENT: 1000, LOCKED: 200, FROZEN: 50}
+
+TC-F005-10  getBatchBalances_withPositionKeys_allReturnedCorrectly
+            Given: 3 個帳戶各有 CURRENT/LOCKED/FROZEN position balance
+            When:  getBatchBalances([3 個 AccountBalanceKey with different positions])
+            Then:  返回 3 個正確 balance，每個包含 position 信息
 ```
 
 ---
@@ -611,14 +694,15 @@ TC-ROCKS-03  columnFamilyIsolation_writeToOneCF_notAffectOthers
              Then:  CF_BALANCE 不受影響，key 不衝突
 ```
 
-### 11.1 BalanceChangeEvent — accountSeq【v0.2 新增】
+### 11.1 BalanceChangeEvent — accountSeq + position【v0.2 新增，v0.3 更新】
 
 ```
 TC-F011-01  publishEvent_firstPosting_accountSeqIsOne
-            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD 首次過帳
-            When:  State Machine apply → publish BalanceChangeEvent
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT 首次過帳
+            When:  State Machine apply → publish BalanceChangeEvent (version 1.2)
             Then:  event.accountSeq == 1
                    event.prevAccountSeq == 0（代表無前序）
+                   event.position == CURRENT
 
 TC-F011-02  publishEvent_subsequentPosting_accountSeqIncremented
             Given: 上一條事件 accountSeq == 41
@@ -654,12 +738,27 @@ TC-F011-06  restartNode_outboxResend_accountSeqUnchanged
 
 TC-F011-07  multiBalanceType_samePosting_seqIndependentPerKey
             Given: 一筆 RFQ Posting 同時更新：
-                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD（上一條 seq=10）
-                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD（上一條 seq=5）
+                   CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT（上一條 seq=10）
+                   CLIENT_ACC_001 TRADE_AHEAD_BALANCE/USD/CURRENT（上一條 seq=5）
             When:  publish 兩個 BalanceChangeEvent
             Then:  AVAILABLE_BALANCE event.accountSeq == 11
                    TRADE_AHEAD_BALANCE event.accountSeq == 6
                    （兩個 key 的 seq 各自遞增，互不影響）
+
+TC-F011-08  publishEvent_withPosition_eventContainsPosition【v0.3 新增】
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/LOCKED = 500.00
+            When:  Posting apply with position=LOCKED → publish
+            Then:  event.position == LOCKED
+                   event.accountBalanceKey == (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
+
+TC-F011-09  multiPosition_sameAccount_independentSeqPerPosition【v0.3 新增】
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD 有：
+                   CURRENT position accountSeq == 10
+                   LOCKED position accountSeq == 5
+            When:  同一筆 Posting 分別更新 CURRENT + LOCKED
+            Then:  CURRENT event.accountSeq == 11
+                   LOCKED event.accountSeq == 6
+                   （不同 position 的 seq 各自遞增，互不影響）
 ```
 
 ---
@@ -776,13 +875,18 @@ Phase 2 — 核心寫路徑
   TC-F004-01~07（Reversal API）
   TC-F003-01~08（Manual Adjustment）
 
+Phase 2.5 — Position 支持【v0.3 新增】
+  TC-F002-11~15（Posting position）
+  TC-F008-27~30（State Machine position 驗證規則 V-13）
+  TC-F005-07~10（Balance Query position）
+
 Phase 3 — 讀路徑
   TC-F005-*（Balance Query）
   TC-F006-*（Journal Query）
 
 Phase 3.5 — accountSeq【v0.2 新增】
   TC-F008-19~26（State Machine accountSeq）
-  TC-F011-01~07（BalanceChangeEvent accountSeq）
+  TC-F011-01~09（BalanceChangeEvent accountSeq + position）
 
 Phase 4 — 對帳與帳期
   TC-F007-*（Reconciliation）

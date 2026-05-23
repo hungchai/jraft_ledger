@@ -165,11 +165,11 @@ public class LedgerStateMachine {
         }
 
         private static String keyStr(AccountBalanceKey k) {
-            return k.accountId() + "#" + k.balanceType() + "#" + k.currency();
+            return k.accountId() + "#" + k.balanceType() + "#" + k.position() + "#" + k.currency();
         }
         private static AccountBalanceKey parseKey(String s) {
-            String[] parts = s.split("#", 3);
-            return new AccountBalanceKey(parts[0], parts[1], parts[2]);
+            String[] parts = s.split("#", 4);
+            return new AccountBalanceKey(parts[0], parts[1], parts[2], parts[3]);
         }
     }
 
@@ -185,7 +185,7 @@ public class LedgerStateMachine {
         this.journalSequence = new AtomicLong(0);
     }
 
-    private record LineWithLeg(String legId, PostingCommand.Line line) {}
+    private record LineWithLeg(String legId, BigDecimal amount, String currency, PostingCommand.Line line) {}
 
     // ── Posting ────────────────────────────────────────────────
 
@@ -205,10 +205,10 @@ public class LedgerStateMachine {
             return CommandResult.rejected(entry.errors());
         }
 
-        // 2. Extract all lines with their legId
+        // 2. Extract all lines with their legId, amount, and currency
         for (var leg : cmd.legs()) {
             for (var line : leg.lines()) {
-                reusableLines.add(new LineWithLeg(leg.legId(), line));
+                reusableLines.add(new LineWithLeg(leg.legId(), leg.amount(), leg.currency(), line));
             }
         }
 
@@ -252,17 +252,10 @@ public class LedgerStateMachine {
                 }
                 continue;
             }
-            BigDecimal debitTotal = BigDecimal.ZERO;
-            BigDecimal creditTotal = BigDecimal.ZERO;
-            for (var line : leg.lines()) {
-                if (line.entryType() == EntryType.DEBIT) {
-                    debitTotal = debitTotal.add(line.amount());
-                } else {
-                    creditTotal = creditTotal.add(line.amount());
-                }
-            }
-            if (debitTotal.compareTo(creditTotal) != 0) {
-                var result = CommandResult.rejected("JOURNAL_UNBALANCED");
+            // For multi-line legs, validate that the leg's amount is positive
+            // (debits and credits will use the same leg amount)
+            if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
+                var result = CommandResult.rejected("INVALID_LEG_AMOUNT");
                 idempotencyStore.put(cmd.requestId(),
                         IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
                 return result;
@@ -275,9 +268,18 @@ public class LedgerStateMachine {
             BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
                     .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
 
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.currency());
+            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            BigDecimal after = computeAfterBalance(current.amount(), line.entryType(), line.amount());
+            BigDecimal after = computeAfterBalance(current.amount(), line.entryType(), lwl.amount());
+
+            // V-13: LOCKED/FROZEN positions cannot go negative
+            if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
+                    && after.compareTo(BigDecimal.ZERO) < 0) {
+                var result = CommandResult.rejected("LOCKED_BALANCE_CANNOT_BE_NEGATIVE");
+                idempotencyStore.put(cmd.requestId(),
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                return result;
+            }
 
             if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
                 // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE)
@@ -311,7 +313,7 @@ public class LedgerStateMachine {
 
         for (var lwl : reusableLines) {
             var line = lwl.line();
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.currency());
+            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
             BigDecimal after = reusableAfterBalances.get(key);
             BalanceTypeConfig config = balanceTypeConfigStore.getOrThrow(line.balanceType());
@@ -319,8 +321,8 @@ public class LedgerStateMachine {
             String journalLineId = journalId + "-" + String.format("%02d", reusableJournalLines.size() + 1);
             JournalLine jl = new JournalLine(
                     journalLineId, journalId, lwl.legId(),
-                    line.accountId(), line.balanceType(), line.currency(),
-                    line.entryType(), line.amount(),
+                    line.accountId(), line.balanceType(), line.position(), lwl.currency(),
+                    line.entryType(), lwl.amount(),
                     current.amount(), after,
                     config.configVersion(), now);
             reusableJournalLines.add(jl);
@@ -338,7 +340,7 @@ public class LedgerStateMachine {
         for (int i = 0; i < reusableLines.size(); i++) {
             var lwl = reusableLines.get(i);
             var line = lwl.line();
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.currency());
+            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
             BigDecimal before = balanceStore.get(key).orElse(BalanceEntry.zero()).amount();
             BigDecimal after = reusableAfterBalances.get(key);
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
@@ -356,15 +358,15 @@ public class LedgerStateMachine {
             // Publish BalanceChangeEvent (F-011)
             if (eventListener != null) {
                 BigDecimal delta = line.entryType() == EntryType.DEBIT
-                        ? line.amount().negate()
-                        : line.amount();
+                        ? lwl.amount().negate()
+                        : lwl.amount();
                 JournalLine jl = reusableJournalLines.get(i);
                 BalanceChangeEvent event = new BalanceChangeEvent(
                         FastIdGenerator.nextId(),
                         BalanceChangeEvent.EVENT_TYPE,
                         BalanceChangeEvent.EVENT_VERSION,
                         now,
-                        cmd.requestId() + ":" + line.accountId() + ":" + line.balanceType() + ":" + line.currency(),
+                        cmd.requestId() + ":" + line.accountId() + ":" + line.balanceType() + ":" + line.position() + ":" + lwl.currency(),
                         "POSTING",
                         journalId,
                         jl.journalLineId(),
@@ -373,9 +375,10 @@ public class LedgerStateMachine {
                         null,
                         line.accountId(),
                         line.balanceType(),
-                        line.currency(),
+                        line.position(),
+                        lwl.currency(),
                         line.entryType(),
-                        line.amount(),
+                        lwl.amount(),
                         before,
                         after,
                         delta,
@@ -427,7 +430,7 @@ public class LedgerStateMachine {
 
         // Initialize balances
         for (var init : cmd.balanceInitializations()) {
-            AccountBalanceKey key = new AccountBalanceKey(cmd.accountId(), init.balanceType(), init.currency());
+            AccountBalanceKey key = new AccountBalanceKey(cmd.accountId(), init.balanceType(), "CURRENT", init.currency());
             balanceStore.initialize(key);
         }
 
@@ -479,7 +482,7 @@ public class LedgerStateMachine {
         Account updated = account.withAdditionalBalanceType(balanceType);
         accountMetaStore.put(accountId, updated);
 
-        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, currency);
+        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, "CURRENT", currency);
         balanceStore.initialize(key);
 
         return CommandResult.completed(null);
@@ -530,7 +533,7 @@ public class LedgerStateMachine {
         // Mirror each original line: DEBIT ↔ CREDIT, no balance check
         for (var origLine : originalJournal.lines()) {
             EntryType mirrored = origLine.entryType() == EntryType.DEBIT ? EntryType.CREDIT : EntryType.DEBIT;
-            AccountBalanceKey key = new AccountBalanceKey(origLine.accountId(), origLine.balanceType(), origLine.currency());
+            AccountBalanceKey key = new AccountBalanceKey(origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency());
             BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
             BigDecimal after = computeAfterBalance(current.amount(), mirrored, origLine.amount());
             long prevSeq = current.accountSeq();
@@ -547,7 +550,7 @@ public class LedgerStateMachine {
             String journalLineId = reversalJournalId + "-" + String.format("%02d", reusableMirroredLines.size() + 1);
             JournalLine jl = new JournalLine(
                     journalLineId, reversalJournalId, origLine.legId(),
-                    origLine.accountId(), origLine.balanceType(), origLine.currency(),
+                    origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency(),
                     mirrored, origLine.amount(),
                     current.amount(), after,
                     origLine.configVersion(), now);
@@ -563,7 +566,7 @@ public class LedgerStateMachine {
                         BalanceChangeEvent.EVENT_TYPE,
                         BalanceChangeEvent.EVENT_VERSION,
                         now,
-                        cmd.requestId() + ":" + key.accountId() + ":" + key.balanceType() + ":" + key.currency(),
+                        cmd.requestId() + ":" + key.accountId() + ":" + key.balanceType() + ":" + key.position() + ":" + key.currency(),
                         "REVERSAL",
                         reversalJournalId,
                         journalLineId,
@@ -572,6 +575,7 @@ public class LedgerStateMachine {
                         null,
                         key.accountId(),
                         key.balanceType(),
+                        key.position(),
                         key.currency(),
                         mirrored,
                         jl.amount(),

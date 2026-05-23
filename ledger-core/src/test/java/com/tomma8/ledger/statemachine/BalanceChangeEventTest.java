@@ -59,9 +59,8 @@ class BalanceChangeEventTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-011", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("500.00"), "First")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "First")
                 )))
         );
 
@@ -82,9 +81,8 @@ class BalanceChangeEventTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-012", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Subsequent")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Subsequent")
                 )))
         );
 
@@ -113,15 +111,14 @@ class BalanceChangeEventTest {
     @DisplayName("TC-F011-05 consumer no duplicate alert when idempotent retry")
     void consumer_noDuplicateAlert_whenIdempotentRetry() {
         // Same idempotencyKey means same event — consumer should de-duplicate by key
-        String idempotencyKey = "req-001:CLIENT_ACC_001:AVAILABLE_BALANCE:USD";
+        String idempotencyKey = "req-001:CLIENT_ACC_001:AVAILABLE_BALANCE:CURRENT:USD";
 
         // First event
         setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"), 49);
         PostingCommand cmd = new PostingCommand(
                 "req-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "First")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "First")
                 )))
         );
         stateMachine.applyPosting(cmd);
@@ -147,9 +144,8 @@ class BalanceChangeEventTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-016", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
 
@@ -173,13 +169,11 @@ class BalanceChangeEventTest {
         PostingCommand cmd = new PostingCommand(
                 "req-017", "RFQ_SETTLEMENT", "RFQ-001", LocalDate.now(),
                 List.of(
-                        new PostingCommand.Leg("leg-1", "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("200.00"), "Avail debit")
+                        new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Avail debit")
                         )),
-                        new PostingCommand.Leg("leg-2", "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("100.00"), "Trade debit")
+                        new PostingCommand.Leg("leg-2", "TEST", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "TRADE_AHEAD_BALANCE", "CURRENT", EntryType.DEBIT, "Trade debit")
                         ))
                 )
         );
@@ -208,9 +202,8 @@ class BalanceChangeEventTest {
 
         PostingCommand postCmd = new PostingCommand(
                 "req-013", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Original")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Original")
                 )))
         );
         String journalId = stateMachine.applyPosting(postCmd).journalId();
@@ -230,7 +223,7 @@ class BalanceChangeEventTest {
 
     private void setBalance(String accountId, String balanceType, String currency,
                             BigDecimal amount, long accountSeq) {
-        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, currency);
+        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, "CURRENT", currency);
         balanceStore.put(key, new BalanceEntry(amount, 0, accountSeq, "", Instant.now()));
     }
 }

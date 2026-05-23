@@ -91,21 +91,19 @@ class RestApiIntegrationTest {
                 {
                     "legId": "leg-001",
                     "postingType": "TEST",
+                    "amount": "500.00",
+                    "currency": "USD",
                     "lines": [
                         {
                             "accountId": "ACC_POST_001",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "CREDIT",
-                            "amount": "500.00",
                             "description": "REST credit"
                         },
                         {
                             "accountId": "ACC_POST_002",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "DEBIT",
-                            "amount": "500.00",
                             "description": "REST debit"
                         }
                     ]
@@ -139,21 +137,19 @@ class RestApiIntegrationTest {
                 {
                     "legId": "leg-001",
                     "postingType": "TEST",
+                    "amount": "9999.00",
+                    "currency": "USD",
                     "lines": [
                         {
                             "accountId": "ACC_INSF_001",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "DEBIT",
-                            "amount": "9999.00",
                             "description": "Too much"
                         },
                         {
                             "accountId": "ACC_INSF_002",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "CREDIT",
-                            "amount": "9999.00",
                             "description": "Counterparty"
                         }
                     ]
@@ -202,21 +198,19 @@ class RestApiIntegrationTest {
                 {
                     "legId": "leg-001",
                     "postingType": "TEST",
+                    "amount": "100.00",
+                    "currency": "USD",
                     "lines": [
                         {
                             "accountId": "ACC_JNL_001",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "CREDIT",
-                            "amount": "100.00",
                             "description": "Journal test"
                         },
                         {
                             "accountId": "ACC_JNL_002",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "DEBIT",
-                            "amount": "100.00",
                             "description": "Journal test debit"
                         }
                     ]
@@ -255,21 +249,19 @@ class RestApiIntegrationTest {
                 {
                     "legId": "leg-001",
                     "postingType": "TEST",
+                    "amount": "200.00",
+                    "currency": "USD",
                     "lines": [
                         {
                             "accountId": "ACC_REV_001",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "CREDIT",
-                            "amount": "200.00",
                             "description": "To reverse"
                         },
                         {
                             "accountId": "ACC_REV_002",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "DEBIT",
-                            "amount": "200.00",
                             "description": "To reverse debit"
                         }
                     ]
@@ -333,21 +325,19 @@ class RestApiIntegrationTest {
                 {
                     "legId": "leg-001",
                     "postingType": "ADJUSTMENT",
+                    "amount": "300.00",
+                    "currency": "USD",
                     "lines": [
                         {
                             "accountId": "ACC_ADJ_001",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "CREDIT",
-                            "amount": "300.00",
                             "description": "Adjustment credit"
                         },
                         {
                             "accountId": "ACC_ADJ_002",
                             "balanceType": "AVAILABLE_BALANCE",
-                            "currency": "USD",
                             "entryType": "DEBIT",
-                            "amount": "300.00",
                             "description": "Adjustment debit"
                         }
                     ]
@@ -382,7 +372,7 @@ class RestApiIntegrationTest {
         String draftId = objectMapper.readTree(draftResponse).get("draftId").asText();
 
         // Give ACC_ADJ_002 enough balance for the DEBIT
-        balanceStore.put(new AccountBalanceKey("ACC_ADJ_002", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("ACC_ADJ_002", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "", Instant.now()));
 
         mockMvc.perform(post("/ledger/adjustments/drafts/{draftId}/approve", draftId)
@@ -403,7 +393,7 @@ class RestApiIntegrationTest {
     }
 
     private void seedBalance(String accountId, String balanceType, String currency, BigDecimal amount) {
-        balanceStore.put(new AccountBalanceKey(accountId, balanceType, currency),
+        balanceStore.put(new AccountBalanceKey(accountId, balanceType, "CURRENT", currency),
                 new BalanceEntry(amount, 0, 1, "", Instant.now()));
     }
 

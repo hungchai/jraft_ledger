@@ -48,7 +48,7 @@ class ReconciliationServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
@@ -57,11 +57,9 @@ class ReconciliationServiceTest {
         setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("100000.00"));
         return new PostingCommand(
                 reqId, "TEST", "ref-" + reqId, LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, amount, "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, amount, "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", amount, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
     }
@@ -90,10 +88,10 @@ class ReconciliationServiceTest {
                 LocalDate.now(), JournalStatus.CONFIRMED,
                 List.of(
                         new JournalLine("JLL-1", "JNL-BAD", "leg-1", "CLIENT_ACC_001",
-                                "AVAILABLE_BALANCE", "USD", EntryType.DEBIT, new BigDecimal("100.00"),
+                                "AVAILABLE_BALANCE", "CURRENT", "USD", EntryType.DEBIT, new BigDecimal("100.00"),
                                 BigDecimal.ZERO, BigDecimal.ZERO, 1, Instant.now()),
                         new JournalLine("JLL-2", "JNL-BAD", "leg-1", "COMPANY_FX_ACC",
-                                "AVAILABLE_BALANCE", "USD", EntryType.CREDIT, new BigDecimal("99.00"),
+                                "AVAILABLE_BALANCE", "CURRENT", "USD", EntryType.CREDIT, new BigDecimal("99.00"),
                                 BigDecimal.ZERO, BigDecimal.ZERO, 1, Instant.now())
                 ),
                 false, Instant.now());
@@ -113,10 +111,10 @@ class ReconciliationServiceTest {
                 LocalDate.now(), JournalStatus.CONFIRMED,
                 List.of(
                         new JournalLine("JLL-1", "JNL-MISMATCH", "leg-1", "CLIENT_ACC_001",
-                                "AVAILABLE_BALANCE", "USD", EntryType.DEBIT, new BigDecimal("50.00"),
+                                "AVAILABLE_BALANCE", "CURRENT", "USD", EntryType.DEBIT, new BigDecimal("50.00"),
                                 BigDecimal.ZERO, BigDecimal.ZERO, 1, Instant.now()),
                         new JournalLine("JLL-2", "JNL-MISMATCH", "leg-1", "COMPANY_FX_ACC",
-                                "AVAILABLE_BALANCE", "USD", EntryType.CREDIT, new BigDecimal("30.00"),
+                                "AVAILABLE_BALANCE", "CURRENT", "USD", EntryType.CREDIT, new BigDecimal("30.00"),
                                 BigDecimal.ZERO, BigDecimal.ZERO, 1, Instant.now())
                 ),
                 false, Instant.now());
@@ -189,11 +187,9 @@ class ReconciliationServiceTest {
         for (int i = 0; i < 100; i++) {
             CommandResult r = stateMachine.applyPosting(new PostingCommand(
                     "req-ext-" + i, "EXT", "EXT-REF-" + i, LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("10.00"), "D"),
-                            new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.CREDIT, new BigDecimal("10.00"), "C")
+                    List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("10.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "D"),
+                            new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "C")
                     )))
             ));
             journals.add(stateMachine.getJournal(r.journalId()));
@@ -221,11 +217,9 @@ class ReconciliationServiceTest {
 
         CommandResult r = stateMachine.applyPosting(new PostingCommand(
                 "req-int-only", "INT", "INT-ONLY-REF", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("10.00"), "D"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("10.00"), "C")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "D"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "C")
                 )))
         ));
 
@@ -244,11 +238,9 @@ class ReconciliationServiceTest {
 
         CommandResult r = stateMachine.applyPosting(new PostingCommand(
                 "req-mis", "EXT", "EXT-MISMATCH", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "D"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "C")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("800.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "D"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "C")
                 )))
         ));
 

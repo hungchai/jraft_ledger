@@ -93,16 +93,16 @@ class RocksDBIntegrationTest {
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
-        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "JNL-INIT", Instant.now()));
 
         // Execute postings
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "req-" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("100.00"), "Debit " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Debit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -125,7 +125,7 @@ class RocksDBIntegrationTest {
         sm2.restoreFromSnapshot();
 
         // Balance should be restored
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         BalanceEntry restored = bs2.get(key).orElseThrow();
         assertThat(restored.amount()).isEqualByComparingTo(new BigDecimal("500.00")); // 1000 - 5*100
         assertThat(restored.accountSeq()).isEqualTo(6); // 1 + 5
@@ -166,7 +166,7 @@ class RocksDBIntegrationTest {
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Set accountSeq to 42
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("500.00"), 42, 42, "JNL-042", Instant.now()));
 
         // Snapshot
@@ -200,7 +200,7 @@ class RocksDBIntegrationTest {
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("1000.00"), 100, 42, "JNL-042", Instant.now()));
 
         // Snapshot at index 100, accountSeq 42
@@ -210,9 +210,9 @@ class RocksDBIntegrationTest {
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("100.00"), "Replay " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Replay " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -249,7 +249,7 @@ class RocksDBIntegrationTest {
         };
 
         for (String[] acct : accounts) {
-            AccountBalanceKey key = new AccountBalanceKey(acct[0], acct[1], acct[2]);
+            AccountBalanceKey key = new AccountBalanceKey(acct[0], acct[1], "CURRENT", acct[2]);
             if (!ams.contains(acct[0])) {
                 ams.put(acct[0], new Account(acct[0], AccountType.COMPANY, acct[0],
                         "OWNER-" + acct[0], AccountStatus.ACTIVE, null, Instant.now()));
@@ -271,7 +271,7 @@ class RocksDBIntegrationTest {
 
         // Verify all 5 balances restored correctly
         for (String[] acct : accounts) {
-            AccountBalanceKey key = new AccountBalanceKey(acct[0], acct[1], acct[2]);
+            AccountBalanceKey key = new AccountBalanceKey(acct[0], acct[1], "CURRENT", acct[2]);
             BalanceEntry restored = bs2.get(key).orElseThrow();
             assertThat(restored.amount()).isEqualByComparingTo(new BigDecimal(acct[3]));
             assertThat(restored.accountSeq()).isEqualTo(Long.parseLong(acct[4]));
@@ -300,16 +300,16 @@ class RocksDBIntegrationTest {
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Initial balance
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.EPOCH));
 
         // Apply 10 postings → balance = 1000 - 10*100 = 0, accountSeq = 10
         for (int i = 0; i < 10; i++) {
             PostingCommand cmd = new PostingCommand(
                     "req-snap-" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("100.00"), "Debit " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Debit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -326,9 +326,9 @@ class RocksDBIntegrationTest {
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.CREDIT, new BigDecimal("50.00"), "Credit " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("50.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Credit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -360,9 +360,9 @@ class RocksDBIntegrationTest {
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.CREDIT, new BigDecimal("50.00"), "Credit " + i)
+                    List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("50.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Credit " + i)
                     )))
             );
             sm2.applyPosting(cmd);
@@ -389,7 +389,7 @@ class RocksDBIntegrationTest {
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
         // Create account with existing balance and transactions
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(
                 new BigDecimal("1000.00"), 50, 50, "JNL-050", Instant.now()));
 
@@ -411,9 +411,8 @@ class RocksDBIntegrationTest {
         // Now apply a new posting — accountSeq must continue from 50, not 0 or 1
         PostingCommand cmd = new PostingCommand(
                 "warmup-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("200.00"), "After warm-up")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "After warm-up")
                 )))
         );
         sm.applyPosting(cmd);
@@ -437,7 +436,7 @@ class RocksDBIntegrationTest {
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("1000.00"), 99, 99, "JNL-099", Instant.now()));
 
         // Snapshot with accountSeq=99
@@ -463,9 +462,8 @@ class RocksDBIntegrationTest {
         // Snapshot restore already restored accounts and configs
         PostingCommand cmd = new PostingCommand(
                 "restart-001", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "After restart")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "After restart")
                 )))
         );
         sm2.applyPosting(cmd);

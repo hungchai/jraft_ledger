@@ -96,14 +96,15 @@ public class AdjustmentController {
                     new PostingCommand.Line(
                             (String) lineMap.get("accountId"),
                             (String) lineMap.get("balanceType"),
-                            (String) lineMap.get("currency"),
+                            (String) lineMap.getOrDefault("position", "CURRENT"),
                             EntryType.valueOf((String) lineMap.get("entryType")),
-                            new BigDecimal(lineMap.get("amount").toString()),
                             (String) lineMap.getOrDefault("description", ""))
             ).toList();
             return new PostingCommand.Leg(
                     (String) legMap.get("legId"),
                     (String) legMap.get("postingType"),
+                    new BigDecimal(legMap.get("amount").toString()),
+                    (String) legMap.get("currency"),
                     lines);
         }).toList();
     }

@@ -48,18 +48,16 @@ class AdjustmentServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
     private PostingCommand validAdjustment() {
         return new PostingCommand(
                 "adj-req-001", "MANUAL_ADJUSTMENT", "ADJ-CASE-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("500.00"), "Adjustment debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("500.00"), "Adjustment credit")
+                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", new BigDecimal("500.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Adjustment debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Adjustment credit")
                 )))
         );
     }
@@ -76,21 +74,20 @@ class AdjustmentServiceTest {
     }
 
     @Test
-    @DisplayName("TC-F003-02 createDraft unbalanced legs returns bad request")
+    @DisplayName("TC-F003-02 createDraft balanced leg accepted")
     void createDraft_unbalancedLegs_returnsBadRequest() {
-        PostingCommand unbalanced = new PostingCommand(
+        PostingCommand balanced = new PostingCommand(
                 "adj-req-002", "MANUAL_ADJUSTMENT", "ADJ-002", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("99.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "ADJUSTMENT", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
 
-        assertThatThrownBy(() -> adjustmentService.createDraft(unbalanced, "maker-001"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("JOURNAL_UNBALANCED");
+        // With leg-level amount, 1 DEBIT + 1 CREDIT is inherently balanced
+        AdjustmentDraft draft = adjustmentService.createDraft(balanced, "maker-001");
+        assertThat(draft).isNotNull();
+        assertThat(draft.draftId()).isNotNull();
     }
 
     @Test
@@ -105,7 +102,7 @@ class AdjustmentServiceTest {
         assertThat(result.isCompleted()).isTrue();
         assertThat(result.journalId()).isNotNull();
 
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("500.00"));
     }
 
@@ -170,7 +167,7 @@ class AdjustmentServiceTest {
         assertThat(first.isCompleted()).isTrue();
         assertThat(second).isEqualTo(first);
 
-        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey clientKey = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("500.00"));
     }
 }

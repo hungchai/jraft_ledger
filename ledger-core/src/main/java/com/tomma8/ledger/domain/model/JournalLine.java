@@ -10,6 +10,7 @@ public record JournalLine(
         String legId,
         String accountId,
         String balanceType,
+        String position,
         String currency,
         EntryType entryType,
         BigDecimal amount,
@@ -23,6 +24,7 @@ public record JournalLine(
         Objects.requireNonNull(journalId, "journalId must not be null");
         Objects.requireNonNull(accountId, "accountId must not be null");
         Objects.requireNonNull(balanceType, "balanceType must not be null");
+        Objects.requireNonNull(position, "position must not be null");
         Objects.requireNonNull(currency, "currency must not be null");
         Objects.requireNonNull(entryType, "entryType must not be null");
         Objects.requireNonNull(amount, "amount must not be null");

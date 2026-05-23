@@ -57,9 +57,8 @@ class RaftClusterIntegrationTest {
         // Submit via leader
         PostingCommand cmd = new PostingCommand(
                 "raft-req-001", "TEST", "RAFT-TEST-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Raft posting")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Raft posting")
                 )))
         );
         leader.submit(cmd);
@@ -153,11 +152,9 @@ class RaftClusterIntegrationTest {
         // ── 2. Post a posting (debit 100 from CLIENT_ACC_001, credit 100 to SYNC_ACC_001) ──
         PostingCommand postCmd = new PostingCommand(
                 "sync-req-002", "TEST", "SYNC-TEST-002", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-sync", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Sync test debit"),
-                        new PostingCommand.Line("SYNC_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Sync test credit")
+                List.of(new PostingCommand.Leg("leg-sync", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Sync test debit"),
+                        new PostingCommand.Line("SYNC_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Sync test credit")
                 ))));
         CommandResult r2 = leader.submit(postCmd);
         assertThat(r2.isCompleted()).as("Posting").isTrue();
@@ -311,7 +308,7 @@ class RaftClusterIntegrationTest {
 
     private void assertAllNodesHaveSameBalance(String accountId, String balanceType, String currency) {
         List<RaftNodeManager> nodes = List.of(node1, node2, node3);
-        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, currency);
+        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, "CURRENT", currency);
         BalanceEntry ref = nodes.get(0).getStateMachine().getLedgerStateMachine()
                 .getBalanceStore().get(key).orElse(BalanceEntry.zero());
         for (int i = 1; i < nodes.size(); i++) {
@@ -340,7 +337,7 @@ class RaftClusterIntegrationTest {
         ams.put("CLIENT_ACC_001", new Account(
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
-        bs.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
+        bs.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "", Instant.now()));
         RaftNodeManager mgr = new RaftNodeManager(GROUP_ID, serverId, peers, dataPath.toString(), fsm);
         mgr.init();

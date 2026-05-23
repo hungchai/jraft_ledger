@@ -23,8 +23,14 @@ public class BalanceQueryController {
     public ResponseEntity<?> getBalance(
             @RequestParam String accountId,
             @RequestParam String balanceType,
+            @RequestParam(required = false) String position,
             @RequestParam String currency) {
-        BalanceQueryResult result = balanceQueryService.getBalance(accountId, balanceType, currency);
+        BalanceQueryResult result;
+        if (position != null && !position.isEmpty()) {
+            result = balanceQueryService.getBalanceByPosition(accountId, balanceType, position, currency);
+        } else {
+            result = balanceQueryService.getBalance(accountId, balanceType, currency);
+        }
         return ResponseEntity.ok(result);
     }
 

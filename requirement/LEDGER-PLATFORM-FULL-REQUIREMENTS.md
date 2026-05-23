@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.1  
-**日期**: 2026-05-16  
+**版本**: v0.3  
+**日期**: 2026-05-23  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -19,6 +19,14 @@
 - **同步原子落帳，防止重複出金**
 - **Hotspot 帳戶高性能（COMPANY_ACC RFQ 場景）**
 - **可追溯、可對帳、可審計**
+
+### 修訂記錄
+
+| 版本 | 日期 | 修訂內容 | 修訂人 |
+|---|---|---|---|
+| v0.1 | 2026-05-16 | 初稿 | Ledger Platform Team |
+| v0.2 | 2026-05-22 | ADR-001 2.2 節：新增 sofa-common-tools 版本相容性說明（解決 Spring Boot 3.4.4 + SOFAJRaft 1.3.15 的 logback 衝突） | Ledger Platform Team |
+| v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
 
 ---
 
@@ -174,6 +182,12 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 - 支持 Multi-Raft-Group，可按帳戶分組提升水平擴展能力
 - 生產驗證（Ant Financial 同款技術棧）
 - 支持 Learner 角色，適用於 CQRS 讀寫分離
+
+**相依版本管理**：
+- SOFAJRaft 1.3.15 依賴 sofa-common-tools 進行日誌初始化
+- sofa-common-tools 1.0.12（SOFAJRaft 預設）與 Spring Boot 3.4.4 的 logback 1.5.x 不相容
+- **解決方案**：於 `pom.xml` 的 `dependencyManagement` 中覆寫 sofa-common-tools 至 2.1.1+
+- sofa-common-tools 2.1.1 支援 logback 1.5.x，移除對 `ContextInitializer.configureByResource(URL)` 的呼叫
 
 ### 2.3 整體架構
 
@@ -723,10 +737,11 @@ CREATE TABLE balance_type_registry (
 
 > **完整 View Layer Schema**：參見專案根目錄 `init.sql`，內含 `journal`、`journal_line`、`account`、`account_balance` 等全部建表語句。
 >
-> **account_balance 特殊欄位**：
-> - `frozen_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`：凍結金額
-> - `locked_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`：鎖定金額
-> - 冪等 UPSERT 以 `(account_id, balance_type, currency)` 為 UNIQUE KEY，更新時保留 frozen_amount / locked_amount
+> **account_balance 表結構（v0.3 更新）**：
+> - 新增 `position VARCHAR(16) NOT NULL` 欄位（值為 CURRENT / LOCKED / FROZEN）
+> - UNIQUE KEY 從 `(account_id, balance_type, currency)` 更新為 `(account_id, balance_type, position, currency)`
+> - `frozen_amount` / `locked_amount` 保留為 legacy 欄位（可用於報表兼容），但主要餘額追蹤改用 `position` 機制
+> - 冪等 UPSERT 以 `(account_id, balance_type, position, currency)` 為 UNIQUE KEY
 
 ---
 
@@ -815,10 +830,23 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 |---|---|---|---|
 | `accountId` | `string` | ✅ | 目標帳戶 |
 | `balanceType` | `string` | ✅ | 必須在 Balance Type Registry（F-001）中存在 |
+| `position` | `enum` | ✅ | 餘額位置：`CURRENT` / `LOCKED` / `FROZEN`（見 position 說明） |
 | `currency` | `string` | ✅ | ISO 4217 幣種代碼 |
 | `entryType` | `enum` | ✅ | `DEBIT` / `CREDIT` |
 | `amount` | `decimal` | ✅ | 必須 > 0 |
 | `description` | `string` | ❌ | 分錄描述 |
+
+**Position 欄位說明**
+
+Position 用於區分同一帳戶同一 Balance Type 下不同用途的餘額桶：
+
+| Position | 說明 | 典型場景 |
+|---|---|---|
+| `CURRENT` | 正常可用餘額位置 | 一般交易入帳 |
+| `LOCKED` | 鎖定餘額（如交易進行中） | RFQ 成交前鎖定、待確認交易 |
+| `FROZEN` | 凍結餘額（合規、法律扣押） | 合規凍結、抵押品扣押 |
+
+同一 (accountId, balanceType, currency) 下可有多個 position 的餘額，各 position 獨立計算、獨立校驗。
 
 ### 3.4 RFQ 場景請求示例
 
@@ -836,6 +864,7 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
         {
           "accountId": "CLIENT_ACC_001",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "USD",
           "entryType": "DEBIT",
           "amount": 800000.00,
@@ -844,6 +873,7 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
         {
           "accountId": "COMPANY_FX_ACC",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "USD",
           "entryType": "CREDIT",
           "amount": 800000.00,
@@ -858,6 +888,7 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
         {
           "accountId": "COMPANY_FX_ACC",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "HKD",
           "entryType": "DEBIT",
           "amount": 6240000.00,
@@ -866,6 +897,7 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
         {
           "accountId": "CLIENT_ACC_001",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "HKD",
           "entryType": "CREDIT",
           "amount": 6240000.00,
@@ -903,10 +935,24 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 | # | 規則 | 錯誤碼 |
 |---|---|---|
 | V-08 | 每個涉及帳戶必須存在 | `ACCOUNT_NOT_FOUND` |
-| V-09 | 每個帳戶的對應 balanceType + currency 必須已初始化 | `BALANCE_NOT_INITIALIZED` |
+| V-09 | 每個帳戶的對應 balanceType + position + currency 必須已初始化 | `BALANCE_NOT_INITIALIZED` |
 | V-10 | `allowNegative=false` 的 balance，DEBIT 後不得低於 0 | `INSUFFICIENT_BALANCE` |
 | V-11 | `allowNegative=true` 的 balance（如 TRADE_AHEAD_BALANCE），CREDIT 後不得高於 0 | `CREDIT_EXCEEDS_LIMIT` |
 | V-12 | 帳戶未被凍結（`account.status = ACTIVE`） | `ACCOUNT_FROZEN` |
+| V-13 | `LOCKED` / `FROZEN` position 的餘額不得為負（即使 `allowNegative=true`） | `POSITION_BALANCE_FLOOR_BREACH` |
+
+**V-13 詳細說明**：
+
+```
+LOCKED / FROZEN position 是受限餘額，業務語義上不允許透支。
+即使 Balance Type 配置 allowNegative=true（如 TRADE_AHEAD_BALANCE），
+LOCKED / FROZEN position 仍受以下約束：
+
+IF position IN ('LOCKED', 'FROZEN'):
+  DEBIT 後餘額不得 < 0 → 拒絕，返回 POSITION_BALANCE_FLOOR_BREACH
+
+只有 CURRENT position 可以跟隨 Balance Type 的 allowNegative 設定。
+```
 
 ---
 
@@ -994,6 +1040,7 @@ COMPANY_ACC 是 hotspot，但因為所有請求都在同一個 Account Queue 裡
           "journalLineId": "JL-000024689",
           "accountId": "CLIENT_ACC_001",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "USD",
           "entryType": "DEBIT",
           "amount": 800000.00,
@@ -1004,6 +1051,7 @@ COMPANY_ACC 是 hotspot，但因為所有請求都在同一個 Account Queue 裡
           "journalLineId": "JL-000024690",
           "accountId": "COMPANY_FX_ACC",
           "balanceType": "AVAILABLE_BALANCE",
+          "position": "CURRENT",
           "currency": "USD",
           "entryType": "CREDIT",
           "amount": 800000.00,
@@ -1676,15 +1724,25 @@ Client → Ledger Service（Leader 節點）
 
 **重要**：Balance 查詢必須路由到 **Raft Leader 節點**，讀 Follower 可能得到舊數據。
 
-### 2.2 API（不變）
+### 2.2 API（更新：支持 position 查詢）
 
 ```
 GET /ledger/accounts/{accountId}/balances
     ?types=AVAILABLE_BALANCE,TRADE_AHEAD_BALANCE
     &currency=USD
+    &position=CURRENT   # 可選，不帶則返回聚合結果
 ```
 
-### 2.3 Response 新增欄位
+**position 參數說明**：
+
+| 參數值 | 說明 |
+|---|---|
+| 省略 | 返回該 Balance Type 下所有 position 的聚合餘額 |
+| `CURRENT` | 只返回 CURRENT position 的餘額 |
+| `LOCKED` | 只返回 LOCKED position 的餘額 |
+| `FROZEN` | 只返回 FROZEN position 的餘額 |
+
+### 2.3 Response（更新：新增 positions 欄位）
 
 ```json
 {
@@ -1698,6 +1756,11 @@ GET /ledger/accounts/{accountId}/balances
     {
       "typeCode": "AVAILABLE_BALANCE",
       "amount": 200000.00,
+      "positions": {
+        "CURRENT": 150000.00,
+        "LOCKED": 30000.00,
+        "FROZEN": 20000.00
+      },
       "allowNegative": false,
       "configVersion": 3,
       "lastJournalId": "JNL-20260516-000012345",
@@ -1706,6 +1769,9 @@ GET /ledger/accounts/{accountId}/balances
     {
       "typeCode": "TRADE_AHEAD_BALANCE",
       "amount": -45000.00,
+      "positions": {
+        "CURRENT": -45000.00
+      },
       "allowNegative": true,
       "negativeSemantics": "PRE_AUTHORIZED",
       "configVersion": 1,
@@ -1716,6 +1782,7 @@ GET /ledger/accounts/{accountId}/balances
 ```
 
 新增欄位說明：
+- `positions`：各 position 的餘額分佈（map），當查詢帶 `position` 參數時返回單一 position；不帶時返回所有 position 聚合
 - `dataSource`：`STATE_MACHINE`（in-memory）/ `EOD_SNAPSHOT` / `JOURNAL_REPLAY`
 - `raftLeaderId`：返回當前 Leader 節點 ID，便於診斷
 - `stateVersion`：State Machine 的版本號（即 Raft Log Index），便於追蹤
@@ -1895,6 +1962,7 @@ GET /ledger/journals/{journalId}
       "journalLineId": "JL-000024689",
       "accountId": "CLIENT_ACC_001",
       "balanceType": "AVAILABLE_BALANCE",
+      "position": "CURRENT",
       "currency": "USD",
       "entryType": "DEBIT",
       "amount": 800000.00,
@@ -2011,14 +2079,20 @@ CREATE INDEX idx_created_at       ON journal (created_at);
 -- journal_line 表
 CREATE INDEX idx_journal_id       ON journal_line (journal_id);
 CREATE INDEX idx_account_id       ON journal_line (account_id);
-CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, currency);
+CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, position, currency);
 
 -- account 表
 CREATE INDEX idx_owner_id         ON account (owner_id);
 
--- account_balance 表（含 frozen_amount、locked_amount）
+-- account_balance 表（含 frozen_amount、locked_amount；position 作為分離欄位）
 CREATE INDEX idx_account_id       ON account_balance (account_id);
+CREATE INDEX idx_account_balance  ON account_balance (account_id, balance_type, position, currency);
 ```
+
+> **account_balance 表結構變化（v0.3）**：
+> - 新增 `position` 欄位（VARCHAR(16) NOT NULL，值為 CURRENT / LOCKED / FROZEN）
+> - UNIQUE KEY 從 `(account_id, balance_type, currency)` 更新為 `(account_id, balance_type, position, currency)`
+> - `frozen_amount` / `locked_amount` 保留為 legacy 欄位，但主要餘額追蹤改用 `position` 機制
 
 ---
 
@@ -2321,13 +2395,14 @@ State Machine 是 Ledger Platform 的核心計算單元，運行在 Raft Leader 
 
 ## 2. 資料結構
 
-### 2.1 In-Memory Balance Store
+### 2.1 In-Memory Balance Store（更新：AccountBalanceKey 擴展）
 
 ```java
-// 帳戶餘額 Key
+// 帳戶餘額 Key（v0.3 更新：新增 position 欄位）
 record AccountBalanceKey(
     String accountId,
     String balanceType,
+    String position,    // CURRENT / LOCKED / FROZEN
     String currency
 ) {}
 
@@ -2341,6 +2416,28 @@ record BalanceEntry(
 
 // Balance Store：無鎖讀，Account Worker 串行寫
 ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
+```
+
+**Position 查詢支援**：
+
+```java
+// 查詢某帳戶某 Balance Type 某幣種的所有 position 餘額
+Map<String, BigDecimal> getPositions(String accountId, String balanceType, String currency) {
+    return balanceStore.entrySet().stream()
+        .filter(e -> e.getKey().accountId().equals(accountId)
+                  && e.getKey().balanceType().equals(balanceType)
+                  && e.getKey().currency().equals(currency))
+        .collect(Collectors.toMap(
+            e -> e.getKey().position(),
+            e -> e.getValue().amount()
+        ));
+}
+
+// 聚合計算總餘額
+BigDecimal getAggregatedBalance(String accountId, String balanceType, String currency) {
+    return getPositions(accountId, balanceType, currency).values().stream()
+        .reduce(BigDecimal.ZERO, BigDecimal::add);
+}
 ```
 
 ### 2.2 In-Memory Idempotency Store
@@ -2534,7 +2631,8 @@ CF_JOURNAL_LINE:
   → 按 journal_id prefix 掃描可取出一筆 Journal 的所有 lines
 
 CF_BALANCE:
-  Key: account_id + "#" + balance_type + "#" + currency
+  Key: account_id + "#" + balance_type + "#" + position + "#" + currency
+  → 按 account_id + "#" + balance_type + "#" prefix 掃描可取出一個帳戶某 Balance Type 的所有 position 餘額
   → 按 account_id prefix 掃描可取出一個帳戶的所有 balance
 
 CF_IDEMPOTENCY:
@@ -2886,11 +2984,14 @@ POST /ledger/accounts
 
 ```json
 [
-  { "balanceType": "AVAILABLE_BALANCE", "currency": "USD" },
-  { "balanceType": "AVAILABLE_BALANCE", "currency": "HKD" },
-  { "balanceType": "TRADE_AHEAD_BALANCE", "currency": "USD" }
+  { "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "currency": "USD" },
+  { "balanceType": "AVAILABLE_BALANCE", "position": "LOCKED", "currency": "USD" },
+  { "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "currency": "HKD" },
+  { "balanceType": "TRADE_AHEAD_BALANCE", "position": "CURRENT", "currency": "USD" }
 ]
 ```
+
+> **position 必填**：v0.3 起，balanceInitializations 需明確指定 position。若不需多 position，使用 `CURRENT` 作為預設值。
 
 **帳戶創建走 Raft**：帳戶 metadata 需在 State Machine 中創建，確保所有節點一致。
 
@@ -2914,11 +3015,11 @@ GET /ledger/accounts?accountType=CLIENT&ownerId=CUST-001
 
 讀 MySQL View Layer（最終一致性）。
 
-### 4.4 新增 Balance Type 到已有帳戶
+### 4.4 新增 Balance Type + Position 到已有帳戶
 
 ```
 POST /ledger/accounts/{accountId}/balance-types
-{ "balanceType": "BROKERAGE_BALANCE", "currency": "USD" }
+{ "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "currency": "USD" }
 ```
 
 走 Raft，在 State Machine 中初始化新 balance entry（初始值 0）。

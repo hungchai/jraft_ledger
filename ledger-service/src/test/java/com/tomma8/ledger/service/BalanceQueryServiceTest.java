@@ -48,7 +48,7 @@ class BalanceQueryServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
@@ -75,11 +75,9 @@ class BalanceQueryServiceTest {
         // Execute posting
         PostingCommand cmd = new PostingCommand(
                 "req-001", "TEST", "test", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("300.00"), "Debit"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("300.00"), "Credit")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("300.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(cmd);
@@ -121,9 +119,9 @@ class BalanceQueryServiceTest {
         }
 
         List<AccountBalanceKey> keys = List.of(
-                new AccountBalanceKey("ACC-1", "AVAILABLE_BALANCE", "USD"),
-                new AccountBalanceKey("ACC-2", "AVAILABLE_BALANCE", "USD"),
-                new AccountBalanceKey("ACC-3", "AVAILABLE_BALANCE", "USD")
+                new AccountBalanceKey("ACC-1", "AVAILABLE_BALANCE", "CURRENT", "USD"),
+                new AccountBalanceKey("ACC-2", "AVAILABLE_BALANCE", "CURRENT", "USD"),
+                new AccountBalanceKey("ACC-3", "AVAILABLE_BALANCE", "CURRENT", "USD")
         );
 
         List<BalanceQueryResult> results = queryService.getBatchBalances(keys);

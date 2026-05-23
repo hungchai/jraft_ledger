@@ -43,7 +43,7 @@ class AccountQueueManagerTest {
         accountMetaStore.put("CLIENT_ACC_001", new Account(
                 "CLIENT_ACC_001", AccountType.COMPANY, "Client",
                 "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
-        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("10000.00"), 0, 1, "", Instant.now()));
 
         queueManager = new AccountQueueManager(cmd -> {
@@ -70,9 +70,9 @@ class AccountQueueManagerTest {
             new Thread(() -> {
                 PostingCommand cmd = new PostingCommand(
                         "q-req-" + idx, "TEST", "test", LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, BigDecimal.ONE, "Debit " + idx)
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                        EntryType.DEBIT, "Debit " + idx)
                         )))
                 );
                 queueManager.submit("CLIENT_ACC_001", cmd);
@@ -84,7 +84,7 @@ class AccountQueueManagerTest {
         Thread.sleep(500); // let worker catch up
 
         // All 50 debits processed, final balance = 10000 - 50 = 9950
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         assertThat(balanceStore.getOrThrow(key).amount()).isEqualByComparingTo(new BigDecimal("9950.00"));
     }
 
@@ -96,9 +96,8 @@ class AccountQueueManagerTest {
         for (int i = 0; i < 2000; i++) {
             PostingCommand cmd = new PostingCommand(
                     "bp-req-" + i, "TEST", "test", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg", "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, BigDecimal.ONE, "")
+                    List.of(new PostingCommand.Leg("leg", "TEST", BigDecimal.ONE, "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "")
                     )))
             );
             if (!queueManager.submit("CLIENT_ACC_001", cmd)) {
@@ -119,9 +118,9 @@ class AccountQueueManagerTest {
         accountMetaStore.put("ACC_B", new Account(
                 "ACC_B", AccountType.COMPANY, "B", "C-B", AccountStatus.ACTIVE, null, Instant.now()));
 
-        balanceStore.put(new AccountBalanceKey("ACC_A", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("ACC_A", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(BigDecimal.ZERO, 0, 0, "", Instant.now()));
-        balanceStore.put(new AccountBalanceKey("ACC_B", "AVAILABLE_BALANCE", "USD"),
+        balanceStore.put(new AccountBalanceKey("ACC_B", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(BigDecimal.ZERO, 0, 0, "", Instant.now()));
 
         CountDownLatch done = new CountDownLatch(2);
@@ -133,9 +132,8 @@ class AccountQueueManagerTest {
                 for (int i = 0; i < 100; i++) {
                     PostingCommand cmd = new PostingCommand(
                             "ia-" + i, "TEST", "test", LocalDate.now(),
-                            List.of(new PostingCommand.Leg("leg", "TEST", List.of(
-                                    new PostingCommand.Line("ACC_A", "AVAILABLE_BALANCE", "USD",
-                                            EntryType.CREDIT, BigDecimal.ONE, "")
+                            List.of(new PostingCommand.Leg("leg", "TEST", BigDecimal.ONE, "USD", List.of(
+                                    new PostingCommand.Line("ACC_A", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "")
                             )))
                     );
                     queueManager.submit("ACC_A", cmd);
@@ -150,9 +148,8 @@ class AccountQueueManagerTest {
                 for (int i = 0; i < 100; i++) {
                     PostingCommand cmd = new PostingCommand(
                             "ib-" + i, "TEST", "test", LocalDate.now(),
-                            List.of(new PostingCommand.Leg("leg", "TEST", List.of(
-                                    new PostingCommand.Line("ACC_B", "AVAILABLE_BALANCE", "USD",
-                                            EntryType.CREDIT, BigDecimal.ONE, "")
+                            List.of(new PostingCommand.Leg("leg", "TEST", BigDecimal.ONE, "USD", List.of(
+                                    new PostingCommand.Line("ACC_B", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "")
                             )))
                     );
                     queueManager.submit("ACC_B", cmd);

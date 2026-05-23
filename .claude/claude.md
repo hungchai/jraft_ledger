@@ -219,6 +219,39 @@ New error codes are returned
 
 Authentication headers or parameters change
 
+3.5 Verify Compilation and Tests
+After any code change, the agent must:
+
+**Step 1: Compile**
+Run `mvn clean compile` — confirm zero compilation errors.
+
+**Step 2: Run ALL unit tests**
+Run `mvn test` — confirm ALL tests pass, zero failures, zero errors.
+
+**Step 3: Fix failures before concluding**
+If compilation or any test fails, fix the root cause before concluding the session. Do not leave failing tests behind.
+
+Common failure patterns to check:
+- Record constructors with new required fields → update all `new RecordName(...)` in tests
+- Method signature changes → update all callers in tests
+- New enum values → update test assertions if applicable
+- New required fields in API request/response → update Postman collection and smoke-test.sh
+- New validation rules → ensure existing test expectations align with new behavior
+
+Never skip test compilation with `-Dmaven.test.skip=true` unless explicitly instructed.
+Never conclude a session with failing tests unless the user explicitly asks to skip them.
+
+3.4 Update Smoke Test Script
+The scripts/smoke-test.sh must be updated whenever:
+
+Request/response schema changes (new fields, renamed fields, removed fields)
+
+New required fields added to existing endpoints
+
+API structure changes (e.g., amount/currency moved from line to leg level)
+
+New validation rules affect smoke test scenarios
+
 For each affected endpoint, ensure the Postman collection contains:
 
 text
@@ -330,6 +363,11 @@ text
 [ ] Performance targets verified (P95 Posting ≤3ms, Balance Query ≤2ms)
 [ ] LEDGER-PLATFORM-FULL-REQUIREMENTS.md version bumped if doc was updated
 [ ] TDD-TEST-CASES.md version bumped if doc was updated
+[ ] Postman collection updated for all affected endpoints
+[ ] smoke-test.sh updated if API structure changed
+[ ] Code compiles successfully (`mvn clean compile` passes)
+[ ] All tests pass (`mvn test` passes) — if test fails, fix before concluding
+[ ] No test files left with compilation errors from constructor/field changes
 7. Quick Feature-to-File Reference
    Feature	Requirement Section	Test Case Prefix	Postman Folder
    Balance Type Registry	F-001	TC-F001-	F-001 Balance Registry

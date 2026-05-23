@@ -53,7 +53,7 @@ class ConcurrencyTest {
         int debitEach = 1;
         int initialBalance = 100;
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal(initialBalance), 0, 0, "", Instant.now()));
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -68,9 +68,9 @@ class ConcurrencyTest {
                 start.await();
                 PostingCommand cmd = new PostingCommand(
                         "req-c-" + idx, "TEST", "test-ref", LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal(debitEach), "Concurrent " + idx)
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", new BigDecimal(debitEach), "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                        EntryType.DEBIT, "Concurrent " + idx)
                         )))
                 );
                 return stateMachine.applyPosting(cmd);
@@ -102,7 +102,7 @@ class ConcurrencyTest {
         int threadCount = 100;
         BigDecimal creditEach = new BigDecimal("10.00");
 
-        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey companyKey = new AccountBalanceKey("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(companyKey, new BalanceEntry(BigDecimal.ZERO, 0, 0, "", Instant.now()));
 
         // Create a client account for each thread to debit from
@@ -111,7 +111,7 @@ class ConcurrencyTest {
             accountMetaStore.put(clientId, new Account(
                     clientId, AccountType.COMPANY, "Client " + i,
                     "CUST-" + i, AccountStatus.ACTIVE, null, Instant.now()));
-            balanceStore.put(new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD"),
+            balanceStore.put(new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "CURRENT", "USD"),
                     new BalanceEntry(creditEach, 0, 0, "", Instant.now()));
         }
 
@@ -128,11 +128,10 @@ class ConcurrencyTest {
                 start.await();
                 PostingCommand cmd = new PostingCommand(
                         "req-hot-" + idx, "RFQ_SETTLEMENT", "RFQ-" + idx, LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", List.of(
-                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, creditEach, "Client " + idx + " pays"),
-                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.CREDIT, creditEach, "Company receives")
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TRADE", creditEach, "USD", List.of(
+                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "CURRENT",
+                                        EntryType.DEBIT, "Client " + idx + " pays"),
+                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company receives")
                         )))
                 );
                 return stateMachine.applyPosting(cmd);
@@ -159,7 +158,7 @@ class ConcurrencyTest {
     void idempotency_concurrentRetries_onlyOneJournalCreated() throws Exception {
         int retries = 100;
 
-        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.now()));
 
         String sameRequestId = "req-idempotent";
@@ -175,9 +174,8 @@ class ConcurrencyTest {
                 start.await();
                 PostingCommand cmd = new PostingCommand(
                         sameRequestId, "TEST", "test-ref", LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, new BigDecimal("100.00"), "Idempotent")
+                        List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
+                                new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Idempotent")
                         )))
                 );
                 return stateMachine.applyPosting(cmd);
@@ -216,7 +214,7 @@ class ConcurrencyTest {
                 clientId, AccountType.CLIENT, "Client NFR5",
                 "CUST-NFR5", AccountStatus.ACTIVE, null, Instant.now()));
 
-        AccountBalanceKey key = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "USD");
+        AccountBalanceKey key = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "CURRENT", "USD");
         balanceStore.put(key, new BalanceEntry(new BigDecimal(initialBalance), 0, 0, "", Instant.now()));
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -231,11 +229,9 @@ class ConcurrencyTest {
                 start.await();
                 PostingCommand cmd = new PostingCommand(
                         "req-nfr5-" + idx, "TEST", "test-ref", LocalDate.now(),
-                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", List.of(
-                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "USD",
-                                        EntryType.DEBIT, BigDecimal.ONE, "Debit " + idx),
-                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                        EntryType.CREDIT, BigDecimal.ONE, "Counter " + idx)
+                        List.of(new PostingCommand.Leg("leg-" + idx, "TEST", BigDecimal.ONE, "USD", List.of(
+                                new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit " + idx),
+                                new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Counter " + idx)
                         )))
                 );
                 return stateMachine.applyPosting(cmd);

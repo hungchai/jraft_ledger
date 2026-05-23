@@ -48,7 +48,7 @@ class JournalQueryServiceTest {
     }
 
     private void setBalance(String a, String t, String c, BigDecimal amt) {
-        balanceStore.put(new AccountBalanceKey(a, t, c),
+        balanceStore.put(new AccountBalanceKey(a, t, "CURRENT", c),
                 new BalanceEntry(amt, 0, 1, "", Instant.now()));
     }
 
@@ -60,11 +60,9 @@ class JournalQueryServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-001", "RFQ_SETTLEMENT", "RFQ-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("800.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("800.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
         CommandResult result = stateMachine.applyPosting(cmd);
@@ -86,11 +84,11 @@ class JournalQueryServiceTest {
         for (int i = 0; i < 20; i++) {
             PostingCommand cmd = new PostingCommand(
                     "req-j" + i, "TEST", "test-ref", LocalDate.now(),
-                    List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.DEBIT, new BigDecimal("1.00"), "Debit " + i),
-                            new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                    EntryType.CREDIT, new BigDecimal("1.00"), "Credit " + i)
+                    List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Debit " + i),
+                            new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Credit " + i)
                     )))
             );
             stateMachine.applyPosting(cmd);
@@ -111,11 +109,9 @@ class JournalQueryServiceTest {
         // Original posting
         PostingCommand cmd = new PostingCommand(
                 "req-003", "RFQ_SETTLEMENT", "RFQ-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
         CommandResult postResult = stateMachine.applyPosting(cmd);
@@ -140,11 +136,9 @@ class JournalQueryServiceTest {
         // Original
         PostingCommand cmd = new PostingCommand(
                 "req-004", "RFQ_SETTLEMENT", "CHAIN-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Client"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Company")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Client"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
                 )))
         );
         String originalId = stateMachine.applyPosting(cmd).journalId();
@@ -156,11 +150,9 @@ class JournalQueryServiceTest {
         // Rebook (new posting)
         PostingCommand rebookCmd = new PostingCommand(
                 "req-004b", "RFQ_SETTLEMENT", "CHAIN-001", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TRADE", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Rebook"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Rebook")
+                List.of(new PostingCommand.Leg("leg-1", "TRADE", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Rebook"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Rebook")
                 )))
         );
         stateMachine.applyPosting(rebookCmd);
@@ -178,11 +170,9 @@ class JournalQueryServiceTest {
 
         PostingCommand cmd = new PostingCommand(
                 "req-abc", "TEST", "test-ref", LocalDate.now(),
-                List.of(new PostingCommand.Leg("leg-1", "TEST", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD",
-                                EntryType.DEBIT, new BigDecimal("100.00"), "Test"),
-                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD",
-                                EntryType.CREDIT, new BigDecimal("100.00"), "Test")
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Test")
                 )))
         );
         stateMachine.applyPosting(cmd);

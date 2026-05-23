@@ -49,18 +49,19 @@ public class PostingController {
         List<PostingCommand.Leg> legs = legMaps.stream().map(legMap -> {
             String legId = (String) legMap.get("legId");
             String postingType = (String) legMap.get("postingType");
+            BigDecimal amount = new BigDecimal(legMap.get("amount").toString());
+            String currency = (String) legMap.get("currency");
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> lineMaps = (List<Map<String, Object>>) legMap.get("lines");
             List<PostingCommand.Line> lines = lineMaps.stream().map(lineMap ->
                     new PostingCommand.Line(
                             (String) lineMap.get("accountId"),
                             (String) lineMap.get("balanceType"),
-                            (String) lineMap.get("currency"),
+                            (String) lineMap.getOrDefault("position", "CURRENT"),
                             EntryType.valueOf((String) lineMap.get("entryType")),
-                            new BigDecimal(lineMap.get("amount").toString()),
                             (String) lineMap.getOrDefault("description", ""))
             ).toList();
-            return new PostingCommand.Leg(legId, postingType, lines);
+            return new PostingCommand.Leg(legId, postingType, amount, currency, lines);
         }).toList();
 
         PostingCommand cmd = new PostingCommand(requestId, businessEventType, businessEventRef, valueDate, legs);
