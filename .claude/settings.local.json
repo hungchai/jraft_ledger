@@ -50,7 +50,22 @@
       "Bash(sort -t: -k1,1)",
       "Bash(curl -sf http://localhost:8089/projection/accounts/COMPANY_FX_ACC/balances)",
       "Bash(curl -sf http://localhost:8089/actuator/health)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(npx *)",
+      "Bash(mkdir -p /tmp/mermaid-gen)",
+      "Read(//tmp/**)",
+      "Bash(PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm init -y)",
+      "Bash(PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install @mermaid-js/mermaid-cli@latest puppeteer@latest)",
+      "Read(//private/tmp/mermaid-gen/**)",
+      "Bash(PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install @mermaid-js/mermaid-cli@latest --legacy-peer-deps)",
+      "Bash(PUPPETEER_EXECUTABLE_PATH=\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" npx mmdc -i /Users/tomma/GIT/jraft_ledger/docs/architecture-diagram.mmd -o /Users/tomma/GIT/jraft_ledger/docs/architecture-diagram.png --backgroundColor white --scale 2)",
+      "Bash(npm install *)",
+      "Bash(grep -E \"\\\\.\\(sh|py|java\\)$\")",
+      "Bash(./scripts/smoke-test.sh *)",
+      "Bash(docker-compose up *)",
+      "Bash(awk '{print $2, $11, $12, $13}')",
+      "Bash(cat)",
+      "Bash(bash /tmp/check_endpoints.sh)"
     ]
   }
 }
