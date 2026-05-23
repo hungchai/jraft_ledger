@@ -26,9 +26,9 @@ This document contains the complete technical requirements specification for the
 |---|---|---|---|
 | v0.1 | 2026-05-16 | Initial draft | Ledger Platform Team |
 | v0.2 | 2026-05-22 | ADR-001 Section 2.2: Added sofa-common-tools version compatibility note (resolves Spring Boot 3.4.4 + SOFAJRaft 1.3.15 logback conflict) | Ledger Platform Team |
-| v0.3 | 2026-05-23 | F-002/F-005/F-008: Added `position` field (CURRENT/LOCKED/FROZEN) for balance position tracking; AccountBalanceKey expanded to (accountId, balanceType, position, currency); added validation rule V-13 | Ledger Platform Team |
-| v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position core concepts and related features | Ledger Platform Team |
-| v0.5 | 2026-05-23 | Merged docs/architecture.md and docs/persistence-flow.md into Appendix A/B/C; added F-013 Idempotency & Hotspot Account Concurrency specification | Ledger Platform Team |
+| v0.3 | 2026-05-23 | F-002/F-005/F-008: Added `position` field (CURRENT/LOCKED/FROZEN) to support balance position tracking; AccountBalanceKey expanded to (accountId, balanceType, position, currency); Added validation rule V-13 | Ledger Platform Team |
+| v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position and their relationships | Ledger Platform Team |
+| v0.5 | 2026-05-23 | Merged docs/architecture.md, docs/persistence-flow.md into Appendix A/B/C; Added F-013 Idempotency & Hotspot Account Concurrency spec | Ledger Platform Team |
 
 ---
 
@@ -888,10 +888,11 @@ CREATE TABLE balance_type_registry (
 
 > **Complete View Layer Schema**: See project root `init.sql`, containing full DDL for `journal`, `journal_line`, `account`, `account_balance`, and all other tables.
 >
-> **account_balance Special Columns**:
-> - `frozen_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`: frozen amount
-> - `locked_amount DECIMAL(24,8) NOT NULL DEFAULT 0.00000000`: locked amount
-> - Idempotent UPSERT uses `(account_id, balance_type, currency)` as UNIQUE KEY; updates preserve frozen_amount / locked_amount
+> **account_balance Table Structure (v0.3 Update)**:
+> - Added `position VARCHAR(16) NOT NULL` field (values CURRENT / LOCKED / FROZEN)
+> - UNIQUE KEY updated from `(account_id, balance_type, currency)` to `(account_id, balance_type, position, currency)`
+> - `frozen_amount` / `locked_amount` retained as legacy fields (can be used for report compatibility), but primary balance tracking uses the `position` mechanism
+> - Idempotent UPSERT uses `(account_id, balance_type, position, currency)` as UNIQUE KEY
 
 ---
 
@@ -980,12 +981,25 @@ Posting API accepts ledger requests containing one or more legs, atomically exec
 |---|---|---|---|
 | `accountId` | `string` | ✅ | Target account |
 | `balanceType` | `string` | ✅ | Must exist in Balance Type Registry (F-001) |
+| `position` | `enum` | ✅ | Balance position: `CURRENT` / `LOCKED` / `FROZEN` (see position description) |
 | `currency` | `string` | ✅ | ISO 4217 currency code |
 | `entryType` | `enum` | ✅ | `DEBIT` / `CREDIT` |
 | `amount` | `decimal` | ✅ | Must be > 0 |
 | `description` | `string` | ❌ | Entry description |
 
-### 3.4 RFQ Scenario Request Example
+**Position Field Description**
+
+Position is used to distinguish different balance buckets under the same account and same Balance Type:
+
+| Position | Description | Typical Scenario |
+|---|---|---|
+| `CURRENT` | Normal available balance position | General trading booking |
+| `LOCKED` | Locked balance (e.g. in-trade) | RFQ pre-settlement lock, pending confirmation trade |
+| `FROZEN` | Frozen balance (compliance, legal seizure) | Compliance freeze, collateral seizure |
+
+Under the same (accountId, balanceType, currency), there can be balances for multiple positions; each position is calculated and validated independently.
+
+### 3.5 RFQ Scenario Request Example
 
 ```json
 {
@@ -1068,10 +1082,24 @@ Posting API accepts ledger requests containing one or more legs, atomically exec
 | # | Rule | Error Code |
 |---|---|---|
 | V-08 | Each involved account must exist | `ACCOUNT_NOT_FOUND` |
-| V-09 | Each account's corresponding balanceType + currency must be initialized | `BALANCE_NOT_INITIALIZED` |
+| V-09 | Each account's corresponding balanceType + position + currency must be initialized | `BALANCE_NOT_INITIALIZED` |
 | V-10 | For `allowNegative=false` balance, DEBIT must not go below 0 | `INSUFFICIENT_BALANCE` |
 | V-11 | For `allowNegative=true` balance (e.g. TRADE_AHEAD_BALANCE), CREDIT must not go above 0 | `CREDIT_EXCEEDS_LIMIT` |
 | V-12 | Account is not frozen (`account.status = ACTIVE`) | `ACCOUNT_FROZEN` |
+| V-13 | Balance of `LOCKED` / `FROZEN` position must not be negative (even if `allowNegative=true`) | `POSITION_BALANCE_FLOOR_BREACH` |
+
+**V-13 Detailed Description**:
+
+```
+LOCKED / FROZEN position is restricted balance; by business semantics, overdraft is not allowed.
+Even if Balance Type config allowNegative=true (e.g. TRADE_AHEAD_BALANCE),
+LOCKED / FROZEN position is still subject to the following constraint:
+
+IF position IN ('LOCKED', 'FROZEN'):
+  DEBIT result balance must not < 0 → reject, return POSITION_BALANCE_FLOOR_BREACH
+
+Only CURRENT position can follow the Balance Type's allowNegative setting.
+```
 
 ---
 
@@ -1841,13 +1869,26 @@ Client → Ledger Service (Leader node)
 
 **Important**: Balance queries must be routed to the **Raft Leader node**; reading from Follower may return stale data.
 
-### 2.2 API (unchanged)
+### 2.2 API (v0.3 updated)
 
 ```
 GET /ledger/accounts/{accountId}/balances
     ?types=AVAILABLE_BALANCE,TRADE_AHEAD_BALANCE
     &currency=USD
+    &position=CURRENT          // optional: CURRENT / LOCKED / FROZEN
 ```
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `types` | `string` | ❌ | Comma-separated balance type codes |
+| `currency` | `string` | ❌ | ISO 4217 currency code |
+| `position` | `enum` | ❌ | Balance position: `CURRENT` / `LOCKED` / `FROZEN` |
+| `aggregate` | `boolean` | ❌ | If `true`, return sum of all positions per balance type |
+
+> If `position` is omitted and `aggregate=false`, default to `CURRENT` position only.
+> If `aggregate=true`, `position` parameter is ignored.
 
 ### 2.3 Response New Fields
 
@@ -1866,7 +1907,12 @@ GET /ledger/accounts/{accountId}/balances
       "allowNegative": false,
       "configVersion": 3,
       "lastJournalId": "JNL-20260516-000012345",
-      "stateVersion": 1024
+      "stateVersion": 1024,
+      "positions": {
+        "CURRENT": 200000.00,
+        "LOCKED": 0.00,
+        "FROZEN": 0.00
+      }
     },
     {
       "typeCode": "TRADE_AHEAD_BALANCE",
@@ -1874,7 +1920,12 @@ GET /ledger/accounts/{accountId}/balances
       "allowNegative": true,
       "negativeSemantics": "PRE_AUTHORIZED",
       "configVersion": 1,
-      "stateVersion": 987
+      "stateVersion": 987,
+      "positions": {
+        "CURRENT": -45000.00,
+        "LOCKED": 0.00,
+        "FROZEN": 0.00
+      }
     }
   ]
 }
@@ -1884,6 +1935,7 @@ New field descriptions:
 - `dataSource`: `STATE_MACHINE` (in-memory) / `EOD_SNAPSHOT` / `JOURNAL_REPLAY`
 - `raftLeaderId`: Returns current Leader node ID for diagnostics
 - `stateVersion`: State Machine version number (i.e. Raft Log Index) for tracking
+- `positions`: Per-position balance breakdown (v0.3). `amount` field equals sum of all positions.
 
 ---
 
@@ -1905,8 +1957,8 @@ Because it reads from in-memory State Machine, batch query performance is greatl
 ## 4. State Machine Internal Data Structure
 
 ```java
-// In-memory State Machine Balance storage structure
-// Key: AccountKey = (accountId, balanceType, currency)
+// In-memory State Machine Balance storage structure (v0.3)
+// Key: AccountKey = (accountId, balanceType, position, currency)
 // Value: BalanceEntry
 
 class BalanceEntry {
@@ -1916,7 +1968,20 @@ class BalanceEntry {
     Instant lastUpdatedAt;    // Last update time
 }
 
-ConcurrentHashMap<AccountKey, BalanceEntry> balanceStore;
+ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
+
+// Position Query Support
+// Aggregate query sums all positions for a given (accountId, balanceType, currency)
+Map<String, BigDecimal> getPositions(String accountId, String balanceType, String currency) {
+    return Stream.of(Position.values())
+        .collect(Collectors.toMap(
+            Position::name,
+            pos -> balanceStore.getOrDefault(
+                new AccountBalanceKey(accountId, balanceType, pos.name(), currency),
+                BalanceEntry.ZERO
+            ).amount
+        ));
+}
 ```
 
 **Reads are lock-free** (Account Worker writes, readers only do snapshot reads); under Java 21 ConcurrentHashMap read operations are essentially contention-free.
@@ -2030,6 +2095,7 @@ The system supports the following query dimensions, which can be combined:
 | Status | `status` | `CONFIRMED`, `REVERSED` |
 | Currency | `currency` | ISO 4217 |
 | Balance Type | `balanceType` | Filter by Balance Type |
+| Position | `position` | Filter by position: `CURRENT` / `LOCKED` / `FROZEN` |
 | Operator | `operatorId` | Manual Adjustment operator |
 
 ---
@@ -2060,6 +2126,7 @@ GET /ledger/journals/{journalId}
       "journalLineId": "JL-000024689",
       "accountId": "CLIENT_ACC_001",
       "balanceType": "AVAILABLE_BALANCE",
+      "position": "CURRENT",
       "currency": "USD",
       "entryType": "DEBIT",
       "amount": 800000.00,
@@ -2176,12 +2243,13 @@ CREATE INDEX idx_created_at       ON journal (created_at);
 -- journal_line table
 CREATE INDEX idx_journal_id       ON journal_line (journal_id);
 CREATE INDEX idx_account_id       ON journal_line (account_id);
-CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, currency);
+CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, position, currency);
 
 -- account table
 CREATE INDEX idx_owner_id         ON account (owner_id);
 
--- account_balance table (includes frozen_amount, locked_amount)
+-- account_balance table (v0.3: includes position field)
+-- UNIQUE KEY: (account_id, balance_type, position, currency)
 CREATE INDEX idx_account_id       ON account_balance (account_id);
 ```
 
@@ -2489,10 +2557,11 @@ State Machine is the core computing unit of the Ledger Platform, running on the 
 ### 2.1 In-Memory Balance Store
 
 ```java
-// Account balance Key
+// Account balance Key (v0.3: expanded to include position)
 record AccountBalanceKey(
     String accountId,
     String balanceType,
+    String position,            // CURRENT / LOCKED / FROZEN
     String currency
 ) {}
 
@@ -2506,6 +2575,17 @@ record BalanceEntry(
 
 // Balance Store: lock-free read, Account Worker serial write
 ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
+
+// Position-aware query helper
+Map<String, BigDecimal> getPositionBalances(String accountId, String balanceType, String currency) {
+    Map<String, BigDecimal> result = new HashMap<>();
+    for (Position pos : Position.values()) {
+        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, pos.name(), currency);
+        BalanceEntry entry = balanceStore.getOrDefault(key, BalanceEntry.ZERO);
+        result.put(pos.name(), entry.amount);
+    }
+    return result;
+}
 ```
 
 ### 2.2 In-Memory Idempotency Store
@@ -2698,9 +2778,10 @@ CF_JOURNAL_LINE:
   Key: journal_id + "#" + journal_line_id
   → Prefix scan by journal_id retrieves all lines of a Journal
 
-CF_BALANCE:
-  Key: account_id + "#" + balance_type + "#" + currency
+CF_BALANCE (v0.3):
+  Key: account_id + "#" + balance_type + "#" + position + "#" + currency
   → Prefix scan by account_id retrieves all balances of an account
+  → Prefix scan by account_id + "#" + balance_type retrieves all positions of a balance type
 
 CF_IDEMPOTENCY:
   Key: request_id
@@ -3047,15 +3128,19 @@ POST /ledger/accounts
 | `balanceInitializations` | `list` | ✅ | Initialized balance type + currency (default initial balance 0) |
 | `metadata` | `map` | ❌ | Extension fields |
 
-**balanceInitializations Structure**
+**balanceInitializations Structure (v0.3)**
+
+Each initialization must specify `balanceType` + `position` + `currency`. Default initial balance is 0.
 
 ```json
 [
-  { "balanceType": "AVAILABLE_BALANCE", "currency": "USD" },
-  { "balanceType": "AVAILABLE_BALANCE", "currency": "HKD" },
-  { "balanceType": "TRADE_AHEAD_BALANCE", "currency": "USD" }
+  { "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "currency": "USD" },
+  { "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "currency": "HKD" },
+  { "balanceType": "TRADE_AHEAD_BALANCE", "position": "CURRENT", "currency": "USD" }
 ]
 ```
+
+> `position` is required as of v0.3. If omitted, defaults to `CURRENT`.
 
 **Account creation goes through Raft**: Account metadata must be created in State Machine to ensure consistency across all nodes.
 
@@ -3083,7 +3168,7 @@ Read from MySQL View Layer (eventual consistency).
 
 ```
 POST /ledger/accounts/{accountId}/balance-types
-{ "balanceType": "BROKERAGE_BALANCE", "currency": "USD" }
+{ "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "currency": "USD" }
 ```
 
 Go through Raft, initialize new balance entry in State Machine (initial value 0).
