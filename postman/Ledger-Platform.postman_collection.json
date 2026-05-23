@@ -613,6 +613,96 @@
           }
         }
       ]
+    },
+    {
+      "name": "Observability",
+      "description": "Prometheus + Grafana monitoring endpoints per NFR-9",
+      "item": [
+        {
+          "name": "Prometheus UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:9090", "host": ["localhost"], "path": [], "port": "9090" }
+          }
+        },
+        {
+          "name": "Prometheus Targets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:9090/api/v1/targets", "host": ["localhost"], "path": ["api", "v1", "targets"], "port": "9090" }
+          }
+        },
+        {
+          "name": "Node 1 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8081/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8081" }
+          }
+        },
+        {
+          "name": "Node 2 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8082/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8082" }
+          }
+        },
+        {
+          "name": "Node 3 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8083/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8083" }
+          }
+        },
+        {
+          "name": "Projection Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8089/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8089" }
+          }
+        },
+        {
+          "name": "Grafana UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:3000", "host": ["localhost"], "path": [], "port": "3000" }
+          }
+        },
+        {
+          "name": "Posting P95 Query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:9090/api/v1/query?query=histogram_quantile(0.95,rate(ledger_posting_duration_seconds_bucket[5m]))",
+              "host": ["localhost"],
+              "path": ["api", "v1", "query"],
+              "port": "9090",
+              "query": [{ "key": "query", "value": "histogram_quantile(0.95,rate(ledger_posting_duration_seconds_bucket[5m]))" }]
+            }
+          }
+        },
+        {
+          "name": "GC Pause Max Query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:9090/api/v1/query?query=max(jvm_gc_pause_seconds_max)",
+              "host": ["localhost"],
+              "path": ["api", "v1", "query"],
+              "port": "9090",
+              "query": [{ "key": "query", "value": "max(jvm_gc_pause_seconds_max)" }]
+            }
+          }
+        }
+      ]
     }
   ]
 }
