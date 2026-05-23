@@ -1,10 +1,11 @@
 # NFR — 非功能需求規格
 
-**文件版本**: v0.3
+**文件版本**: v0.4
 **功能**: 非功能需求（NFR）
 **系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
 
+> **v0.4 變更摘要**：NFR-9 新增 Prometheus/Grafana 實作細節（端點、服務、dashboard 配置）。
 > **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）與 NFR-17（節點同步監控）。
 > **v0.2 變更摘要**：新增 NFR-13（JVM & GC）、NFR-14（Account Queue）、NFR-15（accountSeq Overflow Policy）；NFR-9 Observability 補充 GC pause 告警和 accountSeq gap 告警。
 
@@ -99,12 +100,15 @@
 
 ---
 
-## 9. 可觀測性（Observability）【v0.2 更新】
+## 9. 可觀測性（Observability）【v0.3 更新】
 
 | 要求 | 說明 |
 |---|---|
 | 分布式追蹤 | 所有請求帶 traceId / spanId，接入 Jaeger / Zipkin |
 | Metrics | Prometheus 暴露 TPS、P50/P95/P99 延遲、Queue 積壓、Raft term、Learner lag、**GC pause time、Account Queue depth per account** |
+| Prometheus 端點 | `/actuator/prometheus` — 所有 ledger 節點（8081-8083）與 projection（8089）暴露 metrics |
+| Prometheus Server | `http://localhost:9090` — scrape interval 15s，targets: ledger-node-1/2/3:8080, ledger-projection:8089 |
+| Grafana | `http://localhost:3000` — 預設 dashboard 含 Posting P95、Balance Query latency、Raft leader status、Queue depth、GC pause |
 | 告警（原有） | Posting P99 > 50ms、Queue 積壓 > 1000、Learner lag > 10s、L1 對帳失敗 → PagerDuty |
 | 告警（新增） | **任意單次 GC pause > 5ms → PagerDuty**；**BalanceChangeEvent accountSeq gap 偵測失敗 → PagerDuty**；**任意 accountSeq ≥ Long.MAX_VALUE × 80% → PagerDuty（理論預警，永遠不應觸發）** |
 | 日誌 | 結構化 JSON 日誌，帶 journalId、requestId、accountId、traceId |

@@ -126,7 +126,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"seed-company-001\",\n  \"businessEventType\": \"CAPITAL_INJECTION\",\n  \"businessEventRef\": \"SEED-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"CAPITAL\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100000.00\", \"description\": \"Seed capital\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"seed-company-001\",\n  \"businessEventType\": \"CAPITAL_INJECTION\",\n  \"businessEventRef\": \"SEED-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"CAPITAL\",\n    \"amount\": \"100000.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Seed capital\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -151,7 +151,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\", \"description\": \"Company funds\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\", \"description\": \"Client deposit\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"amount\": \"1000.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Company funds\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Client deposit\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -163,7 +163,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"WITHDRAWAL\",\n  \"businessEventRef\": \"WTH-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"WITHDRAWAL\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"300.00\", \"description\": \"Client withdrawal\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"300.00\", \"description\": \"Company receive\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"WITHDRAWAL\",\n  \"businessEventRef\": \"WTH-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"WITHDRAWAL\",\n    \"amount\": \"300.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Client withdrawal\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Company receive\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -175,7 +175,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"idem-test-001\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"10.00\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"10.00\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"idem-test-001\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"amount\": \"10.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -187,7 +187,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"UNBAL-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"99.00\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"UNBAL-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"amount\": \"100.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Test unbalanced - this will be rejected\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -199,7 +199,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"INSF-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"999999.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"999999.00\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"INSF-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"999999.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"999999.00\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
@@ -210,7 +210,7 @@
       "name": "Balance Query",
       "item": [
         {
-          "name": "Get Balance",
+          "name": "Get Balance (aggregated positions)",
           "request": {
             "method": "GET",
             "header": [],
@@ -220,6 +220,23 @@
               "query": [
                 { "key": "accountId", "value": "{{account_id}}" },
                 { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Balance by Position (single)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&position=CURRENT&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "position", "value": "CURRENT" },
                 { "key": "currency", "value": "USD" }
               ]
             }
@@ -281,7 +298,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "[\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" },\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"HKD\" },\n  { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n]"
+              "raw": "[\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" },\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"LOCKED\", \"currency\": \"USD\" },\n  { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" }\n]"
             },
             "url": { "raw": "{{base_url}}/ledger/balances/batch", "host": ["{{base_url}}"], "path": ["ledger", "balances", "batch"] }
           }
@@ -388,7 +405,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"makerId\": \"maker-001\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"ADJUSTMENT\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100.00\", \"description\": \"Adjustment credit\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\", \"description\": \"Adjustment debit\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"makerId\": \"maker-001\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"ADJUSTMENT\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100.00\", \"description\": \"Adjustment credit\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\", \"description\": \"Adjustment debit\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/adjustments/drafts", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts"] }
           }
@@ -574,7 +591,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"requestId\": \"flow-003\",\n  \"businessEventType\": \"TRANSFER\",\n  \"businessEventRef\": \"FLOW-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TRANSFER\",\n    \"lines\": [\n      { \"accountId\": \"BANK_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\" },\n      { \"accountId\": \"ALICE_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\" }\n    ]\n  }]\n}"
+              "raw": "{\n  \"requestId\": \"flow-003\",\n  \"businessEventType\": \"TRANSFER\",\n  \"businessEventRef\": \"FLOW-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TRANSFER\",\n    \"lines\": [\n      { \"accountId\": \"BANK_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\" },\n      { \"accountId\": \"ALICE_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\" }\n    ]\n  }]\n}"
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }

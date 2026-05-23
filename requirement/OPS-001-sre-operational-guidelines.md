@@ -12,6 +12,7 @@
 1. [RocksDB 壓實（Compaction）](#1-rocksdb-壓實compaction)
 2. [Raft 節點不同步復原](#2-raft-節點不同步復原)
 3. [MySQL View Layer 不同步復原](#3-mysql-view-layer-不同步復原)
+4. [Prometheus / Grafana 監控](#4-prometheus--grafana-監控)
 
 ---
 
@@ -468,6 +469,89 @@ kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
 | MySQL 複製（選配） | 部署 MySQL read replica 供報表查詢；primary 保留給 projection 寫入 |
 | Kafka retention | `retention.ms = 7 days` 最低；確保有足夠歷史進行重建 |
 | EOD 對帳 | L1 對帳（RocksDB vs MySQL）每晚執行；T+0 內發現偏離 |
+
+---
+
+## 4. Prometheus / Grafana 監控
+
+### 4.1 存取端點
+
+| 服務 | URL | 預設帳號 |
+|---|---|---|
+| Prometheus | http://localhost:9090 |無 |
+| Grafana | http://localhost:3000 | admin / admin123 |
+| Node 1 metrics | http://localhost:8081/actuator/prometheus | 無 |
+| Node 2 metrics | http://localhost:8082/actuator/prometheus | 網 |
+| Node 3 metrics | http://localhost:8083/actuator/prometheus | 網 |
+| Projection metrics | http://localhost:8089/actuator/prometheus | 網 |
+
+### 4.2 Prometheus Targets 狀態
+
+檢查所有 scrape targets 是否 UP：
+
+```bash
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job:.labels.job,health:.health}'
+```
+
+預期輸出：
+
+```
+{"job": "ledger-nodes", "health": "up"}
+{"job": "projection", "health": "up"}
+{"job": "prometheus", "health": "up"}
+```
+
+若 target 狀態為 `down`，檢查：
+
+- Docker container 是否運行：`docker ps`
+- Actuator endpoint 是否暴露：`curl http://ledger-node-1:8080/actuator/prometheus`
+- Prometheus config 載入正確：`docker exec ledger-prometheus cat /etc/prometheus/prometheus.yml`
+
+### 4.3 Grafana Dashboard
+
+預設 dashboard（`grafana/provisioning/dashboards/ledger-overview.json`）包含以下 panel：
+
+| Panel | Metrics | NFR 目標 |
+|---|---|---|
+| Posting P95 latency | `ledger_posting_duration_seconds{quantile="0.95"}` | ≤ 3ms |
+| Balance Query latency | `ledger_balance_query_duration_seconds{quantile="0.95",queryType="live"}` | ≤ 2ms |
+| Raft Leader status | `ledger_raft_is_leader` | 1 (single node = 1) |
+| Account Queue depth | `ledger_account_queue_depth` | < 500 |
+| GC Pause time | `jvm_gc_pause_seconds_max` | < 5ms |
+| Kafka consumer lag | `kafka_consumer_lag` | < 1000 |
+
+Dashboard JSON 配置見 `grafana/provisioning/dashboards/ledger-overview.json`。
+
+### 4.4 常用 PromQL 查詢
+
+```promql
+# Posting P95 近 5 分鐘
+histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m]))
+
+# Balance Query P95 (live)
+histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType="live"}[5m]))
+
+# 最大 GC pause 近 1 分鐘
+max(jvm_gc_pause_seconds_max)
+
+# Raft Leader 節點
+max_by (node_id) (ledger_raft_is_leader)
+
+# Account queue 最深的帳戶
+topk(5, ledger_account_queue_depth)
+```
+
+### 4.5 告警規則配置
+
+Prometheus AlertManager 霈配置以下規則（見 `prometheus/alert-rules.yml`）：
+
+| 告警名稱 |條件 | 嚴重程度 |
+|---|---|---|
+| PostingP95High | histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m])) > 0.003 | WARNING |
+| PostingP99Critical | histogram_quantile(0.99, rate(ledger_posting_duration_seconds_bucket[5m])) > 0.05 | CRITICAL |
+| GCPauseTooLong | jvm_gc_pause_seconds_max > 0.005 | CRITICAL |
+| QueueBacklogHigh | ledger_account_queue_depth > 500 | WARNING |
+| RaftFollowerLagHigh | max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index > 100 | WARNING |
 
 ---
 

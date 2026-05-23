@@ -144,6 +144,36 @@ services:
       - ledger-net
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ledger-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./jraft_ledger/prometheus:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - ledger-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ledger-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./jraft_ledger/grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - ledger-net
+
   projection:
     build:
       context: .

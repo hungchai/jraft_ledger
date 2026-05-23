@@ -1,10 +1,10 @@
 # F-002 v2 Posting API — Batch Atomic Posting（Raft 架構更新版）
 
-**文件版本**: v0.2（基於 ADR-001 更新）  
+**文件版本**: v0.4（新增 `position` 欄位至 JournalLine — 支援 CURRENT/LOCKED/FROZEN 子餘額類型）  
 **功能**: F-002 Posting API  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
-**變更摘要**: 寫路徑由 PostgreSQL 直寫改為 Raft State Machine，Balance 校驗由 DB 讀改為 in-memory 讀
+**變更摘要**: 寫路徑由 PostgreSQL 直寫改為 Raft State Machine，Balance 校驗由 DB 讀改為 in-memory 讀；v0.4 新增 `position` 欄位支援子餘額類型
 
 ---
 
@@ -41,7 +41,9 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 |---|---|---|---|
 | `legId` | `string` | ✅ | 本 leg 唯一 ID（由 caller 生成） |
 | `postingType` | `string` | ✅ | 過帳類型，如 `TRADE_SETTLEMENT`, `FEE`, `INTEREST` |
-| `lines` | `list<JournalLine>` | ✅ | 必須包含至少一對 DEBIT + CREDIT |
+| `amount` | `decimal` | ✅ | 本 leg 金額，必須 > 0；所有 lines 共用此金額 |
+| `currency` | `string` | ✅ | ISO 4217 幣種代碼；所有 lines 共用此幣種 |
+| `lines` | `list<JournalLine>` | ✅ | 必須包含至少一對 DEBIT + CREDIT，金額與幣種由 leg 統一指定 |
 
 ### 3.3 JournalLine 結構
 
@@ -49,9 +51,8 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 |---|---|---|---|
 | `accountId` | `string` | ✅ | 目標帳戶 |
 | `balanceType` | `string` | ✅ | 必須在 Balance Type Registry（F-001）中存在 |
-| `currency` | `string` | ✅ | ISO 4217 幣種代碼 |
+| `position` | `string` | ✅ | 子餘額位置：`CURRENT`（可用）、`LOCKED`（鎖定）、`FROZEN`（凍結） |
 | `entryType` | `enum` | ✅ | `DEBIT` / `CREDIT` |
-| `amount` | `decimal` | ✅ | 必須 > 0 |
 | `description` | `string` | ❌ | 分錄描述 |
 
 ### 3.4 RFQ 場景請求示例
@@ -66,21 +67,21 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
     {
       "legId": "leg-001",
       "postingType": "TRADE_SETTLEMENT",
+      "amount": 800000.00,
+      "currency": "USD",
       "lines": [
         {
           "accountId": "CLIENT_ACC_001",
           "balanceType": "AVAILABLE_BALANCE",
-          "currency": "USD",
+          "position": "CURRENT",
           "entryType": "DEBIT",
-          "amount": 800000.00,
           "description": "RFQ Client USD sell"
         },
         {
           "accountId": "COMPANY_FX_ACC",
           "balanceType": "AVAILABLE_BALANCE",
-          "currency": "USD",
+          "position": "CURRENT",
           "entryType": "CREDIT",
-          "amount": 800000.00,
           "description": "RFQ Company USD receive"
         }
       ]
@@ -88,26 +89,78 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
     {
       "legId": "leg-002",
       "postingType": "TRADE_SETTLEMENT",
+      "amount": 6240000.00,
+      "currency": "HKD",
       "lines": [
         {
           "accountId": "COMPANY_FX_ACC",
           "balanceType": "AVAILABLE_BALANCE",
-          "currency": "HKD",
+          "position": "CURRENT",
           "entryType": "DEBIT",
-          "amount": 6240000.00,
           "description": "RFQ Company HKD pay"
         },
         {
           "accountId": "CLIENT_ACC_001",
           "balanceType": "AVAILABLE_BALANCE",
-          "currency": "HKD",
+          "position": "CURRENT",
           "entryType": "CREDIT",
-          "amount": 6240000.00,
           "description": "RFQ Client HKD receive"
         }
       ]
     }
   ]
+}
+```
+
+### 3.5 子餘額位置範例
+
+`position` 欄位用於區分同一 `balanceType` 的不同子餘額狀態：
+
+| Position | 說明 | 使用場景 |
+|---|---|---|
+| `CURRENT` | 可用餘額 | 正常交易、提款、轉帳 |
+| `LOCKED` | 鎖定餘額 | 待結算交易、預授權 |
+| `FROZEN` | 凍結餘額 | 合規凍結、爭議處理 |
+
+**鎖定資金範例**（CURRENT → LOCKED）：
+
+```json
+{
+  "requestId": "req-lock-001",
+  "businessEventType": "LOCK",
+  "businessEventRef": "LOCK-001",
+  "valueDate": "2026-05-22",
+  "legs": [{
+    "legId": "leg-1",
+    "postingType": "LOCK",
+    "amount": "500.00",
+    "currency": "USD",
+    "lines": [
+      {"accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "entryType": "CREDIT", "description": "Lock funds"},
+      {"accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "LOCKED", "entryType": "DEBIT", "description": "Locked"}
+    ]
+  }]
+}
+```
+
+**解鎖資金範例**（LOCKED → CURRENT）：
+
+```json
+{
+  "requestId": "req-unlock-001",
+  "businessEventType": "UNLOCK",
+  "businessEventRef": "UNLOCK-001",
+  "valueDate": "2026-05-22",
+  "legs": [{
+    "legId": "leg-1",
+    "postingType": "UNLOCK",
+    "amount": "500.00",
+    "currency": "USD",
+    "lines": [
+      {"accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "LOCKED", "entryType": "CREDIT", "description": "Unlock funds"},
+      {"accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "entryType": "DEBIT", "description": "To available"}
+    ]
+  }]
 }
 ```
 
@@ -122,25 +175,27 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 | V-01 | `requestId` 格式合法 | `INVALID_REQUEST_ID` |
 | V-02 | `legs` 至少一條 | `LEGS_EMPTY` |
 | V-03 | 每條 leg 的所有 `balanceType` 必須在 Registry 中存在且為 ACTIVE | `BALANCE_TYPE_NOT_FOUND` |
-| V-04 | `amount` 必須 > 0 | `INVALID_AMOUNT` |
-| V-05 | 每條 leg 的 DEBIT 總額 = CREDIT 總額（按幣種） | `JOURNAL_UNBALANCED` |
+| V-04 | leg `amount` 必須 > 0 | `INVALID_AMOUNT` |
+| V-05 | 每條 leg 的 lines 數量 ≥ 2（至少一 DEBIT + 一 CREDIT） | `JOURNAL_UNBALANCED` |
+| V-06 | 每條 line 的 `position` 必須為 `CURRENT`、`LOCKED` 或 `FROZEN` | `INVALID_POSITION` |
 
 ### 4.2 冪等校驗（Account Worker，in-memory）
 
 | # | 規則 | 結果 |
 |---|---|---|
-| V-06 | `requestId` 已存在且 `COMPLETED`，直接返回原結果 | 冪等成功 |
-| V-07 | `requestId` 已存在且 `PROCESSING`，返回 `409 PROCESSING` | 等待重試 |
+| V-07 | `requestId` 已存在且 `COMPLETED`，直接返回原結果 | 冪等成功 |
+| V-08 | `requestId` 已存在且 `PROCESSING`，返回 `409 PROCESSING` | 等待重試 |
 
 ### 4.3 業務校驗（State Machine，in-memory balance）
 
 | # | 規則 | 錯誤碼 |
 |---|---|---|
-| V-08 | 每個涉及帳戶必須存在 | `ACCOUNT_NOT_FOUND` |
-| V-09 | 每個帳戶的對應 balanceType + currency 必須已初始化 | `BALANCE_NOT_INITIALIZED` |
-| V-10 | `allowNegative=false` 的 balance，DEBIT 後不得低於 0 | `INSUFFICIENT_BALANCE` |
-| V-11 | `allowNegative=true` 的 balance（如 TRADE_AHEAD_BALANCE），CREDIT 後不得高於 0 | `CREDIT_EXCEEDS_LIMIT` |
-| V-12 | 帳戶未被凍結（`account.status = ACTIVE`） | `ACCOUNT_FROZEN` |
+| V-09 | 每個涉及帳戶必須存在 | `ACCOUNT_NOT_FOUND` |
+| V-10 | 每個帳戶的對應 balanceType + position + currency 必須已初始化 | `BALANCE_NOT_INITIALIZED` |
+| V-11 | `allowNegative=false` 的 balance，DEBIT 後不得低於 0 | `INSUFFICIENT_BALANCE` |
+| V-12 | `allowNegative=true` 的 balance（如 TRADE_AHEAD_BALANCE），CREDIT 後不得高於 0 | `CREDIT_EXCEEDS_LIMIT` |
+| V-13 | `position = LOCKED` 或 `FROZEN` 的 balance，不允許負數餘額 | `LOCKED_BALANCE_CANNOT_BE_NEGATIVE` |
+| V-14 | 帳戶未被凍結（`account.status = ACTIVE`） | `ACCOUNT_FROZEN` |
 
 ---
 

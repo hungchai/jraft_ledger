@@ -12,7 +12,7 @@ COPY ledger-feign/pom.xml ledger-feign/pom.xml
 RUN mvn dependency:go-offline -pl ledger-restful -am -q || true
 
 COPY . .
-RUN mvn package -pl ledger-restful -am -DskipTests -q
+RUN mvn package -pl ledger-restful -am -Dmaven.test.skip=true -q
 
 # ── Runtime Stage (non-Alpine for RocksDB glibc compat) ─────
 FROM amazoncorretto:21
@@ -34,8 +34,11 @@ HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["java", \
-    "-XX:+UseG1GC", \
-    "-XX:MaxGCPauseMillis=10", \
+    "-XX:+UseZGC", \
+    "-XX:MaxGCPauseMillis=1", \
     "-Xms2g", "-Xmx2g", \
     "-Xlog:gc*:file=/var/log/ledger/gc.log:time,uptime:filecount=10,filesize=50m", \
+    "-Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info", \
+    "-Dmanagement.metrics.export.prometheus.enabled=true", \
+    "-Dserver.shutdown.grace-period=30s", \
     "-jar", "/app/ledger-restful.jar"]

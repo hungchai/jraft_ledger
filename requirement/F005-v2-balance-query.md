@@ -1,10 +1,10 @@
 # F-005 v2 Balance Query & Snapshot（Raft 架構更新版）
 
-**文件版本**: v0.2（基於 ADR-001 更新）  
+**文件版本**: v0.3（新增 `position` 欄位 — CURRENT/LOCKED/FROZEN 子餘額）  
 **功能**: F-005 Balance Query & Snapshot  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
-**變更摘要**: 實時 Balance 查詢路徑由 MySQL 改為 in-memory State Machine；快照機制維持不變，由 Learner 寫 MySQL
+**變更摘要**: 實時 Balance 查詢路徑由 MySQL 改為 in-memory State Machine；v0.3 新增 `position` 欄位支援子餘額追蹤（CURRENT/LOCKED/FROZEN）
 
 ---
 
@@ -40,64 +40,74 @@ Client → Ledger Service（Leader 節點）
 
 **重要**：Balance 查詢必須路由到 **Raft Leader 節點**，讀 Follower 可能得到舊數據。
 
-### 2.2 API（不變）
+### 2.2 API
 
 ```
-GET /ledger/accounts/{accountId}/balances
-    ?types=AVAILABLE_BALANCE,TRADE_AHEAD_BALANCE
-    &currency=USD
+GET /ledger/balances
+    ?accountId={accountId}
+    &balanceType={balanceType}
+    &currency={currency}
+    [&position={position}]     // 可選：CURRENT, LOCKED, FROZEN
 ```
 
-### 2.3 Response 新增欄位
+**查詢類型：**
+- **不帶 position 參數**：返回所有 position 的匯總餘額
+- **帶 position 參數**：返回單一 position 餘額
+
+### 2.3 Response 結構
+
+**匯總查詢（無 position 參數）：**
 
 ```json
 {
   "accountId": "CLIENT_ACC_001",
+  "balanceType": "BROKERAGE_BALANCE",
   "currency": "USD",
-  "queryTime": "2026-05-16T10:35:00.000Z",
-  "isRealtime": true,
-  "dataSource": "STATE_MACHINE",
-  "raftLeaderId": "node-001",
-  "balances": [
-    {
-      "typeCode": "AVAILABLE_BALANCE",
-      "amount": 200000.00,
-      "allowNegative": false,
-      "configVersion": 3,
-      "lastJournalId": "JNL-20260516-000012345",
-      "stateVersion": 1024
-    },
-    {
-      "typeCode": "TRADE_AHEAD_BALANCE",
-      "amount": -45000.00,
-      "allowNegative": true,
-      "negativeSemantics": "PRE_AUTHORIZED",
-      "configVersion": 1,
-      "stateVersion": 987
-    }
-  ]
+  "amount": 250000.00,
+  "positions": {
+    "CURRENT": 200000.00,
+    "LOCKED": 50000.00,
+    "FROZEN": 0.00
+  },
+  "allowNegative": false,
+  "dataSource": "STATE_MACHINE"
 }
 ```
 
-新增欄位說明：
-- `dataSource`：`STATE_MACHINE`（in-memory）/ `EOD_SNAPSHOT` / `JOURNAL_REPLAY`
-- `raftLeaderId`：返回當前 Leader 節點 ID，便於診斷
-- `stateVersion`：State Machine 的版本號（即 Raft Log Index），便於追蹤
+**單一 Position 查詢（帶 position 參數）：**
+
+```json
+{
+  "accountId": "CLIENT_ACC_001",
+  "balanceType": "BROKERAGE_BALANCE",
+  "currency": "USD",
+  "amount": 50000.00,
+  "positions": {
+    "LOCKED": 50000.00
+  },
+  "allowNegative": false,
+  "dataSource": "STATE_MACHINE"
+}
+```
 
 ---
 
-## 3. 批量 Balance 查詢（不變，性能大幅提升）
+## 3. 批量 Balance 查詢
 
 ```
-POST /ledger/accounts/balances/batch
+POST /ledger/balances/batch
+Body: [
+  { "accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "currency": "USD" },
+  { "accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "LOCKED", "currency": "USD" }
+]
 ```
 
-因為讀取 in-memory State Machine，批量查詢性能大幅提升：
+**注意**：批量查詢的每個 key 必須包含 `position` 欄位。
 
-| 指標 | v0.1（MySQL） | v0.2（State Machine） |
-|---|---|---|
-| 100 帳戶批量查詢 P95 | 50ms | ≤ 5ms |
-| 200 帳戶批量查詢 P95 | 100ms | ≤ 10ms |
+| 指標 | v0.2（State Machine） |
+|---|---|
+| 100 帳戶批量查詢 P95 | ≤ 5ms |
+| 200 帳戶批量查詢 P95 | ≤ 10ms |
 
 ---
 
@@ -105,7 +115,7 @@ POST /ledger/accounts/balances/batch
 
 ```java
 // In-memory State Machine 的 Balance 儲存結構
-// Key: AccountKey = (accountId, balanceType, currency)
+// Key: AccountBalanceKey = (accountId, balanceType, position, currency)
 // Value: BalanceEntry
 
 class BalanceEntry {
@@ -115,10 +125,15 @@ class BalanceEntry {
     Instant lastUpdatedAt;    // 最後更新時間
 }
 
-ConcurrentHashMap<AccountKey, BalanceEntry> balanceStore;
+ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
 ```
 
-**讀取是無鎖的**（Account Worker 寫，讀端只做快照讀），在 Java 21 下 ConcurrentHashMap 讀操作基本無競爭。
+**Position 類型：**
+- `CURRENT` — 可用餘額
+- `LOCKED` — 鎖定餘額（如待結算交易）
+- `FROZEN` — 凍結餘額（如合規凍結）
+
+**注意**：LOCKED 和 FROZEN position 不允許負數餘額（在 State Machine 層強制）。
 
 ---
 

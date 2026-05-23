@@ -1,10 +1,10 @@
 # F-005 v2 Balance Query & Snapshot (Raft Architecture Update)
 
-**Document Version**: v0.2 (Updated based on ADR-001)  
+**Document Version**: v0.3 (Updated for `position` field — CURRENT/LOCKED/FROZEN sub-balances)  
 **Feature**: F-005 Balance Query & Snapshot  
 **System**: Next-Gen Internal Ledger Platform  
 **Status**: Draft for Review  
-**Change Summary**: Real-time balance query path changed from MySQL to in-memory State Machine; snapshot mechanism remains unchanged, written to MySQL by Learner
+**Change Summary**: Real-time balance query path changed from MySQL to in-memory State Machine; v0.3 adds `position` field for sub-balance tracking (CURRENT/LOCKED/FROZEN)
 
 ---
 
@@ -40,64 +40,74 @@ Client → Ledger Service (Leader node)
 
 **Important**: Balance queries must be routed to the **Raft Leader node**; reading from a Follower may return stale data.
 
-### 2.2 API (Unchanged)
+### 2.2 API
 
 ```
-GET /ledger/accounts/{accountId}/balances
-    ?types=AVAILABLE_BALANCE,TRADE_AHEAD_BALANCE
-    &currency=USD
+GET /ledger/balances
+    ?accountId={accountId}
+    &balanceType={balanceType}
+    &currency={currency}
+    [&position={position}]     // Optional: CURRENT, LOCKED, FROZEN
 ```
 
-### 2.3 Response New Fields
+**Query Types:**
+- **Without position param**: Returns aggregated balance across all positions
+- **With position param**: Returns single position balance
+
+### 2.3 Response Structure
+
+**Aggregated Response (no position param):**
 
 ```json
 {
   "accountId": "CLIENT_ACC_001",
+  "balanceType": "BROKERAGE_BALANCE",
   "currency": "USD",
-  "queryTime": "2026-05-16T10:35:00.000Z",
-  "isRealtime": true,
-  "dataSource": "STATE_MACHINE",
-  "raftLeaderId": "node-001",
-  "balances": [
-    {
-      "typeCode": "AVAILABLE_BALANCE",
-      "amount": 200000.00,
-      "allowNegative": false,
-      "configVersion": 3,
-      "lastJournalId": "JNL-20260516-000012345",
-      "stateVersion": 1024
-    },
-    {
-      "typeCode": "TRADE_AHEAD_BALANCE",
-      "amount": -45000.00,
-      "allowNegative": true,
-      "negativeSemantics": "PRE_AUTHORIZED",
-      "configVersion": 1,
-      "stateVersion": 987
-    }
-  ]
+  "amount": 250000.00,
+  "positions": {
+    "CURRENT": 200000.00,
+    "LOCKED": 50000.00,
+    "FROZEN": 0.00
+  },
+  "allowNegative": false,
+  "dataSource": "STATE_MACHINE"
 }
 ```
 
-New field descriptions:
-- `dataSource`: `STATE_MACHINE` (in-memory) / `EOD_SNAPSHOT` / `JOURNAL_REPLAY`
-- `raftLeaderId`: Returns the current Leader node ID, for diagnostic purposes
-- `stateVersion`: State Machine version number (i.e. Raft Log Index), for tracking
+**Single Position Response (with position param):**
+
+```json
+{
+  "accountId": "CLIENT_ACC_001",
+  "balanceType": "BROKERAGE_BALANCE",
+  "currency": "USD",
+  "amount": 50000.00,
+  "positions": {
+    "LOCKED": 50000.00
+  },
+  "allowNegative": false,
+  "dataSource": "STATE_MACHINE"
+}
+```
 
 ---
 
-## 3. Batch Balance Query (Unchanged, Performance Significantly Improved)
+## 3. Batch Balance Query
 
 ```
-POST /ledger/accounts/balances/batch
+POST /ledger/balances/batch
+Body: [
+  { "accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "CURRENT", "currency": "USD" },
+  { "accountId": "A", "balanceType": "BROKERAGE_BALANCE", "position": "LOCKED", "currency": "USD" }
+]
 ```
 
-Because reads are from the in-memory State Machine, batch query performance is significantly improved:
+**Note**: Batch query requires `position` field for each key.
 
-| Metric | v0.1 (MySQL) | v0.2 (State Machine) |
-|---|---|---|
-| 100-account batch query P95 | 50ms | ≤ 5ms |
-| 200-account batch query P95 | 100ms | ≤ 10ms |
+| Metric | v0.2 (State Machine) |
+|---|---|
+| 100-account batch query P95 | ≤ 5ms |
+| 200-account batch query P95 | ≤ 10ms |
 
 ---
 
@@ -105,20 +115,25 @@ Because reads are from the in-memory State Machine, batch query performance is s
 
 ```java
 // In-memory State Machine balance storage structure
-// Key: AccountKey = (accountId, balanceType, currency)
+// Key: AccountBalanceKey = (accountId, balanceType, position, currency)
 // Value: BalanceEntry
 
 class BalanceEntry {
-    BigDecimal amount;        // Current balance
+    BigDecimal amount;        // Current balance for this position
     long stateVersion;        // Corresponding Raft Log Index
     String lastJournalId;     // Last Journal ID
     Instant lastUpdatedAt;    // Last update time
 }
 
-ConcurrentHashMap<AccountKey, BalanceEntry> balanceStore;
+ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
 ```
 
-**Reads are lock-free** (Account Worker writes; readers perform snapshot reads only). Under Java 21, ConcurrentHashMap read operations are essentially contention-free.
+**Positions:**
+- `CURRENT` — Available for use
+- `LOCKED` — Held/pending (e.g., unsettled trades)
+- `FROZEN` — Suspended (e.g., compliance holds)
+
+**Note**: LOCKED and FROZEN positions cannot go negative (enforced at State Machine level).
 
 ---
 

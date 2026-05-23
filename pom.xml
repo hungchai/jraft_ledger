@@ -54,6 +54,9 @@
 
         <!-- Misc -->
         <protobuf.version>3.25.5</protobuf.version>
+
+        <!-- sofa-common-tools override: SOFAJRaft 1.3.15 pulls 1.0.12 which is incompatible with logback 1.5.x -->
+        <sofa.common.tools.version>2.1.1</sofa.common.tools.version>
     </properties>
 
     <dependencyManagement>
@@ -86,6 +89,13 @@
                 <groupId>com.alipay.sofa</groupId>
                 <artifactId>jraft-core</artifactId>
                 <version>${sofa.jraft.version}</version>
+            </dependency>
+
+            <!-- sofa-common-tools override: logback 1.5.x compatibility -->
+            <dependency>
+                <groupId>com.alipay.sofa.common</groupId>
+                <artifactId>sofa-common-tools</artifactId>
+                <version>${sofa.common.tools.version}</version>
             </dependency>
 
             <!-- RocksDB -->

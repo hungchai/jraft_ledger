@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## Technical Requirements Specification (Full Document)
 
-**Version**: v0.1  
-**Date**: 2026-05-16  
+**Version**: v0.2  
+**Date**: 2026-05-22  
 **Status**: Draft for Review  
 **System**: Next-Gen Internal Ledger Platform  
 **Positioning**: iBank core ledger foundation, supporting multi-entity, multi-product, multi-currency, multi-ledger double-entry bookkeeping
@@ -19,6 +19,13 @@ This document contains the complete technical requirements specification for the
 - **Synchronous atomic booking to prevent duplicate payouts**
 - **High performance for hotspot accounts (COMPANY_ACC RFQ scenario)**
 - **Traceable, reconcilable, and auditable**
+
+### Revision History
+
+| Version | Date | Changes | Author |
+|---|---|---|---|
+| v0.1 | 2026-05-16 | Initial draft | Ledger Platform Team |
+| v0.2 | 2026-05-22 | ADR-001 Section 2.2: Added sofa-common-tools version compatibility note (resolves Spring Boot 3.4.4 + SOFAJRaft 1.3.15 logback conflict) | Ledger Platform Team |
 
 ---
 
@@ -174,6 +181,12 @@ Adopt **SOFAJRaft** (Ant Group / Alibaba open source), rationale:
 - Supports Multi-Raft-Group, enabling horizontal scaling by account grouping
 - Production validated (same tech stack as Ant Financial)
 - Supports Learner role, suitable for CQRS read-write separation
+
+**Dependency Version Management**:
+- SOFAJRaft 1.3.15 depends on sofa-common-tools for log initialization
+- sofa-common-tools 1.0.12 (SOFAJRaft default) is incompatible with Spring Boot 3.4.4's logback 1.5.x
+- **Solution**: Override sofa-common-tools to 2.1.1+ in `pom.xml` `dependencyManagement`
+- sofa-common-tools 2.1.1 supports logback 1.5.x, removes call to `ContextInitializer.configureByResource(URL)`
 
 ### 2.3 Overall Architecture
 

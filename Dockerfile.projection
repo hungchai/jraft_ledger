@@ -14,4 +14,10 @@ RUN groupadd -r ledger && useradd -r -g ledger ledger
 COPY --from=build /build/ledger-projection/target/ledger-projection-*.jar /app/projection.jar
 USER ledger
 EXPOSE 8089
-ENTRYPOINT ["java", "-Xms1g", "-Xmx1g", "-jar", "/app/projection.jar"]
+ENTRYPOINT ["java", \
+    "-XX:+UseZGC", \
+    "-XX:MaxGCPauseMillis=1", \
+    "-Xms1g", "-Xmx1g", \
+    "-Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info", \
+    "-Dmanagement.metrics.export.prometheus.enabled=true", \
+    "-jar", "/app/projection.jar"]
