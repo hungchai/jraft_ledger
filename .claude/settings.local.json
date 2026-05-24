@@ -77,7 +77,19 @@
       "Bash(sed -i '' '446s/local //' scripts/stress-test.sh)",
       "Bash(sed -i '' '500s/local //' scripts/stress-test.sh)",
       "Bash(sed -i '' '547,550s/local //' scripts/stress-test.sh)",
-      "Bash(sed -i '' '578,580s/local //' scripts/stress-test.sh)"
+      "Bash(sed -i '' '578,580s/local //' scripts/stress-test.sh)",
+      "Bash(claude --print --agent ledger-requirements -p \"list files in current directory\")",
+      "Bash(curl *)",
+      "Bash(claude *)",
+      "Bash(pip list *)",
+      "Bash(com.sun.net.httpserver.HttpServer)",
+      "Bash(LeaderDiscoveryClient)",
+      "Bash(LedgerHttpTransport)",
+      "Bash(currency=USD > /dev/null)",
+      "Bash(java *)"
     ]
+  },
+  "worktree": {
+    "bgIsolation": "none"
   }
 }

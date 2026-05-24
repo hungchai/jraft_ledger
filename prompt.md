@@ -31,5 +31,6 @@ the folder structure
 2. one module for service
 3. one module for restful 
 4. one module for OpenFeign 
+5. one module for performance test
 
 use maven
