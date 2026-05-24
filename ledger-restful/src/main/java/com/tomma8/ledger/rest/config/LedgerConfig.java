@@ -15,11 +15,16 @@ import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.config.MeterFilter;
+import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import java.io.File;
+import java.time.Duration;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.actuate.autoconfigure.metrics.MeterRegistryCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -28,6 +33,24 @@ import org.springframework.context.annotation.Profile;
 public class LedgerConfig {
 
     private static final Logger log = LoggerFactory.getLogger(LedgerConfig.class);
+
+    @Bean
+    public MeterRegistryCustomizer<MeterRegistry> ledgerMetricsCustomizer() {
+        return registry -> registry.config().meterFilter(new MeterFilter() {
+            @Override
+            public DistributionStatisticConfig configure(io.micrometer.core.instrument.Meter.Id id, DistributionStatisticConfig config) {
+                if (id.getName().startsWith("ledger.")) {
+                    return DistributionStatisticConfig.builder()
+                            .percentilesHistogram(true)
+                            .minimumExpectedValue(1.0)
+                            .maximumExpectedValue(10000.0)
+                            .build()
+                            .merge(config);
+                }
+                return config;
+            }
+        });
+    }
 
     @Bean
     public NodeRole nodeRole(org.springframework.core.env.Environment env) {
