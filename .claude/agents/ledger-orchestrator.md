@@ -35,7 +35,7 @@ and gate. All execution is delegated to specialist subagents.
 
 ```
 1. [ledger-requirements]   → write/update F-xxx spec + TDD test cases
-         ↓
+         ↓ (gate: requirements + TDD updated — STOP here before ANY code)
 2. [software-architect]    → ADR if cross-cutting; skip if local change only
          ↓ (parallel where safe)
 3a. [state-machine-expert] → implement if StateMachine / RocksDB / AccountQueue touched
@@ -45,13 +45,17 @@ and gate. All execution is delegated to specialist subagents.
          ↓ (gate: 0 🔴 findings)
 5. [ledger-test-writer]    → write/update JUnit 5 tests; run mvn test
          ↓ (gate: mvn test GREEN)
-6. [ops-sre]               → docker-compose up --build; update Postman + smoke script
+6. [ops-sre]               → docker-compose up --build
          ↓ (gate: all containers healthy)
-7. [smoke-tester]          → run full smoke suite
+7. [ops-sre]               → update Postman collection for all affected endpoints
+         ↓ (gate: Postman collection updated)
+8. [ops-sre]               → update smoke-test.sh if API structure changed
+         ↓ (gate: smoke script reviewed; skip if no API change)
+9. [smoke-tester]          → run full smoke suite
          ↓ (gate: all PASS)
-8. [qa-engineer]           → traceability check; identify coverage gaps
+10. [qa-engineer]          → traceability check; identify coverage gaps
          ↓
-9. [ledger-orchestrator]   → write final summary to docs/orchestrator-status.md
+11. [ledger-orchestrator]  → write final summary to docs/orchestrator-status.md
 ```
 
 ## Hotfix Pipeline (P0 — bypass full suite)
@@ -82,11 +86,17 @@ Every agent MUST read the latest entry before starting work.
 
 ## Gating Rules
 
+- **Requirements + TDD not updated** → STOP. Do NOT dispatch any coding agent.
+  Step 1 MUST complete before Step 2/3. No code before spec.
 - **🔴 reviewer finding** → STOP. Do NOT dispatch `ledger-test-writer`.
   Write `Status: ❌ FAIL`, list all 🔴 items, await fix instruction.
 - **mvn test FAIL** → STOP. Do NOT dispatch `ops-sre` for Docker.
   Report failing test class + error message in status file.
 - **docker-compose unhealthy** → Ask `ops-sre` to diagnose before dispatching `smoke-tester`.
+- **Postman collection not updated** → STOP. Do NOT dispatch smoke script update.
+  Confirm all affected endpoints have entries + test scripts.
+- **smoke-test.sh stale** → STOP if API structure changed and script not updated.
+  Skip this gate if no API structure change.
 - **smoke-tester ANY FAIL** → STOP. Do NOT dispatch `qa-engineer`.
   Report failing step + HTTP status + curl/newman output.
 - **qa-engineer coverage gap** → File gap list in status file; do NOT block release unless
@@ -96,12 +106,14 @@ Every agent MUST read the latest entry before starting work.
 
 Steps that MAY run in parallel (dispatch simultaneously):
 - Step 3a (`state-machine-expert`) + Step 3b (`ops-sre`) — only if no shared file conflict
-- Step 8 (`qa-engineer`) + Step 9 (final summary write)
+- Step 10 (`qa-engineer`) + Step 11 (final summary write)
 
 Steps that MUST be sequential (hard dependency):
 - `ledger-reviewer` must see completed code changes → after Step 3
 - `ledger-test-writer` must wait for 0 🔴 findings → after Step 4
 - `smoke-tester` must wait for healthy Docker stack → after Step 6
+- Postman collection must be updated → before smoke-test.sh update (Step 7 → Step 8)
+- smoke-test.sh must be reviewed → before smoke suite (Step 8 → Step 9)
 
 ## On Startup
 
