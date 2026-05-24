@@ -94,7 +94,7 @@ class ProjectionIntegrationTest {
                 "CONFIRMED", false, java.time.LocalDateTime.now());
 
         journalMapper.insertJournalLine(id2, "JNL-PROJ-001-01", "JNL-PROJ-001", "leg-1",
-                "ACC_001", "AVAILABLE_BALANCE", "USD", "DEBIT",
+                "ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD", "DEBIT",
                 new BigDecimal("100.00"), new BigDecimal("1000.00"),
                 new BigDecimal("900.00"), 1, java.time.LocalDateTime.now());
 

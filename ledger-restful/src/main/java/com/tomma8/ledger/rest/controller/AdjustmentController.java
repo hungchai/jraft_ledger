@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.controller;
 
+import com.tomma8.ledger.domain.command.AdjustmentCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.AdjustmentDraft;
@@ -7,6 +8,7 @@ import com.tomma8.ledger.domain.model.EntryType;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.AdjustmentService;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -14,6 +16,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/ledger/adjustments")
@@ -22,64 +25,99 @@ public class AdjustmentController {
     private final AdjustmentService adjustmentService;
     private final RaftNodeManager raftNodeManager;
     private final NodeRole nodeRole;
+    private final MeterRegistry meterRegistry;
 
     public AdjustmentController(AdjustmentService adjustmentService,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
-                                 NodeRole nodeRole) {
+                                 NodeRole nodeRole,
+                                 MeterRegistry meterRegistry) {
         this.adjustmentService = adjustmentService;
         this.raftNodeManager = raftNodeManager;
         this.nodeRole = nodeRole;
+        this.meterRegistry = meterRegistry;
     }
 
     @PostMapping("/drafts")
     public ResponseEntity<?> createDraft(@RequestBody Map<String, Object> body) {
-        String requestId = (String) body.get("requestId");
-        String makerId = (String) body.get("makerId");
-
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> legMaps = (List<Map<String, Object>>) body.get("legs");
-        List<PostingCommand.Leg> legs = parseLegs(legMaps);
-
-        PostingCommand cmd = new PostingCommand(requestId, "MANUAL_ADJUSTMENT",
-                "ADJ-" + requestId, LocalDate.now(), legs);
-
+        long start = System.nanoTime();
+        String outcome = "COMPLETED";
         try {
-            AdjustmentDraft draft = adjustmentService.createDraft(cmd, makerId);
-            return ResponseEntity.ok(draft);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            String requestId = (String) body.get("requestId");
+            String makerId = (String) body.get("makerId");
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> legMaps = (List<Map<String, Object>>) body.get("legs");
+            List<PostingCommand.Leg> legs = parseLegs(legMaps);
+
+            PostingCommand cmd = new PostingCommand(requestId, "MANUAL_ADJUSTMENT",
+                    "ADJ-" + requestId, LocalDate.now(), legs);
+
+            try {
+                AdjustmentDraft draft = adjustmentService.createDraft(cmd, makerId);
+                return ResponseEntity.ok(draft);
+            } catch (IllegalArgumentException e) {
+                outcome = "REJECTED";
+                return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            }
+        } catch (Exception e) {
+            outcome = "ERROR";
+            throw e;
+        } finally {
+            meterRegistry.timer("ledger.adjustment.duration",
+                            "outcome", outcome,
+                            "operation", "create-draft")
+                    .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
         }
     }
 
     @PostMapping("/drafts/{draftId}/approve")
     public ResponseEntity<?> approve(@PathVariable String draftId, @RequestBody Map<String, String> body) {
-        if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
-                    "leaderHint", leader
-            ));
-        }
+        long start = System.nanoTime();
+        String outcome = "COMPLETED";
+        try {
+            if (!nodeRole.isLeader()) {
+                outcome = "REJECTED";
+                String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
+                return ResponseEntity.status(503).body(Map.of(
+                        "status", "REJECTED",
+                        "errorCodes", List.of("NOT_LEADER"),
+                        "leaderHint", leader
+                ));
+            }
 
-        String checkerId = body.get("checkerId");
-        String approveRequestId = body.get("approveRequestId");
+            String checkerId = body.get("checkerId");
+            String approveRequestId = body.get("approveRequestId");
 
-        // Local validation (draft existence, maker-checker, expiry, status)
-        PostingCommand cmd = adjustmentService.validateDraftForApproval(draftId, checkerId);
+            PostingCommand postingCmd = adjustmentService.validateDraftForApproval(draftId, checkerId);
+            AdjustmentCommand adjCmd = new AdjustmentCommand(
+                    postingCmd.requestId(), postingCmd.businessEventType(), postingCmd.businessEventRef(),
+                    postingCmd.valueDate(), postingCmd.legs(), "MANUAL_ADJUSTMENT", draftId);
 
-        // Execute via Raft (or direct in standalone mode)
-        CommandResult result;
-        if (raftNodeManager != null) {
-            result = raftNodeManager.submit(cmd);
-        } else {
-            result = adjustmentService.approveDraft(draftId, checkerId, approveRequestId);
-            // approveDraft already records the result; avoid double record
+            CommandResult result;
+            if (raftNodeManager != null) {
+                result = raftNodeManager.submit(adjCmd);
+            } else {
+                result = adjustmentService.approveDraft(draftId, checkerId, approveRequestId);
+                adjustmentService.recordApproveResult(draftId, approveRequestId, result);
+                return ResponseEntity.ok(result);
+            }
+
+            adjustmentService.recordApproveResult(draftId, approveRequestId, result);
+
+            if (result.isRejected()) {
+                outcome = "REJECTED";
+                return ResponseEntity.badRequest().body(result);
+            }
             return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            outcome = "ERROR";
+            throw e;
+        } finally {
+            meterRegistry.timer("ledger.adjustment.duration",
+                            "outcome", outcome,
+                            "operation", "approve")
+                    .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
         }
-
-        adjustmentService.recordApproveResult(draftId, approveRequestId, result);
-        return ResponseEntity.ok(result);
     }
 
     @PostMapping("/drafts/{draftId}/reject")
