@@ -1,0 +1,46 @@
+{
+  "proxies": [
+    {
+      "name": "ledger-1-http",
+      "listen": "0.0.0.0:9081",
+      "upstream": "ledger-1:8081",
+      "enabled": true,
+      "toxics": []
+    },
+    {
+      "name": "ledger-2-http",
+      "listen": "0.0.0.0:9082",
+      "upstream": "ledger-2:8082",
+      "enabled": true,
+      "toxics": []
+    },
+    {
+      "name": "ledger-3-http",
+      "listen": "0.0.0.0:9083",
+      "upstream": "ledger-3:8083",
+      "enabled": true,
+      "toxics": []
+    },
+    {
+      "name": "ledger-1-raft",
+      "listen": "0.0.0.0:29081",
+      "upstream": "ledger-1:28080",
+      "enabled": true,
+      "toxics": []
+    },
+    {
+      "name": "ledger-2-raft",
+      "listen": "0.0.0.0:29082",
+      "upstream": "ledger-2:28080",
+      "enabled": true,
+      "toxics": []
+    },
+    {
+      "name": "ledger-3-raft",
+      "listen": "0.0.0.0:29083",
+      "upstream": "ledger-3:28080",
+      "enabled": true,
+      "toxics": []
+    }
+  ]
+}
