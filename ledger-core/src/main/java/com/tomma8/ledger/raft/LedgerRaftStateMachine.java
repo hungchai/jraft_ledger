@@ -13,6 +13,7 @@ import com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand;
 import com.tomma8.ledger.domain.command.AccountCloseCommand;
 import com.tomma8.ledger.domain.command.AccountCreateCommand;
 import com.tomma8.ledger.domain.command.AccountFreezeCommand;
+import com.tomma8.ledger.domain.command.AdjustmentCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.command.RaftCommand;
@@ -130,6 +131,9 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     }
 
     private CommandResult executeCommand(RaftCommand cmd) {
+        if (cmd instanceof AdjustmentCommand a) {
+            return ledgerStateMachine.applyAdjustment(a);
+        }
         if (cmd instanceof PostingCommand p) {
             return ledgerStateMachine.applyPosting(p);
         }

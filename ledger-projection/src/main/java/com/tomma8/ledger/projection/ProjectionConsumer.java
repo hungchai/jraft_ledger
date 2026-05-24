@@ -72,6 +72,7 @@ public class ProjectionConsumer {
             String commandType    = event.get("commandType").asText();
             String accountId      = event.get("accountId").asText();
             String balanceType    = event.get("balanceType").asText();
+            String position       = event.has("position") ? event.get("position").asText() : "CURRENT";
             String currency       = event.get("currency").asText();
             String entryType      = event.get("entryType").asText();
             BigDecimal amount     = toBigDecimal(event.get("amount"));
@@ -98,7 +99,7 @@ public class ProjectionConsumer {
                 journalMapper.insertJournalLine(
                         idGenerator.nextId(),
                         journalLineId, journalId, "",
-                        accountId, balanceType, currency, entryType,
+                        accountId, balanceType, position, currency, entryType,
                         amount, preBalance, postBalance, 1, LocalDateTime.now());
             } catch (Exception e) {
                 log.debug("JournalLine {} already exists", journalLineId);
@@ -107,9 +108,9 @@ public class ProjectionConsumer {
             // Upsert account balance
             try {
                 accountBalanceMapper.upsertBalance(
-                        accountId, balanceType, currency, postBalance, accountSeq, journalId);
+                        accountId, balanceType, position, currency, postBalance, accountSeq, journalId);
             } catch (Exception e) {
-                log.error("Failed to upsert balance for {} {} {}", accountId, balanceType, currency, e);
+                log.error("Failed to upsert balance for {} {} {} {}", accountId, balanceType, position, currency, e);
             }
 
             log.info("Projected: {} {} {} {} seq={} balance={}", journalId, accountId, entryType, amount, accountSeq, postBalance);

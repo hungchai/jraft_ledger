@@ -25,6 +25,9 @@ import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+import org.rocksdb.WriteBatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,13 +46,7 @@ public class LedgerStateMachine {
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
-
-    // Reusable collections to avoid per-posting allocation on the hot path
-    private final List<LineWithLeg> reusableLines = new ArrayList<>(64);
-    private final Set<String> reusableAccountSet = new HashSet<>(16);
-    private final Map<AccountBalanceKey, BigDecimal> reusableAfterBalances = new HashMap<>(64);
-    private final List<JournalLine> reusableJournalLines = new ArrayList<>(64);
-    private final List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
+    private final ConcurrentHashMap<String, ReentrantLock> accountLocks = new ConcurrentHashMap<>();
 
     private LedgerEventListener eventListener;
     private RocksDBManager rocksDB;
@@ -69,6 +66,60 @@ public class LedgerStateMachine {
             try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
         }
     }
+
+    private CommandResult withAccountLocks(Set<String> accountIds, Supplier<CommandResult> action) {
+        List<String> sorted = new ArrayList<>(accountIds);
+        Collections.sort(sorted);
+        List<ReentrantLock> locks = sorted.stream()
+                .map(id -> accountLocks.computeIfAbsent(id, k -> new ReentrantLock()))
+                .toList();
+        locks.forEach(ReentrantLock::lock);
+        try {
+            return action.get();
+        } finally {
+            for (int i = locks.size() - 1; i >= 0; i--) {
+                locks.get(i).unlock();
+            }
+        }
+    }
+
+    private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
+        if (rocksDB == null) return;
+        try {
+            WriteBatch batch = new WriteBatch();
+            // Journal
+            batch.put(rocksDB.getHandle("journal"),
+                    journal.journalId().getBytes(StandardCharsets.UTF_8),
+                    objectMapper.writeValueAsBytes(journal));
+            // JournalLines
+            for (var line : journal.lines()) {
+                batch.put(rocksDB.getHandle("journal_line"),
+                        (line.journalId() + "#" + line.journalLineId()).getBytes(StandardCharsets.UTF_8),
+                        objectMapper.writeValueAsBytes(line));
+            }
+            // Balances
+            for (var entry : balanceUpdates.entrySet()) {
+                AccountBalanceKey key = entry.getKey();
+                String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
+                batch.put(rocksDB.getHandle("balance"),
+                        keyStr.getBytes(StandardCharsets.UTF_8),
+                        objectMapper.writeValueAsBytes(entry.getValue()));
+            }
+            // Idempotency
+            batch.put(rocksDB.getHandle("idempotency"),
+                    idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8),
+                    objectMapper.writeValueAsBytes(idempotencyEntry));
+            // Outbox
+            if (outboxStore != null) {
+                outboxStore.flush();
+            }
+            rocksDB.write(batch);
+        } catch (Exception e) {
+            log.error("RocksDB apply persistence failed", e);
+            throw new RuntimeException("RocksDB apply persistence failed", e);
+        }
+    }
+
     private static final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
@@ -189,24 +240,27 @@ public class LedgerStateMachine {
 
     // ── Posting ────────────────────────────────────────────────
 
-    public synchronized CommandResult applyPosting(PostingCommand cmd) {
-        reusableLines.clear();
-        reusableAccountSet.clear();
-        reusableAfterBalances.clear();
-        reusableJournalLines.clear();
+    public CommandResult applyPosting(PostingCommand cmd) {
+        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING");
+    }
 
-        // 1. Idempotency check
-        var existing = idempotencyStore.get(cmd.requestId());
-        if (existing.isPresent()) {
-            var entry = existing.get();
-            if ("COMPLETED".equals(entry.status())) {
-                return CommandResult.completed(entry.journalId());
-            }
-            return CommandResult.rejected(entry.errors());
-        }
+    public CommandResult applyAdjustment(AdjustmentCommand cmd) {
+        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT");
+    }
 
-        // 2. Extract all lines with their legId, amount, and currency
-        for (var leg : cmd.legs()) {
+    private CommandResult applyJournalCommand(String requestId, String businessEventType,
+                                              String businessEventRef, LocalDate valueDate,
+                                              List<PostingCommand.Leg> legs,
+                                              JournalType journalType, String commandLabel) {
+        List<LineWithLeg> reusableLines = new ArrayList<>(64);
+        Set<String> reusableAccountSet = new HashSet<>(16);
+        Map<AccountBalanceKey, BigDecimal> reusableAfterBalances = new HashMap<>(64);
+        List<JournalLine> reusableJournalLines = new ArrayList<>(64);
+
+        // Extract all lines with their legId, amount, and currency
+        for (var leg : legs) {
             for (var line : leg.lines()) {
                 reusableLines.add(new LineWithLeg(leg.legId(), leg.amount(), leg.currency(), line));
             }
@@ -217,189 +271,261 @@ public class LedgerStateMachine {
             reusableAccountSet.add(lwl.line().accountId());
         }
 
-        // 3. Account status check (before balance checks)
-        for (String accountId : reusableAccountSet) {
-            var account = accountMetaStore.get(accountId);
-            if (account.isEmpty()) {
-                var result = CommandResult.rejected("ACCOUNT_NOT_FOUND");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
-            }
-            if (account.get().status() == AccountStatus.FROZEN) {
-                var result = CommandResult.rejected("ACCOUNT_FROZEN");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
-            }
-        }
-
-        // 4. Check per-leg journal balance + seed account restriction
-        for (var leg : cmd.legs()) {
-            if (leg.lines().size() < 2) {
-                // Single-line leg = seed/capital injection. Only COMPANY/NOSTRO/SUSPENSE allowed.
-                for (var line : leg.lines()) {
-                    var account = accountMetaStore.get(line.accountId());
-                    if (account.isPresent()) {
-                        var type = account.get().accountType();
-                        if (type == AccountType.CLIENT || type == AccountType.CONTROL) {
-                            var result = CommandResult.rejected("SEED_NOT_ALLOWED_FOR_" + type);
-                            idempotencyStore.put(cmd.requestId(),
-                                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                            return result;
-                        }
-                    }
+        return withAccountLocks(reusableAccountSet, () -> {
+            // 1. Idempotency check
+            var existing = idempotencyStore.get(requestId);
+            if (existing.isPresent()) {
+                var entry = existing.get();
+                if ("COMPLETED".equals(entry.status())) {
+                    return CommandResult.completed(entry.journalId());
                 }
-                continue;
-            }
-            // For multi-line legs, validate that the leg's amount is positive
-            // (debits and credits will use the same leg amount)
-            if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
-                var result = CommandResult.rejected("INVALID_LEG_AMOUNT");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
-            }
-        }
-
-        // 5. Balance validation (compute after values, check rules)
-        for (var lwl : reusableLines) {
-            var line = lwl.line();
-            BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
-                    .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
-
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
-            BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            BigDecimal after = computeAfterBalance(current.amount(), line.entryType(), lwl.amount());
-
-            // V-13: LOCKED/FROZEN positions cannot go negative
-            if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
-                    && after.compareTo(BigDecimal.ZERO) < 0) {
-                var result = CommandResult.rejected("LOCKED_BALANCE_CANNOT_BE_NEGATIVE");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
+                return CommandResult.rejected(entry.errors());
             }
 
-            if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
-                // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE)
-                // Only CLIENT/CONTROL accounts have strict balance enforcement
-                var account = accountMetaStore.get(line.accountId());
-                boolean isInstitutional = account.isPresent() && (
-                        account.get().accountType() == AccountType.COMPANY ||
-                        account.get().accountType() == AccountType.NOSTRO ||
-                        account.get().accountType() == AccountType.SUSPENSE);
-                if (!isInstitutional) {
-                    var result = CommandResult.rejected("INSUFFICIENT_BALANCE");
-                    idempotencyStore.put(cmd.requestId(),
-                            IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+            // 3. Account status check (before balance checks)
+            for (String accountId : reusableAccountSet) {
+                var account = accountMetaStore.get(accountId);
+                if (account.isEmpty()) {
+                    var result = CommandResult.rejected("ACCOUNT_NOT_FOUND");
+                    idempotencyStore.put(requestId,
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                    return result;
+                }
+                if (account.get().status() == AccountStatus.FROZEN) {
+                    var result = CommandResult.rejected("ACCOUNT_FROZEN");
+                    idempotencyStore.put(requestId,
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
                 }
             }
-            if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
-                var result = CommandResult.rejected("CREDIT_EXCEEDS_LIMIT");
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-                return result;
-            }
-            reusableAfterBalances.put(key, after);
-        }
 
-        // 6. Generate journal
-        long index = raftLogIndex.incrementAndGet();
-        long seq = journalSequence.incrementAndGet();
-        String journalId = String.format("JNL-%04d", seq);
-        Instant now = Instant.now();
-
-        for (var lwl : reusableLines) {
-            var line = lwl.line();
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
-            BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            BigDecimal after = reusableAfterBalances.get(key);
-            BalanceTypeConfig config = balanceTypeConfigStore.getOrThrow(line.balanceType());
-
-            String journalLineId = journalId + "-" + String.format("%02d", reusableJournalLines.size() + 1);
-            JournalLine jl = new JournalLine(
-                    journalLineId, journalId, lwl.legId(),
-                    line.accountId(), line.balanceType(), line.position(), lwl.currency(),
-                    line.entryType(), lwl.amount(),
-                    current.amount(), after,
-                    config.configVersion(), now);
-            reusableJournalLines.add(jl);
-        }
-
-        Journal journal = new Journal(
-                journalId, JournalType.NORMAL, cmd.requestId(),
-                cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), JournalStatus.CONFIRMED,
-                List.copyOf(reusableJournalLines), false, now);
-
-        journalStore.put(journalId, journal);
-
-        // 7. Atomic balance update with accountSeq increment + event publishing
-        for (int i = 0; i < reusableLines.size(); i++) {
-            var lwl = reusableLines.get(i);
-            var line = lwl.line();
-            AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
-            BigDecimal before = balanceStore.get(key).orElse(BalanceEntry.zero()).amount();
-            BigDecimal after = reusableAfterBalances.get(key);
-            BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            long prevSeq = current.accountSeq();
-            long nextSeq = prevSeq + 1;
-
-            // NFR-15: accountSeq overflow warning (should never trigger)
-            if (nextSeq >= ACCOUNT_SEQ_OVERFLOW_WARN) {
-                log.error("[SEQ_OVERFLOW_WARN] accountId={} balanceType={} currency={} seq={}",
-                        key.accountId(), key.balanceType(), key.currency(), nextSeq);
+            // 4. Check per-leg journal balance + seed account restriction
+            for (var leg : legs) {
+                if (leg.lines().size() < 2) {
+                    // Single-line leg = seed/capital injection. Only COMPANY/NOSTRO/SUSPENSE allowed.
+                    for (var line : leg.lines()) {
+                        var account = accountMetaStore.get(line.accountId());
+                        if (account.isPresent()) {
+                            var type = account.get().accountType();
+                            if (type == AccountType.CLIENT || type == AccountType.CONTROL) {
+                                var result = CommandResult.rejected("SEED_NOT_ALLOWED_FOR_" + type);
+                                idempotencyStore.put(requestId,
+                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                                return result;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // For multi-line legs, validate that the leg's amount is positive
+                // (debits and credits will use the same leg amount)
+                if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
+                    var result = CommandResult.rejected("INVALID_LEG_AMOUNT");
+                    idempotencyStore.put(requestId,
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                    return result;
+                }
             }
 
-            balanceStore.put(key, new BalanceEntry(after, index, nextSeq, journalId, now));
-
-            // Publish BalanceChangeEvent (F-011)
-            if (eventListener != null) {
-                BigDecimal delta = line.entryType() == EntryType.DEBIT
-                        ? lwl.amount().negate()
-                        : lwl.amount();
-                JournalLine jl = reusableJournalLines.get(i);
-                BalanceChangeEvent event = new BalanceChangeEvent(
-                        FastIdGenerator.nextId(),
-                        BalanceChangeEvent.EVENT_TYPE,
-                        BalanceChangeEvent.EVENT_VERSION,
-                        now,
-                        cmd.requestId() + ":" + line.accountId() + ":" + line.balanceType() + ":" + line.position() + ":" + lwl.currency(),
-                        "POSTING",
-                        journalId,
-                        jl.journalLineId(),
-                        cmd.requestId(),
-                        cmd.businessEventRef(),
-                        null,
-                        line.accountId(),
-                        line.balanceType(),
-                        line.position(),
-                        lwl.currency(),
-                        line.entryType(),
-                        lwl.amount(),
-                        before,
-                        after,
-                        delta,
-                        index,
-                        index,
-                        nextSeq,
-                        prevSeq,
-                        cmd.valueDate(),
-                        cmd.valueDate(),
-                        Map.of("sourceSystem", "LEDGER"));
-                eventListener.onEvent(event);
-                if (outboxStore != null) outboxStore.enqueue(event);
+            // 5. Journal balance validation (debits == credits per currency)
+            // Seed posting exemption: single-line legs to institutional accounts
+            // represent external capital injection and do not need to balance internally
+            boolean allSingleLineInstitutional = true;
+            for (var leg : legs) {
+                if (leg.lines().size() >= 2) {
+                    allSingleLineInstitutional = false;
+                    break;
+                }
+                for (var line : leg.lines()) {
+                    var account = accountMetaStore.get(line.accountId());
+                    boolean isInstitutional = account.isPresent() && (
+                            account.get().accountType() == AccountType.COMPANY ||
+                            account.get().accountType() == AccountType.NOSTRO ||
+                            account.get().accountType() == AccountType.SUSPENSE);
+                    if (!isInstitutional) {
+                        allSingleLineInstitutional = false;
+                        break;
+                    }
+                }
+                if (!allSingleLineInstitutional) break;
             }
-        }
 
-        // 8. Idempotency
-        idempotencyStore.put(cmd.requestId(),
-                IdempotencyEntry.completed(cmd.requestId(), journalId, now));
+            if (!allSingleLineInstitutional) {
+                Map<String, BigDecimal> debitByCurrency = new HashMap<>();
+                Map<String, BigDecimal> creditByCurrency = new HashMap<>();
+                for (var lwl : reusableLines) {
+                    String cc = lwl.currency();
+                    if (lwl.line().entryType() == EntryType.DEBIT) {
+                        debitByCurrency.merge(cc, lwl.amount(), BigDecimal::add);
+                    } else {
+                        creditByCurrency.merge(cc, lwl.amount(), BigDecimal::add);
+                    }
+                }
+                for (String cc : debitByCurrency.keySet()) {
+                    BigDecimal debit = debitByCurrency.get(cc);
+                    BigDecimal credit = creditByCurrency.getOrDefault(cc, BigDecimal.ZERO);
+                    if (debit.compareTo(credit) != 0) {
+                        var result = CommandResult.rejected("JOURNAL_UNBALANCED");
+                        idempotencyStore.put(requestId,
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                        return result;
+                    }
+                }
+                for (String cc : creditByCurrency.keySet()) {
+                    if (!debitByCurrency.containsKey(cc)) {
+                        var result = CommandResult.rejected("JOURNAL_UNBALANCED");
+                        idempotencyStore.put(requestId,
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                        return result;
+                    }
+                }
+            }
 
-        persistIfNeeded();
-        return CommandResult.completed(journalId);
+            // 6. Balance validation (compute after values, check rules)
+            for (var lwl : reusableLines) {
+                var line = lwl.line();
+                BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
+                        .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
+
+                AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
+                BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
+                BigDecimal after = computeAfterBalance(current.amount(), line.entryType(), lwl.amount());
+
+                // V-13: LOCKED/FROZEN positions cannot go negative
+                if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
+                        && after.compareTo(BigDecimal.ZERO) < 0) {
+                    var result = CommandResult.rejected("LOCKED_BALANCE_CANNOT_BE_NEGATIVE");
+                    idempotencyStore.put(requestId,
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                    return result;
+                }
+
+                if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
+                    // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE)
+                    // Only CLIENT/CONTROL accounts have strict balance enforcement
+                    var account = accountMetaStore.get(line.accountId());
+                    boolean isInstitutional = account.isPresent() && (
+                            account.get().accountType() == AccountType.COMPANY ||
+                            account.get().accountType() == AccountType.NOSTRO ||
+                            account.get().accountType() == AccountType.SUSPENSE);
+                    if (!isInstitutional) {
+                        var result = CommandResult.rejected("INSUFFICIENT_BALANCE");
+                        idempotencyStore.put(requestId,
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                        return result;
+                    }
+                }
+                if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
+                    var result = CommandResult.rejected("CREDIT_EXCEEDS_LIMIT");
+                    idempotencyStore.put(requestId,
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                    return result;
+                }
+                reusableAfterBalances.put(key, after);
+            }
+
+            // 6. Generate journal
+            long index = raftLogIndex.incrementAndGet();
+            long seq = journalSequence.incrementAndGet();
+            String journalId = String.format("JNL-%04d", seq);
+            Instant now = Instant.now();
+
+            for (var lwl : reusableLines) {
+                var line = lwl.line();
+                AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
+                BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
+                BigDecimal after = reusableAfterBalances.get(key);
+                BalanceTypeConfig config = balanceTypeConfigStore.getOrThrow(line.balanceType());
+
+                String journalLineId = journalId + "-" + String.format("%02d", reusableJournalLines.size() + 1);
+                JournalLine jl = new JournalLine(
+                        journalLineId, journalId, lwl.legId(),
+                        line.accountId(), line.balanceType(), line.position(), lwl.currency(),
+                        line.entryType(), lwl.amount(),
+                        current.amount(), after,
+                        config.configVersion(), now);
+                reusableJournalLines.add(jl);
+            }
+
+            Journal journal = new Journal(
+                    journalId, journalType, requestId,
+                    businessEventType, businessEventRef,
+                    valueDate, JournalStatus.CONFIRMED,
+                    List.copyOf(reusableJournalLines), false, now);
+
+            journalStore.put(journalId, journal);
+
+            // 7. Atomic balance update with accountSeq increment + event publishing
+            Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
+            for (int i = 0; i < reusableLines.size(); i++) {
+                var lwl = reusableLines.get(i);
+                var line = lwl.line();
+                AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
+                BigDecimal before = balanceStore.get(key).orElse(BalanceEntry.zero()).amount();
+                BigDecimal after = reusableAfterBalances.get(key);
+                BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
+                long prevSeq = current.accountSeq();
+                long nextSeq = prevSeq + 1;
+
+                // NFR-15: accountSeq overflow warning (should never trigger)
+                if (nextSeq >= ACCOUNT_SEQ_OVERFLOW_WARN) {
+                    log.error("[SEQ_OVERFLOW_WARN] accountId={} balanceType={} currency={} seq={}",
+                            key.accountId(), key.balanceType(), key.currency(), nextSeq);
+                }
+
+                BalanceEntry updated = new BalanceEntry(after, index, nextSeq, journalId, now);
+                balanceStore.put(key, updated);
+                balanceUpdates.put(key, updated);
+
+                // Publish BalanceChangeEvent (F-011)
+                if (eventListener != null) {
+                    BigDecimal delta = line.entryType() == EntryType.DEBIT
+                            ? lwl.amount().negate()
+                            : lwl.amount();
+                    JournalLine jl = reusableJournalLines.get(i);
+                    BalanceChangeEvent event = new BalanceChangeEvent(
+                            FastIdGenerator.nextId(),
+                            BalanceChangeEvent.EVENT_TYPE,
+                            BalanceChangeEvent.EVENT_VERSION,
+                            now,
+                            requestId + ":" + line.accountId() + ":" + line.balanceType() + ":" + line.position() + ":" + lwl.currency(),
+                            commandLabel,
+                            journalId,
+                            jl.journalLineId(),
+                            requestId,
+                            businessEventRef,
+                            null,
+                            line.accountId(),
+                            line.balanceType(),
+                            line.position(),
+                            lwl.currency(),
+                            line.entryType(),
+                            lwl.amount(),
+                            before,
+                            after,
+                            delta,
+                            index,
+                            index,
+                            nextSeq,
+                            prevSeq,
+                            valueDate,
+                            valueDate,
+                            Map.of("sourceSystem", "LEDGER"));
+                    eventListener.onEvent(event);
+                    if (outboxStore != null) outboxStore.enqueue(event);
+                }
+            }
+
+            // 8. Idempotency
+            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(requestId, journalId, now);
+            idempotencyStore.put(requestId, idempotencyEntry);
+
+            // 9. Atomic RocksDB persistence
+            persistApply(journal, balanceUpdates, idempotencyEntry);
+
+            persistIfNeeded();
+            return CommandResult.completed(journalId);
+        });
     }
 
     // ── Account Management ─────────────────────────────────────
@@ -490,8 +616,8 @@ public class LedgerStateMachine {
 
     // ── Reversal (F-008 Section 4.2) ──────────────────────────────
 
-    public synchronized CommandResult applyReversal(ReversalCommand cmd) {
-        reusableMirroredLines.clear();
+    public CommandResult applyReversal(ReversalCommand cmd) {
+        List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
             var entry = existing.get();
@@ -509,109 +635,147 @@ public class LedgerStateMachine {
             return result;
         }
 
-        // Cannot reverse an already-reversed journal
-        if (originalJournal.status() == JournalStatus.REVERSED) {
-            var result = CommandResult.rejected("JOURNAL_ALREADY_REVERSED");
-            idempotencyStore.put(cmd.requestId(),
-                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-            return result;
-        }
-
-        // Cannot reverse a reversal journal
-        if (originalJournal.journalType() == JournalType.REVERSAL) {
-            var result = CommandResult.rejected("CANNOT_REVERSE_REVERSAL");
-            idempotencyStore.put(cmd.requestId(),
-                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
-            return result;
-        }
-
-        long index = raftLogIndex.incrementAndGet();
-        long seq = journalSequence.incrementAndGet();
-        String reversalJournalId = String.format("JNL-%04d", seq);
-        Instant now = Instant.now();
-
-        // Mirror each original line: DEBIT ↔ CREDIT, no balance check
+        Set<String> accountIds = new HashSet<>();
         for (var origLine : originalJournal.lines()) {
-            EntryType mirrored = origLine.entryType() == EntryType.DEBIT ? EntryType.CREDIT : EntryType.DEBIT;
-            AccountBalanceKey key = new AccountBalanceKey(origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency());
-            BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
-            BigDecimal after = computeAfterBalance(current.amount(), mirrored, origLine.amount());
-            long prevSeq = current.accountSeq();
-            long nextSeq = prevSeq + 1;
-
-            // NFR-15 overflow check
-            if (nextSeq >= ACCOUNT_SEQ_OVERFLOW_WARN) {
-                log.error("[SEQ_OVERFLOW_WARN] accountId={} balanceType={} currency={} seq={}",
-                        key.accountId(), key.balanceType(), key.currency(), nextSeq);
-            }
-
-            balanceStore.put(key, new BalanceEntry(after, index, nextSeq, reversalJournalId, now));
-
-            String journalLineId = reversalJournalId + "-" + String.format("%02d", reusableMirroredLines.size() + 1);
-            JournalLine jl = new JournalLine(
-                    journalLineId, reversalJournalId, origLine.legId(),
-                    origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency(),
-                    mirrored, origLine.amount(),
-                    current.amount(), after,
-                    origLine.configVersion(), now);
-            reusableMirroredLines.add(jl);
-
-            // Publish BalanceChangeEvent for reversal
-            if (eventListener != null) {
-                BigDecimal delta = mirrored == EntryType.DEBIT
-                        ? jl.amount().negate()
-                        : jl.amount();
-                BalanceChangeEvent event = new BalanceChangeEvent(
-                        FastIdGenerator.nextId(),
-                        BalanceChangeEvent.EVENT_TYPE,
-                        BalanceChangeEvent.EVENT_VERSION,
-                        now,
-                        cmd.requestId() + ":" + key.accountId() + ":" + key.balanceType() + ":" + key.position() + ":" + key.currency(),
-                        "REVERSAL",
-                        reversalJournalId,
-                        journalLineId,
-                        cmd.requestId(),
-                        originalJournal.businessEventRef(),
-                        null,
-                        key.accountId(),
-                        key.balanceType(),
-                        key.position(),
-                        key.currency(),
-                        mirrored,
-                        jl.amount(),
-                        current.amount(),
-                        after,
-                        delta,
-                        index,
-                        index,
-                        nextSeq,
-                        prevSeq,
-                        cmd.valueDate(),
-                        cmd.valueDate(),
-                        Map.of("sourceSystem", "LEDGER"));
-                eventListener.onEvent(event);
-            }
+            accountIds.add(origLine.accountId());
         }
 
-        boolean crossPeriod = cmd.valueDate().getYear() != originalJournal.valueDate().getYear()
-                || cmd.valueDate().getMonth() != originalJournal.valueDate().getMonth();
+        return withAccountLocks(accountIds, () -> {
+            // Re-check idempotency inside lock
+            var existing2 = idempotencyStore.get(cmd.requestId());
+            if (existing2.isPresent()) {
+                var entry = existing2.get();
+                if ("COMPLETED".equals(entry.status())) {
+                    return CommandResult.completed(entry.journalId());
+                }
+                return CommandResult.rejected(entry.errors());
+            }
 
-        Journal reversalJournal = new Journal(
-                reversalJournalId, JournalType.REVERSAL, cmd.requestId(),
-                originalJournal.businessEventType(), originalJournal.businessEventRef(),
-                cmd.valueDate(), JournalStatus.CONFIRMED,
-                List.copyOf(reusableMirroredLines), crossPeriod, now);
+            // Re-fetch original journal inside lock
+            Journal orig = journalStore.get(cmd.originalJournalId());
+            if (orig == null) {
+                var result = CommandResult.rejected("JOURNAL_NOT_FOUND");
+                idempotencyStore.put(cmd.requestId(),
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                return result;
+            }
+            if (orig.status() == JournalStatus.REVERSED) {
+                var result = CommandResult.rejected("JOURNAL_ALREADY_REVERSED");
+                idempotencyStore.put(cmd.requestId(),
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                return result;
+            }
+            if (orig.journalType() == JournalType.REVERSAL) {
+                var result = CommandResult.rejected("CANNOT_REVERSE_REVERSAL");
+                idempotencyStore.put(cmd.requestId(),
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
+                return result;
+            }
 
-        journalStore.put(reversalJournalId, reversalJournal);
+            long index = raftLogIndex.incrementAndGet();
+            long seq = journalSequence.incrementAndGet();
+            String reversalJournalId = String.format("JNL-%04d", seq);
+            Instant now = Instant.now();
 
-        // Mark original as reversed
-        journalStore.put(cmd.originalJournalId(), originalJournal.withStatus(JournalStatus.REVERSED));
+            Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
 
-        idempotencyStore.put(cmd.requestId(),
-                IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now));
+            // Mirror each original line: DEBIT ↔ CREDIT, no balance check
+            for (var origLine : orig.lines()) {
+                EntryType mirrored = origLine.entryType() == EntryType.DEBIT ? EntryType.CREDIT : EntryType.DEBIT;
+                AccountBalanceKey key = new AccountBalanceKey(origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency());
+                BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
+                BigDecimal after = computeAfterBalance(current.amount(), mirrored, origLine.amount());
+                long prevSeq = current.accountSeq();
+                long nextSeq = prevSeq + 1;
 
-        persistIfNeeded();
-        return CommandResult.completed(reversalJournalId);
+                // NFR-15 overflow check
+                if (nextSeq >= ACCOUNT_SEQ_OVERFLOW_WARN) {
+                    log.error("[SEQ_OVERFLOW_WARN] accountId={} balanceType={} currency={} seq={}",
+                            key.accountId(), key.balanceType(), key.currency(), nextSeq);
+                }
+
+                BalanceEntry updated = new BalanceEntry(after, index, nextSeq, reversalJournalId, now);
+                balanceStore.put(key, updated);
+                balanceUpdates.put(key, updated);
+
+                String journalLineId = reversalJournalId + "-" + String.format("%02d", reusableMirroredLines.size() + 1);
+                JournalLine jl = new JournalLine(
+                        journalLineId, reversalJournalId, origLine.legId(),
+                        origLine.accountId(), origLine.balanceType(), origLine.position(), origLine.currency(),
+                        mirrored, origLine.amount(),
+                        current.amount(), after,
+                        origLine.configVersion(), now);
+                reusableMirroredLines.add(jl);
+
+                // Publish BalanceChangeEvent for reversal
+                if (eventListener != null) {
+                    BigDecimal delta = mirrored == EntryType.DEBIT
+                            ? jl.amount().negate()
+                            : jl.amount();
+                    BalanceChangeEvent event = new BalanceChangeEvent(
+                            FastIdGenerator.nextId(),
+                            BalanceChangeEvent.EVENT_TYPE,
+                            BalanceChangeEvent.EVENT_VERSION,
+                            now,
+                            cmd.requestId() + ":" + key.accountId() + ":" + key.balanceType() + ":" + key.position() + ":" + key.currency(),
+                            "REVERSAL",
+                            reversalJournalId,
+                            journalLineId,
+                            cmd.requestId(),
+                            orig.businessEventRef(),
+                            null,
+                            key.accountId(),
+                            key.balanceType(),
+                            key.position(),
+                            key.currency(),
+                            mirrored,
+                            jl.amount(),
+                            current.amount(),
+                            after,
+                            delta,
+                            index,
+                            index,
+                            nextSeq,
+                            prevSeq,
+                            cmd.valueDate(),
+                            cmd.valueDate(),
+                            Map.of("sourceSystem", "LEDGER"));
+                    eventListener.onEvent(event);
+                }
+            }
+
+            boolean crossPeriod = cmd.valueDate().getYear() != orig.valueDate().getYear()
+                    || cmd.valueDate().getMonth() != orig.valueDate().getMonth();
+
+            Journal reversalJournal = new Journal(
+                    reversalJournalId, JournalType.REVERSAL, cmd.requestId(),
+                    orig.businessEventType(), orig.businessEventRef(),
+                    cmd.valueDate(), JournalStatus.CONFIRMED,
+                    List.copyOf(reusableMirroredLines), crossPeriod, now);
+
+            journalStore.put(reversalJournalId, reversalJournal);
+
+            // Mark original as reversed
+            journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
+
+            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now);
+            idempotencyStore.put(cmd.requestId(), idempotencyEntry);
+
+            // Atomic RocksDB persistence
+            persistApply(reversalJournal, balanceUpdates, idempotencyEntry);
+            // Also persist updated original journal
+            if (rocksDB != null) {
+                try {
+                    rocksDB.put("journal", cmd.originalJournalId().getBytes(StandardCharsets.UTF_8),
+                            objectMapper.writeValueAsBytes(orig.withStatus(JournalStatus.REVERSED)));
+                } catch (Exception e) {
+                    log.error("Failed to persist original journal status update", e);
+                }
+            }
+
+            persistIfNeeded();
+            return CommandResult.completed(reversalJournalId);
+        });
     }
 
     // ── Journal access ─────────────────────────────────────────

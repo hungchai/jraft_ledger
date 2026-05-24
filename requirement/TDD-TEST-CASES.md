@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.4
-**日期**: 2026-05-23
+**版本**: v0.5
+**日期**: 2026-05-24
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.5 變更摘要**：新增 Module 18（F-014 Java Client SDK），新增 TC-F014-01~08。TDD 執行計劃補充 Phase 7。
+>
 > **v0.4 變更摘要**：新增 Module 13（F-013 Idempotency & Hotspot Account Concurrency），新增 TC-F013-01~10。TDD 執行計劃補充 Phase 6.5。
 >
 > **v0.3 變更摘要**：新增 position 字段支持（AccountBalanceKey 複合鍵擴展）。新增 TC-F002-11~15（Posting position）、TC-F005-07~10（Balance Query position）、TC-F008-27~30（State Machine position 驗證規則 V-13）。更新現有測試用例以反映新鍵格式 (accountId, balanceType, currency, position)。
@@ -925,6 +927,93 @@ TC-F013-10  virtualThreadWorkerCrash_queueRecoversAndResumesConsumption
             Then:  系統自動重建 Worker-3，queue 中 pending 請求繼續被消費
 ```
 
+
+---
+
+## Module 18：Java Client SDK（F-014）
+
+### 18.1 Leader Discovery
+
+```
+TC-F014-01  leaderDiscovery_firstCall_queriesAnyEndpoint
+            Given: SDK 初始化，無快取 Leader Hint，集群有 3 個端點
+            When:  第一次呼叫 client.post(postingRequest)
+            Then:  SDK 從任一端點查詢 GET /raft/leader
+                   取得 leaderEndpoint 後正確路由 Posting 請求
+                   請求成功返回 PostingResult
+
+TC-F014-02  leaderDiscovery_cachedLeader_reusesHint
+            Given: Leader Hint 已快取，TTL 未過期
+            When:  連續 100 次呼叫 client.post()
+            Then:  全部使用快取的 leaderEndpoint
+                   不重複查詢 /raft/leader（查詢次數 = 0）
+
+TC-F014-03  leaderDiscovery_leaderStepDown_refreshesHint
+            Given: Leader Hint 指向 node-1，快取未過期
+            When:  發送 Posting → node-1 返回 HTTP 503 NOT_LEADER
+            Then:  SDK 標記快取失效
+                   從剩餘端點查詢 /raft/leader 取得新 Leader
+                   使用新 Leader endpoint 重試成功
+```
+
+### 18.2 Retry Strategy
+
+```
+TC-F014-04  retry_idempotentPost_failoverRetriesAndSucceeds
+            Given: SDK maxRetries=3，Leader 在第一次請求後切換
+            When:  client.post(postingRequest)
+                  第 1 次發送 → HTTP 503（NOT_LEADER）
+            Then:  SDK 刷新 Leader Hint
+                   第 2 次重試（相同 requestId）→ HTTP 200
+                   返回 PostingResult，retriesAttempted=1
+                   Server 端僅收到 1 筆 Posting（冪等保證）
+
+TC-F014-05  retry_nonIdempotentRead_failoverWithoutRetryBody
+            Given: SDK 用於 queryBalance()，Leader 切換中
+            When:  client.queryBalance(queryRequest)
+                  第 1 次發送 → Connection Refused
+            Then:  SDK 刷新 Leader Hint
+                   第 2 次重試 GET 請求（無 request body，天然安全）
+                   返回 BalanceQueryResult
+                   不消耗 maxRetries 計數（讀取不限重試次數）
+```
+
+### 18.3 Configuration
+
+```
+TC-F014-06  config_allTimeoutsSettable
+            Given: LedgerClientConfig.builder()
+                   .connectTimeout(Duration.ofMillis(500))
+                   .readTimeout(Duration.ofMillis(3000))
+                   .leaderCacheTtl(Duration.ofSeconds(10))
+                   .maxRetries(5)
+            When:  config.build()
+            Then:  config.connectTimeout == 500ms
+                   config.readTimeout == 3000ms
+                   config.leaderCacheTtl == 10s
+                   config.maxRetries == 5
+```
+
+### 18.4 API Correctness
+
+```
+TC-F014-07  queryBalance_returnsCorrectBalance
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD = 700.00（State Machine 最新值）
+                   SDK 已初始化並發現 Leader
+            When:  client.queryBalance(new BalanceQueryRequest("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD"))
+            Then:  BalanceQueryResult.amount == 700.00
+                   dataSource == "STATE_MACHINE"
+                   結果與直接 HTTP GET /ledger/accounts/CLIENT_ACC_001/balances 一致
+
+TC-F014-08  post_unbalancedJournal_propagatesError
+            Given: PostingRequest 中 DEBIT 100 + CREDIT 99（不平衡）
+            When:  client.post(unbalancedRequest)
+            Then:  拋出 LedgerClientException
+                   errorCode == "JOURNAL_UNBALANCED"
+                   httpStatusCode == 400
+                   retriesAttempted == 0（業務錯誤不重試）
+```
+
 ---
 
 ## 測試執行順序建議（TDD Red-Green 順序）
@@ -966,4 +1055,7 @@ Phase 6 — 並發安全
 
 Phase 6.5 — Idempotency & Hotspot Account【v0.4 新增】
   TC-F013-01~10（Idempotency + Hotspot Concurrency）
+
+Phase 7 — Java Client SDK【v0.5 新增】
+  TC-F014-01~08（Leader Discovery + Retry + Config + API Correctness）
 ```

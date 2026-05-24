@@ -96,13 +96,20 @@ class RocksDBIntegrationTest {
         balanceStore.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
                 new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "JNL-INIT", Instant.now()));
 
+        // Set up suspense account for balanced postings
+        accountMetaStore.put("SUSPENSE_ACC", new Account(
+                "SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+
         // Execute postings
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "req-" + i, "TEST", "test-ref", LocalDate.now(),
                     List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
                             new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
-                                    EntryType.DEBIT, "Debit " + i)
+                                    EntryType.DEBIT, "Debit " + i),
+                            new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Credit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -206,13 +213,20 @@ class RocksDBIntegrationTest {
         // Snapshot at index 100, accountSeq 42
         sm.takeSnapshot();
 
+        // Set up suspense account for balanced postings
+        ams.put("SUSPENSE_ACC", new Account(
+                "SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+
         // Apply 5 more postings (replay scenario)
         for (int i = 0; i < 5; i++) {
             PostingCommand cmd = new PostingCommand(
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
                     List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
                             new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
-                                    EntryType.DEBIT, "Replay " + i)
+                                    EntryType.DEBIT, "Replay " + i),
+                            new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Replay credit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -303,13 +317,20 @@ class RocksDBIntegrationTest {
         AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("1000.00"), 0, 0, "", Instant.EPOCH));
 
+        // Set up suspense account for balanced postings
+        ams.put("SUSPENSE_ACC", new Account(
+                "SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+
         // Apply 10 postings → balance = 1000 - 10*100 = 0, accountSeq = 10
         for (int i = 0; i < 10; i++) {
             PostingCommand cmd = new PostingCommand(
                     "req-snap-" + i, "TEST", "test-ref", LocalDate.now(),
                     List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("100.00"), "USD", List.of(
                             new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
-                                    EntryType.DEBIT, "Debit " + i)
+                                    EntryType.DEBIT, "Debit " + i),
+                            new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.CREDIT, "Credit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -328,7 +349,9 @@ class RocksDBIntegrationTest {
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
                     List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("50.00"), "USD", List.of(
                             new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
-                                    EntryType.CREDIT, "Credit " + i)
+                                    EntryType.CREDIT, "Credit " + i),
+                            new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Replay debit " + i)
                     )))
             );
             sm.applyPosting(cmd);
@@ -362,7 +385,9 @@ class RocksDBIntegrationTest {
                     "replay-" + i, "TEST", "test-ref", LocalDate.now(),
                     List.of(new PostingCommand.Leg("leg-" + i, "TEST", new BigDecimal("50.00"), "USD", List.of(
                             new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT",
-                                    EntryType.CREDIT, "Credit " + i)
+                                    EntryType.CREDIT, "Credit " + i),
+                            new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT",
+                                    EntryType.DEBIT, "Replay debit " + i)
                     )))
             );
             sm2.applyPosting(cmd);
@@ -393,6 +418,11 @@ class RocksDBIntegrationTest {
         bs.put(key, new BalanceEntry(
                 new BigDecimal("1000.00"), 50, 50, "JNL-050", Instant.now()));
 
+        // Set up suspense account for balanced postings
+        ams.put("SUSPENSE_ACC", new Account(
+                "SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+
         // Take snapshot to persist current state
         sm.takeSnapshot();
 
@@ -412,7 +442,8 @@ class RocksDBIntegrationTest {
         PostingCommand cmd = new PostingCommand(
                 "warmup-001", "TEST", "test-ref", LocalDate.now(),
                 List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("200.00"), "USD", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "After warm-up")
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "After warm-up"),
+                        new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Warm-up debit")
                 )))
         );
         sm.applyPosting(cmd);
@@ -439,6 +470,11 @@ class RocksDBIntegrationTest {
         AccountBalanceKey key = new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD");
         bs.put(key, new BalanceEntry(new BigDecimal("1000.00"), 99, 99, "JNL-099", Instant.now()));
 
+        // Set up suspense account for balanced postings
+        ams.put("SUSPENSE_ACC", new Account(
+                "SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+
         // Snapshot with accountSeq=99
         sm.takeSnapshot();
 
@@ -463,7 +499,8 @@ class RocksDBIntegrationTest {
         PostingCommand cmd = new PostingCommand(
                 "restart-001", "TEST", "test-ref", LocalDate.now(),
                 List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
-                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "After restart")
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "After restart"),
+                        new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Restart credit")
                 )))
         );
         sm2.applyPosting(cmd);

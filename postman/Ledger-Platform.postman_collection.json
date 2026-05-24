@@ -527,6 +527,27 @@
           }
         },
         {
+          "name": "Raft Leader Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Returns leader URL', () => pm.expect(json.leader).to.be.a('string'));",
+                  "if (json.leader) pm.collectionVariables.set('leader_url', json.leader);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/raft/leader", "host": ["{{base_url}}"], "path": ["raft", "leader"] }
+          }
+        },
+        {
           "name": "Health — Check Leader on All Nodes",
           "item": [
             {

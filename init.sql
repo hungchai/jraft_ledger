@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS journal_line (
     leg_id           VARCHAR(64),
     account_id       VARCHAR(64) NOT NULL,
     balance_type     VARCHAR(64) NOT NULL,
+    position         VARCHAR(16) NOT NULL DEFAULT 'CURRENT',
     currency         VARCHAR(8) NOT NULL,
     entry_type       VARCHAR(8) NOT NULL,
     amount           DECIMAL(24,8) NOT NULL,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS account_balance (
     id               BIGINT AUTO_INCREMENT PRIMARY KEY,
     account_id       VARCHAR(64) NOT NULL,
     balance_type     VARCHAR(64) NOT NULL,
+    position         VARCHAR(16) NOT NULL DEFAULT 'CURRENT',
     currency         VARCHAR(8) NOT NULL,
     amount           DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
     frozen_amount    DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
@@ -61,7 +63,7 @@ CREATE TABLE IF NOT EXISTS account_balance (
     last_journal_id  VARCHAR(64),
     created_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    UNIQUE KEY uk_account_balance (account_id, balance_type, currency),
+    UNIQUE KEY uk_account_balance (account_id, balance_type, position, currency),
     INDEX idx_account_id (account_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

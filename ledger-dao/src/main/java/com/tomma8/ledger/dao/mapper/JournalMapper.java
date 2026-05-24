@@ -25,14 +25,15 @@ public interface JournalMapper {
                       @Param("crossPeriod") boolean crossPeriod,
                       @Param("createdAt") LocalDateTime createdAt);
 
-    @Insert("INSERT INTO journal_line (id, journal_line_id, journal_id, leg_id, account_id, balance_type, currency, entry_type, amount, balance_before, balance_after, config_version, created_at) " +
-            "VALUES (#{id}, #{journalLineId}, #{journalId}, #{legId}, #{accountId}, #{balanceType}, #{currency}, #{entryType}, #{amount}, #{balanceBefore}, #{balanceAfter}, #{configVersion}, #{createdAt})")
+    @Insert("INSERT INTO journal_line (id, journal_line_id, journal_id, leg_id, account_id, balance_type, position, currency, entry_type, amount, balance_before, balance_after, config_version, created_at) " +
+            "VALUES (#{id}, #{journalLineId}, #{journalId}, #{legId}, #{accountId}, #{balanceType}, #{position}, #{currency}, #{entryType}, #{amount}, #{balanceBefore}, #{balanceAfter}, #{configVersion}, #{createdAt})")
     int insertJournalLine(@Param("id") long id,
                           @Param("journalLineId") String journalLineId,
                           @Param("journalId") String journalId,
                           @Param("legId") String legId,
                           @Param("accountId") String accountId,
                           @Param("balanceType") String balanceType,
+                          @Param("position") String position,
                           @Param("currency") String currency,
                           @Param("entryType") String entryType,
                           @Param("amount") java.math.BigDecimal amount,

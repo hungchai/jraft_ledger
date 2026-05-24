@@ -19,6 +19,8 @@
         <module>ledger-restful</module>
         <module>ledger-feign</module>
         <module>ledger-projection</module>
+        <module>ledger-client-sdk</module>
+        <module>ledger-perf-tests</module>
     </modules>
 
     <parent>
@@ -81,6 +83,16 @@
             <dependency>
                 <groupId>com.tomma8</groupId>
                 <artifactId>ledger-projection</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.tomma8</groupId>
+                <artifactId>ledger-client-sdk</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.tomma8</groupId>
+                <artifactId>ledger-perf-tests</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

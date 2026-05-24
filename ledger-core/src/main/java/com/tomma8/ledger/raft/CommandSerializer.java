@@ -29,6 +29,9 @@ public final class CommandSerializer {
         try {
             String json = new String(data, 0, length, StandardCharsets.UTF_8);
             // Heuristic detection based on presence of distinctive fields
+            if (json.contains("\"adjustmentType\"")) {
+                return mapper.readValue(data, AdjustmentCommand.class);
+            }
             if (json.contains("\"legs\"")) {
                 return mapper.readValue(data, PostingCommand.class);
             }

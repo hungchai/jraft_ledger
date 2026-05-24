@@ -3,8 +3,9 @@
 **決策狀態**: Accepted
 **決策日期**: 2026-05-16
 **決策人**: Ledger Platform Team
-**影響範圍**: F-002 Posting, F-003 Manual Adjustment, F-004 Reversal, F-005 Balance Query, F-006 Journal Query, F-007 Reconciliation, F-008 State Machine
+**影響範圍**: F-002 Posting, F-003 Manual Adjustment, F-004 Reversal, F-005 Balance Query, F-006 Journal Query, F-007 Reconciliation, F-008 State Machine, F-014 Client SDK
 
+> **v0.5 變更摘要**：Section 2.3 新增 Client SDK Layer（ADR-002）；影響範圍納入 F-014。
 > **v0.4 變更摘要**：Section 2.3 替換為涵蓋所有層級、元件與查詢路徑的完整系統架構圖。
 > **v0.3 變更摘要**：新增 Section 6.3 MySQL View Layer 分片設計（ShardingSphere-JDBC journal_line 分片配置）。
 > **v0.2 變更摘要**：Section 3.2 補充 Multi-Account Coordinator 完整實現規格（Leader 選舉機制、Timeout 處理、N 帳戶通用設計）；新增 Section 3.3 Multi-Account Task 資料結構；Section 8 新增風險項。
@@ -42,12 +43,17 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 - 生產驗證（Ant Financial 同款技術棧）
 - 支持 Learner 角色，適用於 CQRS 讀寫分離
 
-### 2.3 整體架構 [v0.4 更新]
+### 2.3 整體架構 [v0.5 更新]
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              客戶端層                                         │
-│          HTTP/gRPC  →  Posting / Reversal / Adjustment / Query               │
+│                         Client SDK Layer (F-014)                            │
+│     LedgerClient  →  Leader Discovery / Retry / Connection Pool              │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────┴─────────────────────────────────────────┐
+│                         客戶端層 (HTTP/gRPC)                                  │
+│          Posting / Reversal / Adjustment / Query                             │
 └───────────────────────────────────┬─────────────────────────────────────────┘
                                     │
                     ┌───────────────┴───────────────┐
@@ -132,6 +138,8 @@ Internal Ledger Platform 需要同時滿足以下三個互相衝突的要求：
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **v0.5 變更**：新增 Client SDK Layer（ADR-002）。SDK 位於 Caller 與 Network Layer 之間，統一處理 Leader 發現、連線池與重試。
 
 ---
 

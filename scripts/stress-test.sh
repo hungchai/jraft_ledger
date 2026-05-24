@@ -175,58 +175,16 @@ for b in $(seq 1 $TOTAL_BATCHES); do
 done
 pass "Seeded 9,990 CLIENT accounts with 1,000 USD"
 
+# Build perf test jar (uses ledger-client-sdk)
+info "Building ledger-perf-tests jar..."
+mvn package -pl ledger-perf-tests -am -q -DskipTests
+
 # ───────────────────────────────────────────
 # 3. Phase 2 — RFQ Hotspot
 # ───────────────────────────────────────────
 info "Phase 2 — RFQ Hotspot: $RFQ_CLIENTS clients × $RFQ_PER_CLIENT postings against $HOTSPOT_ACC"
-RFQ_TOTAL=$((RFQ_CLIENTS * RFQ_PER_CLIENT))
-RFQ_BATCH=50
-RFQ_START=$(date +%s)
-RFQ_OK=0; RFQ_FAIL=0
-RFQ_LOCK="$TMPDIR/rfq.lock"
-
-rfq_worker() {
-  local client_idx="$1"
-  local acc_id="STRESS-CLI-$(printf %04d $client_idx)"
-  for n in $(seq 1 $RFQ_PER_CLIENT); do
-    req_id="rfq-${client_idx}-${n}-$(date +%s%N)"
-    r=$(http_post "$BASE/ledger/postings" "{
-      \"requestId\": \"$req_id\",
-      \"businessEventType\": \"RFQ\",
-      \"businessEventRef\": \"RFQ-${client_idx}\",
-      \"valueDate\": \"2026-05-23\",
-      \"legs\": [
-        {
-          \"legId\": \"leg-1\",
-          \"postingType\": \"RFQ\",
-          \"lines\": [
-            {\"accountId\": \"$acc_id\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"1.00\", \"description\": \"RFQ\"},
-            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"1.00\", \"description\": \"RFQ\"}
-          ]
-        }
-      ]
-    }")
-    if echo "$r" | grep -q '"COMPLETED"'; then
-      _lock "$RFQ_LOCK"; echo 1 >> "$TMPDIR/rfq_ok.txt"; _unlock "$RFQ_LOCK"
-    else
-      _lock "$RFQ_LOCK"; echo 1 >> "$TMPDIR/rfq_fail.txt"; _unlock "$RFQ_LOCK"
-    fi
-  done
-}
-
-for c in $(seq 1 $RFQ_CLIENTS); do
-  rfq_worker "$c" &
-  if [ $((c % RFQ_BATCH)) -eq 0 ]; then
-    wait
-    info "  RFQ client batch $c / $RFQ_CLIENTS"
-  fi
-done
-wait
-
-RFQ_ELAPSED=$(( $(date +%s) - RFQ_START ))
-RFQ_OK=$(wc -l < "$TMPDIR/rfq_ok.txt" 2>/dev/null || echo 0)
-RFQ_FAIL=$(wc -l < "$TMPDIR/rfq_fail.txt" 2>/dev/null || echo 0)
-info "RFQ complete: ${RFQ_ELAPSED}s, OK=$RFQ_OK, FAIL=$RFQ_FAIL, throughput=$((RFQ_TOTAL / (RFQ_ELAPSED > 0 ? RFQ_ELAPSED : 1))) req/s"
+java -Dendpoints="$BASE" -Dphase=rfq -Dconcurrency=$RFQ_CLIENTS -Daccounts=9990 -Dhotspot=$HOTSPOT_ACC \
+  -jar ledger-perf-tests/target/ledger-perf-tests.jar
 
 # Verify hotspot balance
 HOT_BAL=$(http_get "$BASE/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD" | grep -oE '"amount":"?[0-9.]+"?' | head -1 | tr -cd '0-9.')
@@ -328,44 +286,8 @@ http_post "$BASE/ledger/postings" "{
   ]
 }" > /dev/null
 
-SA_START=$(date +%s)
-SA_LOCK="$TMPDIR/sa.lock"
-
-for i in $(seq 1 $SAME_ACC_CONCURRENT); do
-  (
-    req_id="sa-$i-$(date +%s%N)"
-    r=$(http_post "$BASE/ledger/postings" "{
-      \"requestId\": \"$req_id\",
-      \"businessEventType\": \"WITHDRAWAL\",
-      \"businessEventRef\": \"SA-$i\",
-      \"valueDate\": \"2026-05-23\",
-      \"legs\": [
-        {
-          \"legId\": \"leg-1\",
-          \"postingType\": \"WITHDRAWAL\",
-          \"lines\": [
-            {\"accountId\": \"$SAME_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"1.00\", \"description\": \"SA\"},
-            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"1.00\", \"description\": \"SA\"}
-          ]
-        }
-      ]
-    }")
-    if echo "$r" | grep -q '"COMPLETED"'; then
-      _lock "$SA_LOCK"; echo 1 >> "$TMPDIR/sa_ok.txt"; _unlock "$SA_LOCK"
-    elif echo "$r" | grep -qi 'INSUFFICIENT_BALANCE\|REJECTED'; then
-      _lock "$SA_LOCK"; echo 1 >> "$TMPDIR/sa_rej.txt"; _unlock "$SA_LOCK"
-    else
-      _lock "$SA_LOCK"; echo 1 >> "$TMPDIR/sa_fail.txt"; _unlock "$SA_LOCK"
-    fi
-  ) &
-done
-wait
-SA_ELAPSED=$(( $(date +%s) - SA_START ))
-
-SA_OK=$(wc -l < "$TMPDIR/sa_ok.txt" 2>/dev/null || echo 0)
-SA_REJ=$(wc -l < "$TMPDIR/sa_rej.txt" 2>/dev/null || echo 0)
-SA_FAIL=$(wc -l < "$TMPDIR/sa_fail.txt" 2>/dev/null || echo 0)
-info "Same-account race: ${SA_ELAPSED}s, OK=$SA_OK, REJ=$SA_REJ, FAIL=$SA_FAIL"
+java -Dendpoints="$BASE" -Dphase=race -Dconcurrency=$SAME_ACC_CONCURRENT -Dhotspot=$HOTSPOT_ACC \
+  -jar ledger-perf-tests/target/ledger-perf-tests.jar
 
 # Verify balance
 SA_BAL=$(http_get "$BASE/ledger/balances?accountId=$SAME_ACC&balanceType=AVAILABLE_BALANCE&currency=USD" | grep -oE '"amount":"?[0-9.]+"?' | head -1 | tr -cd '0-9.')
@@ -530,59 +452,8 @@ fi
 # 8. Phase 7 — Read / Write Mix
 # ───────────────────────────────────────────
 info "Phase 7 — Read/write interleave for ${RW_DURATION_SEC}s"
-RW_START=$(date +%s)
-RW_WOK=0; RW_Rok=0; RW_WFAIL=0
-RW_LOCK="$TMPDIR/rw.lock"
-
-# Background writers
-(
-  while [ $(($(date +%s) - RW_START)) -lt $RW_DURATION_SEC ]; do
-    idx=$((RANDOM % 9990 + 1))
-    acc_id="STRESS-CLI-$(printf %04d $idx)"
-    req_id="rw-w-$(date +%s%N)"
-    r=$(http_post "$BASE/ledger/postings" "{
-      \"requestId\": \"$req_id\",
-      \"businessEventType\": \"DEPOSIT\",
-      \"businessEventRef\": \"RW\",
-      \"valueDate\": \"2026-05-23\",
-      \"legs\": [
-        {
-          \"legId\": \"leg-1\",
-          \"postingType\": \"DEPOSIT\",
-          \"lines\": [
-            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"0.01\", \"description\": \"RW\"},
-            {\"accountId\": \"$acc_id\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"0.01\", \"description\": \"RW\"}
-          ]
-        }
-      ]
-    }")
-    if echo "$r" | grep -q '"COMPLETED"'; then
-      _lock "$RW_LOCK"; echo 1 >> "$TMPDIR/rw_wok.txt"; _unlock "$RW_LOCK"
-    else
-      _lock "$RW_LOCK"; echo 1 >> "$TMPDIR/rw_wfail.txt"; _unlock "$RW_LOCK"
-    fi
-  done
-) &
-WRITER_PID=$!
-
-# Readers loop
-while [ $(($(date +%s) - RW_START)) -lt $RW_DURATION_SEC ]; do
-  idx=$((RANDOM % 9990 + 1))
-  acc_id="STRESS-CLI-$(printf %04d $idx)"
-  r=$(http_get "$BASE/ledger/balances?accountId=$acc_id&balanceType=AVAILABLE_BALANCE&currency=USD")
-  if echo "$r" | grep -q '"amount"'; then
-    _lock "$RW_LOCK"; echo 1 >> "$TMPDIR/rw_rok.txt"; _unlock "$RW_LOCK"
-  fi
-  # Throttle readers slightly to avoid overwhelming curl
-  sleep 0.001
-done
-
-wait $WRITER_PID 2>/dev/null || true
-RW_ELAPSED=$(( $(date +%s) - RW_START ))
-RW_WOK=$(wc -l < "$TMPDIR/rw_wok.txt" 2>/dev/null || echo 0)
-RW_Rok=$(wc -l < "$TMPDIR/rw_rok.txt" 2>/dev/null || echo 0)
-RW_WFAIL=$(wc -l < "$TMPDIR/rw_wfail.txt" 2>/dev/null || echo 0)
-info "Read/write: ${RW_ELAPSED}s, writes=$RW_WOK, reads=$RW_Rok, write_fails=$RW_WFAIL"
+java -Dendpoints="$BASE" -Dphase=readwrite -Dconcurrency=$MIX_CONCURRENT -Dduration=$RW_DURATION_SEC -Daccounts=9990 -Dhotspot=$HOTSPOT_ACC \
+  -jar ledger-perf-tests/target/ledger-perf-tests.jar
 pass "Read/write interleave completed"
 
 # ───────────────────────────────────────────

@@ -39,11 +39,13 @@ public class ProjectionQueryController {
     @GetMapping("/accounts/{accountId}/balances")
     public ResponseEntity<?> getBalances(@PathVariable String accountId,
                                          @RequestParam(required = false) String balanceType,
+                                         @RequestParam(required = false) String position,
                                          @RequestParam(required = false) String currency) {
         try {
             List<Map<String, Object>> balances;
             if (balanceType != null && currency != null) {
-                Map<String, Object> single = accountBalanceMapper.findByKey(accountId, balanceType, currency);
+                String pos = position != null ? position : "CURRENT";
+                Map<String, Object> single = accountBalanceMapper.findByKey(accountId, balanceType, pos, currency);
                 balances = single != null ? List.of(single) : List.of();
             } else {
                 balances = accountBalanceMapper.findByAccountId(accountId);

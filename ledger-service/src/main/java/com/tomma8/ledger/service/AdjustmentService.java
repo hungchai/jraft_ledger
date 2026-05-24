@@ -1,5 +1,6 @@
 package com.tomma8.ledger.service;
 
+import com.tomma8.ledger.domain.command.AdjustmentCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.exception.*;
@@ -66,7 +67,10 @@ public class AdjustmentService {
             return cached;
         }
         PostingCommand cmd = validateDraftForApproval(draftId, checkerId);
-        CommandResult result = stateMachine.applyPosting(cmd);
+        AdjustmentCommand adjCmd = new AdjustmentCommand(
+                cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
+                cmd.valueDate(), cmd.legs(), "MANUAL_ADJUSTMENT", draftId);
+        CommandResult result = stateMachine.applyAdjustment(adjCmd);
         recordApproveResult(draftId, approveRequestId, result);
         return result;
     }
