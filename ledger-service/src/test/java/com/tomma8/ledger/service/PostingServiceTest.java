@@ -87,7 +87,7 @@ class PostingServiceTest {
         CommandResult result = postingService.post(cmd);
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("INSUFFICIENT_BALANCE");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.INSUFFICIENT_BALANCE);
     }
 
     @Test
@@ -104,7 +104,7 @@ class PostingServiceTest {
         CommandResult result = postingService.post(cmd);
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("ACCOUNT_NOT_FOUND");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_NOT_FOUND);
     }
 
     @Test
@@ -148,7 +148,7 @@ class PostingServiceTest {
         CommandResult result = postingService.post(cmd);
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("INSUFFICIENT_BALANCE");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.INSUFFICIENT_BALANCE);
     }
 
     @Test
@@ -195,6 +195,6 @@ class PostingServiceTest {
         CommandResult result = postingService.post(cmd);
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("ACCOUNT_FROZEN");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_FROZEN);
     }
 }

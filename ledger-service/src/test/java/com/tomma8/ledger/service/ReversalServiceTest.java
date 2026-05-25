@@ -92,7 +92,7 @@ class ReversalServiceTest {
                 "rev-002", originalId, "Second", "CANCEL", LocalDate.now()));
 
         assertThat(second.isRejected()).isTrue();
-        assertThat(second.errorCodes()).contains("JOURNAL_ALREADY_REVERSED");
+        assertThat(second.errorCodes()).contains(LedgerErrorCode.JOURNAL_ALREADY_REVERSED);
     }
 
     @Test
@@ -106,7 +106,7 @@ class ReversalServiceTest {
                 "rev-002", reversalId, "Reverse reversal", "CANCEL", LocalDate.now()));
 
         assertThat(revOfRev.isRejected()).isTrue();
-        assertThat(revOfRev.errorCodes()).contains("CANNOT_REVERSE_REVERSAL");
+        assertThat(revOfRev.errorCodes()).contains(LedgerErrorCode.CANNOT_REVERSE_REVERSAL);
     }
 
     @Test

@@ -108,7 +108,8 @@ public class AdjustmentService {
             }
         }
         if (debitTotal.compareTo(creditTotal) != 0) {
-            throw new IllegalArgumentException("JOURNAL_UNBALANCED: debit=" + debitTotal + " credit=" + creditTotal);
+            throw new IllegalArgumentException(
+                    LedgerErrorCode.JOURNAL_UNBALANCED.name() + ": debit=" + debitTotal + " credit=" + creditTotal);
         }
     }
 }

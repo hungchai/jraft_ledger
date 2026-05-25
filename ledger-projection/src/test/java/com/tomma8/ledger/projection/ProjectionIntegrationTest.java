@@ -86,17 +86,33 @@ class ProjectionIntegrationTest {
         assertThat(mysql.isRunning()).isTrue();
         assertThat(kafka.isRunning()).isTrue();
 
-        // Direct MySQL insert and verify (use snowflake IDs)
-        long id1 = System.currentTimeMillis();
-        long id2 = System.currentTimeMillis() + 1;
-        journalMapper.insertJournal(id1, "JNL-PROJ-001", "NORMAL", "proj-test-001",
+        // Direct MySQL insert and verify (use surrogate IDs — no FK constraints)
+        long journalPk = System.currentTimeMillis();
+        long accountPk = 1L;
+        long balancePk = 1L;
+        long linePk = System.currentTimeMillis() + 1;
+
+        journalMapper.insertJournal(journalPk, "JNL-PROJ-001", "NORMAL", "proj-test-001",
                 "POSTING", "PROJ-001", LocalDate.of(2026, 5, 18),
                 "CONFIRMED", false, java.time.LocalDateTime.now());
 
-        journalMapper.insertJournalLine(id2, "JNL-PROJ-001-01", "JNL-PROJ-001", "leg-1",
-                "ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD", "DEBIT",
-                new BigDecimal("100.00"), new BigDecimal("1000.00"),
-                new BigDecimal("900.00"), 1, java.time.LocalDateTime.now());
+        journalMapper.insertJournalLine(linePk,
+                journalPk,            // journal_id (surrogate → journal.id)
+                accountPk,            // account_id (surrogate → account.id)
+                balancePk,            // account_balance_id (surrogate → account_balance.id)
+                "JNL-PROJ-001-01",    // journal_line_id (business key)
+                "JNL-PROJ-001",       // journal_journal_id (denormalized)
+                "ACC_001",            // account_account_id (denormalized)
+                "leg-1",              // leg_id
+                "AVAILABLE_BALANCE",  // balance_type
+                "CURRENT",            // position
+                "USD",                // currency
+                "DEBIT",              // entry_type
+                new BigDecimal("100.00"),
+                new BigDecimal("1000.00"),
+                new BigDecimal("900.00"),
+                1,
+                java.time.LocalDateTime.now());
 
         assertThat(journalMapper.findById("JNL-PROJ-001")).isNotNull();
     }

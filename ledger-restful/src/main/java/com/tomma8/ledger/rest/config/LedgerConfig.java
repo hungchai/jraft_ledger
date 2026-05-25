@@ -3,6 +3,7 @@ package com.tomma8.ledger.rest.config;
 import com.tomma8.ledger.domain.model.BalanceTypeConfig;
 import com.tomma8.ledger.domain.model.NegativeSemantics;
 import com.tomma8.ledger.domain.model.SignConvention;
+import com.tomma8.ledger.event.AsyncOutboxPublisher;
 import com.tomma8.ledger.event.KafkaEventPublisher;
 import com.tomma8.ledger.raft.LedgerRaftStateMachine;
 import com.tomma8.ledger.raft.NodeRole;
@@ -15,6 +16,7 @@ import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
@@ -100,6 +102,39 @@ public class LedgerConfig {
     public KafkaEventPublisher kafkaEventPublisher() {
         String brokers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
         return new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+    }
+
+    @Bean(destroyMethod = "close")
+    @Profile("!test")
+    public AsyncOutboxPublisher asyncOutboxPublisher(OutboxStore outboxStore,
+                                                      KafkaEventPublisher kafkaPublisher,
+                                                      MeterRegistry meterRegistry) {
+        Duration pollInterval = Duration.ofSeconds(
+                Long.parseLong(System.getenv().getOrDefault("OUTBOX_POLL_INTERVAL_SECS", "10")));
+        int batchSize = Integer.parseInt(
+                System.getenv().getOrDefault("OUTBOX_BATCH_SIZE", "100"));
+        AsyncOutboxPublisher publisher = new AsyncOutboxPublisher(
+                outboxStore, kafkaPublisher, pollInterval, batchSize);
+
+        // Register Micrometer gauges
+        Gauge.builder("ledger.outbox.pending", outboxStore::pendingCount)
+                .description("Outbox events pending in CF_OUTBOX")
+                .register(meterRegistry);
+        Gauge.builder("ledger.outbox.published", publisher::getPublishedCount)
+                .description("Total outbox events published to Kafka")
+                .register(meterRegistry);
+        Gauge.builder("ledger.outbox.failed", publisher::getFailedCount)
+                .description("Total outbox events that failed to publish")
+                .register(meterRegistry);
+        Gauge.builder("ledger.outbox.last_scan_pending", publisher::getLastScanPending)
+                .description("Pending events found in last outbox scan")
+                .register(meterRegistry);
+        Gauge.builder("ledger.outbox.last_scan_duration_ms", publisher::getLastScanDurationMs)
+                .description("Duration of last outbox scan in milliseconds")
+                .register(meterRegistry);
+
+        log.info("AsyncOutboxPublisher wired with pollInterval={} batchSize={}", pollInterval, batchSize);
+        return publisher;
     }
 
     @Bean

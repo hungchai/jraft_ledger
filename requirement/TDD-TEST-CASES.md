@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.5
-**日期**: 2026-05-24
+**版本**: v0.6
+**日期**: 2026-05-25
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.6 變更摘要**：新增 Module 19（F-012 Projection MySQL View Layer v2），新增 TC-PROJ-01~08。涵蓋 projection_event_log idempotency、accountSeq guard 防止 stale overwrite、surrogate FK chain 一致性、Kafka 重播冪等。TDD 執行計劃補充 Phase 8。
+>
 > **v0.5 變更摘要**：新增 Module 18（F-014 Java Client SDK），新增 TC-F014-01~08。TDD 執行計劃補充 Phase 7。
 >
 > **v0.4 變更摘要**：新增 Module 13（F-013 Idempotency & Hotspot Account Concurrency），新增 TC-F013-01~10。TDD 執行計劃補充 Phase 6.5。
@@ -1016,6 +1018,91 @@ TC-F014-08  post_unbalancedJournal_propagatesError
 
 ---
 
+## Module 19：Projection MySQL View Layer v2（F-012 v2）
+
+> 本模組涵蓋 projection MySQL schema v2 重構資料表之 idempotency、accountSeq guard、surrogate FK chain 及 Kafka 重播冪等測試。
+
+### 19.1 ProjectionEventLog — Idempotency Guard
+
+```
+TC-PROJ-01  insertEvent_newEvent_succeeds
+            Given: projection_event_log 為空，accountSeq=5 for ACC_001/AVAILABLE/USD
+            When:  insertEvent("ACC_001", "AVAILABLE_BALANCE", "USD", 5, "JLL-001", "JNL-001", "evt-001", "APPLIED")
+            Then:  INSERT 成功，status = "APPLIED"
+
+TC-PROJ-02  insertEvent_duplicateEvent_throwsDuplicateKey
+            Given: projection_event_log 已存在 (ACC_001, AVAILABLE, USD, seq=5)
+            When:  insertEvent("ACC_001", "AVAILABLE_BALANCE", "USD", 5, "JLL-001", "JNL-001", "evt-001", "APPLIED")
+            Then:  DuplicateKeyException（UK uk_event_seq 拒絕重複），不產生第二行
+```
+
+### 19.2 AccountBalance — accountSeq Guard
+
+```
+TC-PROJ-03  upsertBalance_higherSeq_appliesBalance
+            Given: account_balance 存在 (ACC_001, AVAILABLE, USD, seq=3, amount=100.00)
+            When:  upsertBalance(accountPk, "ACC_001", "AVAILABLE", "USD", 50.00, "CURRENT", seq=4, "JNL-002")
+            Then:  amount = 50.00, account_seq = 4, last_journal_id = "JNL-002"
+
+TC-PROJ-04  upsertBalance_lowerSeq_preservesExistingData
+            Given: account_balance 存在 (ACC_001, AVAILABLE, USD, seq=5, amount=200.00)
+            When:  upsertBalance(accountPk, "ACC_001", "AVAILABLE", "USD", 999.00, "CURRENT", seq=3, "JNL-stale")
+            Then:  amount = 200.00（未被覆蓋）, account_seq = 5（未被遞減）
+
+TC-PROJ-05  upsertBalance_sameSeq_idempotentNoChange
+            Given: account_balance 存在 (ACC_001, AVAILABLE, USD, seq=5, amount=200.00)
+            When:  upsertBalance(accountPk, "ACC_001", "AVAILABLE", "USD", 200.00, "CURRENT", seq=5, "JNL-001")
+            Then:  amount = 200.00（不變）, account_seq = 5（不變）
+```
+
+### 19.3 ProjectionConsumer — Full Idempotent Flow
+
+```
+TC-PROJ-06  onBalanceChange_newEvent_fullFlowSucceeds
+            Given: MySQL 乾淨，Kafka 事件 accountSeq=1 for ACC_001/AVAILABLE/USD
+            When:  ProjectionConsumer.onBalanceChange(event)
+            Then:  account 行存在、journal 行存在（journal_id UNIQUE OK）
+                   account_balance 行存在（amount=postBalance, seq=1）
+                   journal_line 行存在（journal_fk/account_fk/account_balance_fk 三個 surrogate FK 正確）
+                   projection_event_log 行存在（status=APPLIED）
+
+TC-PROJ-07  onBalanceChange_duplicateEvent_skippedWithNoSideEffect
+            Given: TC-PROJ-06 已成功處理 seq=1
+            When:  相同事件再次送達（相同 accountSeq=1）
+            Then:  projection_event_log insert → DuplicateKeyException
+                   account_balance 數據不變
+                   journal_line 數據不變
+                   無 exception 拋出至上層（graceful skip）
+
+TC-PROJ-08  onBalanceChange_staleSeq_eventLoggedAsSkippedStale
+            Given: account_balance 已更新至 seq=10（via prior events）
+            When:  送達 seq=5 的事件（模擬 Kafka out-of-order）
+            Then:  account_balance applyBalanceChange 返回 0 rows（seq guard）
+                   projection_event_log 寫入 status="SKIPPED_STALE"
+                   account_balance 數據不變（仍為 seq=10 的值）
+```
+
+### 19.4 Surrogate FK Chain Consistency
+
+```
+TC-PROJ-09  journalLine_insert_validSurrogateChain
+            Given: journal id=100, account id=200, account_balance id=300
+            When:  insertJournalLine(surrogate FKs: journalId=100, accountId=200, accountBalanceId=300,
+                   business keys: journalJournalId="JNL-001", accountAccountId="ACC_001")
+            Then:  journal_line 行成功插入
+                   journal_journal_id = "JNL-001"（denormalized for direct query）
+                   account_account_id = "ACC_001"（denormalized for direct query）
+                   所有三個 surrogate FK JOIN 回正確父行
+
+TC-PROJ-10  journalLine_missingSurrogateLogicallyAllowed
+            Given: journal id=999（不存在於 journal 表，因無 FK constraint）
+            When:  insertJournalLine(journalId=999, accountId=200, accountBalanceId=300, ...)
+            Then:  INSERT 成功（MySQL 無 FK 檢查）
+                   查詢時 LEFT JOIN journal 返回 NULL 欄位（資料完整但不影響 insert）
+```
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
@@ -1058,4 +1145,10 @@ Phase 6.5 — Idempotency & Hotspot Account【v0.4 新增】
 
 Phase 7 — Java Client SDK【v0.5 新增】
   TC-F014-01~08（Leader Discovery + Retry + Config + API Correctness）
+
+Phase 8 — Projection MySQL View Layer v2【v0.6 新增】
+  TC-PROJ-01~02（projection_event_log idempotency）
+  TC-PROJ-03~05（account_balance accountSeq guard）
+  TC-PROJ-06~08（ProjectionConsumer full idempotent flow）
+  TC-PROJ-09~10（surrogate FK chain — consistency + no-FK tolerance）
 ```

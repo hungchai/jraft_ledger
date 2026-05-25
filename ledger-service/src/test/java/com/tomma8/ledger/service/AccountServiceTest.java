@@ -77,7 +77,7 @@ class AccountServiceTest {
                 List.of(new AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))
         ));
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("ACCOUNT_ALREADY_EXISTS");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_ALREADY_EXISTS);
     }
 
     @Test

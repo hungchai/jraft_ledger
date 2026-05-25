@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.6  
-**日期**: 2026-05-24  
+**版本**: v0.8  
+**日期**: 2026-05-25  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -30,6 +30,8 @@
 | v0.4 | 2026-05-23 | 新增 Core Concepts 章節：定義 Account、BalanceType、Position 三大核心概念與關聯功能 | Ledger Platform Team |
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
+| v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
+| v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
 
 ---
 
@@ -49,10 +51,10 @@
 | F-008 | State Machine Design | Raft State Machine 核心設計 |
 | F-009 | Accounting Period / EOD | 帳期管理與 EOD 關期流程 |
 | F-010 | Account Management | 帳戶生命週期管理 |
-| F-011 | Balance Change Event / Kafka Outbox | Kafka 餘額變動事件發布 |
-| F-013 | Idempotency & Hotspot Concurrency | 冪等性與熱點帳戶併發處理 |
-| F-014 | Java Client SDK | Java 客戶端 SDK，隱藏 Raft Leader 發現、自動重試、同步/非同步 API |
-| OPS-001 | SRE 運維指南 | RocksDB 壓實、Raft 復原、MySQL 同步修復 |
+| F-011 | Balance Change Event / Kafka Outbox | Kafka 餘額變動事件發布 (accountSeq, Outbox Pattern) |
+| F-013 | Idempotency & Hotspot Concurrency | 冪等性 (requestId) 與熱點帳戶 Account Queue 併發處理 |
+| F-014 | Java Client SDK | Java 客戶端 SDK：Leader 發現、自動重試、同步/非同步 API |
+| OPS-001 | SRE 運維指南 | RocksDB 壓實備份、Raft 復原、MySQL 同步修復、DR 演練 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
 | Appendix A | Module Dependency & Docker Compose | 模組依賴圖與部署架構 |
 | Appendix B | Detailed Persistence Flow | 詳細落帳持久化流程 |
@@ -62,7 +64,7 @@
 
 ## Core Concepts（核心概念）
 
-本節定義 Ledger Platform 的三大核心概念：Account、BalanceType、Position。這些概念貫穿所有功能需求（F-001 至 F-011）。
+本節定義 Ledger Platform 的三大核心概念：Account、BalanceType、Position。這些概念貫穿所有功能需求（F-001 至 F-014）。
 
 ### Account（帳戶）
 
@@ -155,22 +157,30 @@ Position 是 v0.4 新增欄位，用於區分同一 BalanceType 的不同子餘�
 }
 ```
 
-**AccountBalanceKey 擴展：**
+**AccountBalanceKey（v0.7 修正）：**
 
 ```
-AccountBalanceKey = (accountId, balanceType, position, currency)
+AccountBalanceKey = (accountId, balanceType, currency)
 ```
 
-每個 Account 在每個 BalanceType + Position + Currency 組合下維護獨立餘額。
+**Position 為邏輯映射概念**，不是物理欄位。每個 `(accountId, balanceType, currency)` 的餘額存儲包含三個金額欄位：
+
+| 物理欄位 | 邏輯 Position | 說明 |
+|---|---|---|
+| `amount` | `CURRENT` | 即時可用餘額 |
+| `locked_amount` | `LOCKED` | 鎖定待審餘額 |
+| `frozen_amount` | `FROZEN` | 法規凍結餘額 |
+
+JournalLine 中的 `position` 欄位用於指定本次記帳應影響哪個物理欄位。State Machine apply 時根據 `JournalLine.position` 決定更新 `amount` / `locked_amount` / `frozen_amount`。
 
 **餘額聚合查詢：**
 
 ```
 GET /ledger/balances?accountId=X&balanceType=AVAILABLE&position=CURRENT
-  → 返回 CURRENT 子餘額
+  → 返回 amount（CURRENT 子餘額）
 
 GET /ledger/balances?accountId=X&aggregate=true
-  → 返回所有 Position 總和（CURRENT + LOCKED + FROZEN）
+  → 返回所有 Position 總和（amount + locked_amount + frozen_amount）
 ```
 
 **詳細規格見 F-002 Posting API v2 §3.4 Position Field、F-005 Balance Query v2。**
@@ -892,11 +902,14 @@ CREATE TABLE balance_type_registry (
 
 > **完整 View Layer Schema**：參見專案根目錄 `init.sql`，內含 `journal`、`journal_line`、`account`、`account_balance` 等全部建表語句。
 >
-> **account_balance 表結構（v0.3 更新）**：
-> - 新增 `position VARCHAR(16) NOT NULL` 欄位（值為 CURRENT / LOCKED / FROZEN）
-> - UNIQUE KEY 從 `(account_id, balance_type, currency)` 更新為 `(account_id, balance_type, position, currency)`
-> - `frozen_amount` / `locked_amount` 保留為 legacy 欄位（可用於報表兼容），但主要餘額追蹤改用 `position` 機制
-> - 冪等 UPSERT 以 `(account_id, balance_type, position, currency)` 為 UNIQUE KEY
+> **account_balance 表結構（v0.3 更新 → v0.7 修正）**：
+> - UNIQUE KEY 為 `(account_id, balance_type, currency)`，**不含 position**
+> - 每個 `(account_id, balance_type, currency)` 只有一筆 row，包含三個餘額欄位：
+>   - `amount` → 對應 `CURRENT` position 餘額
+>   - `locked_amount` → 對應 `LOCKED` position 餘額
+>   - `frozen_amount` → 對應 `FROZEN` position 餘額
+> - `position` 為**邏輯映射概念**，不是 account_balance 表的實體欄位；JournalLine.position 用於指定本次入帳應影響哪個餘額欄位
+> - 冪等 UPSERT 以 `(account_id, balance_type, currency)` 為 UNIQUE KEY
 
 ---
 
@@ -2239,15 +2252,17 @@ CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, pos
 -- account 表
 CREATE INDEX idx_owner_id         ON account (owner_id);
 
--- account_balance 表（含 frozen_amount、locked_amount；position 作為分離欄位）
+-- account_balance 表（三個餘額欄位：amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN）
 CREATE INDEX idx_account_id       ON account_balance (account_id);
-CREATE INDEX idx_account_balance  ON account_balance (account_id, balance_type, position, currency);
+CREATE UNIQUE INDEX idx_account_balance  ON account_balance (account_id, balance_type, currency);
 ```
 
-> **account_balance 表結構變化（v0.3）**：
-> - 新增 `position` 欄位（VARCHAR(16) NOT NULL，值為 CURRENT / LOCKED / FROZEN）
-> - UNIQUE KEY 從 `(account_id, balance_type, currency)` 更新為 `(account_id, balance_type, position, currency)`
-> - `frozen_amount` / `locked_amount` 保留為 legacy 欄位，但主要餘額追蹤改用 `position` 機制
+> **account_balance 表結構（v0.7 修正）**：
+> - 每個 `(account_id, balance_type, currency)` 僅一筆 row，三個餘額欄位對應三個 position：
+>   - `amount` → `CURRENT` position
+>   - `locked_amount` → `LOCKED` position
+>   - `frozen_amount` → `FROZEN` position
+> - `position` 為邏輯映射概念，不存在於 account_balance 表中；JournalLine.position 決定本次記帳影響哪個餘額欄位
 
 ---
 
@@ -2478,21 +2493,21 @@ Step 6：差異項需人工處理或系統補帳：
 ## 7. API 設計
 
 ```
-# 觸發手動對帳
+#### 觸發手動對帳
 POST /ledger/reconciliation/trigger
   { "reconDate": "2026-05-16", "reconType": "L1" }
 
-# 查詢對帳報告
+#### 查詢對帳報告
 GET /ledger/reconciliation/reports?date=2026-05-16
 
-# 查詢未解決 Case
+#### 查詢未解決 Case
 GET /ledger/reconciliation/cases?status=OPEN&reconType=L3
 
-# 更新 Case 狀態
+#### 更新 Case 狀態
 PATCH /ledger/reconciliation/cases/{caseId}
   { "status": "RESOLVED", "resolutionAction": "ADJUSTMENT", "resolutionJournalId": "..." }
 
-# 上傳外部清算文件（L3）
+#### 上傳外部清算文件（L3）
 POST /ledger/reconciliation/external-files
   Content-Type: multipart/form-data
 ```
@@ -2550,22 +2565,28 @@ State Machine 是 Ledger Platform 的核心計算單元，運行在 Raft Leader 
 
 ## 2. 資料結構
 
-### 2.1 In-Memory Balance Store（更新：AccountBalanceKey 擴展）
+### 2.1 In-Memory Balance Store（v0.7 修正：position 為邏輯映射）
 
 ```java
-// 帳戶餘額 Key（v0.3 更新：新增 position 欄位）
+// 帳戶餘額 Key（v0.7 修正：不含 position，position 為邏輯映射概念）
 record AccountBalanceKey(
     String accountId,
     String balanceType,
-    String position,    // CURRENT / LOCKED / FROZEN
     String currency
 ) {}
 
-// 帳戶餘額 Entry
+// 帳戶餘額 Entry（v0.7 修正：三個 position 的餘額欄位）
+// position 映射關係：amount=CURRENT, lockedAmount=LOCKED, frozenAmount=FROZEN
 record BalanceEntry(
-    BigDecimal amount,          // 當前餘額
+    BigDecimal amount,          // CURRENT position 餘額
+    BigDecimal lockedAmount,    // LOCKED position 餘額
+    BigDecimal frozenAmount,    // FROZEN position 餘額
     long stateVersion,          // 最後更新的 Raft Log Index
     String lastJournalId,       // 最後一筆 Journal ID
+    String lastJournalLineId,   // 最後一筆 JournalLine ID
+    long currentAccountSeq,     // CURRENT position 的 accountSeq
+    long lockedAccountSeq,      // LOCKED position 的 accountSeq
+    long frozenAccountSeq,      // FROZEN position 的 accountSeq
     Instant lastUpdatedAt       // 最後更新時間
 ) {}
 
@@ -2573,25 +2594,49 @@ record BalanceEntry(
 ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
 ```
 
-**Position 查詢支援**：
+**Position 查詢與更新**：
 
 ```java
-// 查詢某帳戶某 Balance Type 某幣種的所有 position 餘額
-Map<String, BigDecimal> getPositions(String accountId, String balanceType, String currency) {
-    return balanceStore.entrySet().stream()
-        .filter(e -> e.getKey().accountId().equals(accountId)
-                  && e.getKey().balanceType().equals(balanceType)
-                  && e.getKey().currency().equals(currency))
-        .collect(Collectors.toMap(
-            e -> e.getKey().position(),
-            e -> e.getValue().amount()
-        ));
+// 查詢某 position 的餘額（根據 JournalLine.position 路由到正確欄位）
+BigDecimal getBalanceByPosition(AccountBalanceKey key, String position) {
+    BalanceEntry entry = balanceStore.get(key);
+    return switch (position) {
+        case "CURRENT" -> entry.amount();
+        case "LOCKED"   -> entry.lockedAmount();
+        case "FROZEN"  -> entry.frozenAmount();
+        default -> throw new IllegalArgumentException("Unknown position: " + position);
+    };
 }
 
-// 聚合計算總餘額
-BigDecimal getAggregatedBalance(String accountId, String balanceType, String currency) {
-    return getPositions(accountId, balanceType, currency).values().stream()
-        .reduce(BigDecimal.ZERO, BigDecimal::add);
+// 更新某 position 的餘額（apply 時根據 JournalLine.position 更新對應欄位）
+BalanceEntry updateBalanceByPosition(AccountBalanceKey key, String position, BigDecimal newAmount, long raftLogIndex, String journalId, String journalLineId) {
+    BalanceEntry current = balanceStore.get(key);
+    BalanceEntry updated = switch (position) {
+        case "CURRENT" -> new BalanceEntry(newAmount, current.lockedAmount(), current.frozenAmount(),
+            raftLogIndex, journalId, journalLineId, current.currentAccountSeq() + 1, current.lockedAccountSeq(), current.frozenAccountSeq(), Instant.now());
+        case "LOCKED"   -> new BalanceEntry(current.amount(), newAmount, current.frozenAmount(),
+            raftLogIndex, journalId, journalLineId, current.currentAccountSeq(), current.lockedAccountSeq() + 1, current.frozenAccountSeq(), Instant.now());
+        case "FROZEN"  -> new BalanceEntry(current.amount(), current.lockedAmount(), newAmount,
+            raftLogIndex, journalId, journalLineId, current.currentAccountSeq(), current.lockedAccountSeq(), current.frozenAccountSeq() + 1, Instant.now());
+    };
+    balanceStore.put(key, updated);
+    return updated;
+}
+
+// 聚合計算總餘額（全部三個 position 加總）
+BigDecimal getAggregatedBalance(AccountBalanceKey key) {
+    BalanceEntry entry = balanceStore.get(key);
+    return entry.amount().add(entry.lockedAmount()).add(entry.frozenAmount());
+}
+
+// 查詢各 position 餘額分佈（供 API response）
+Map<String, BigDecimal> getPositions(AccountBalanceKey key) {
+    BalanceEntry entry = balanceStore.get(key);
+    return Map.of(
+        "CURRENT", entry.amount(),
+        "LOCKED", entry.lockedAmount(),
+        "FROZEN", entry.frozenAmount()
+    );
 }
 ```
 
@@ -2684,10 +2729,11 @@ record BalanceTypeConfig(
      if accountMetaStore.get(accountId).status != ACTIVE:
        return REJECTED(ACCOUNT_FROZEN)
 
-3. Balance 校驗（讀 balanceStore，計算 after 值）
+3. Balance 校驗（讀 balanceStore，根據 position 路由到正確欄位）
    for each JournalLineCmd:
      balanceTypeConfig = balanceTypeConfigStore.get(balanceType)
-     currentBalance = balanceStore.get(AccountBalanceKey)
+     key = AccountBalanceKey(accountId, balanceType, currency)
+     currentBalance = getBalanceByPosition(key, position)  // position 決定讀 amount/lockedAmount/frozenAmount
      afterBalance = compute(currentBalance, entryType, amount, signConvention)
 
      if !allowNegative && afterBalance < 0:
@@ -2716,9 +2762,11 @@ record BalanceTypeConfig(
        configVersion, createdAt=now()
      }
 
-6. 原子更新 balanceStore
+6. 原子更新 balanceStore（根據 position 路由到正確欄位）
    for each journalLine:
-     balanceStore.put(key, BalanceEntry(balanceAfter, raftLogIndex, journalId, now()))
+     key = AccountBalanceKey(accountId, balanceType, currency)
+     updateBalanceByPosition(key, position, balanceAfter, raftLogIndex, journalId, journalLineId)
+     // position=CURRENT → 更新 amount；position=LOCKED → 更新 lockedAmount；position=FROZEN → 更新 frozenAmount
 
 7. 持久化到 RocksDB
    rocksDB.put(CF_JOURNAL, journalId, serialize(journal))
@@ -2726,7 +2774,8 @@ record BalanceTypeConfig(
      rocksDB.put(CF_JOURNAL_LINE, journalLineId, serialize(journalLine))
    for each AccountBalanceKey:
      rocksDB.put(CF_BALANCE, key, serialize(balanceStore.get(key)))
-   // 以上三個 put 在同一 RocksDB WriteBatch，原子提交
+     // BalanceEntry 序列化包含 amount、lockedAmount、frozenAmount 三個欄位
+   // 以上 put 在同一 RocksDB WriteBatch，原子提交
 
 8. 更新 idempotencyStore
    idempotencyStore.put(requestId, IdempotencyEntry(COMPLETED, journalId, ...))
@@ -2786,9 +2835,11 @@ CF_JOURNAL_LINE:
   → 按 journal_id prefix 掃描可取出一筆 Journal 的所有 lines
 
 CF_BALANCE:
-  Key: account_id + "#" + balance_type + "#" + position + "#" + currency
-  → 按 account_id + "#" + balance_type + "#" prefix 掃描可取出一個帳戶某 Balance Type 的所有 position 餘額
+  Key: account_id + "#" + balance_type + "#" + currency
+  Value: 序列化的 BalanceEntry（含 amount、lockedAmount、frozenAmount 三個 position 餘額 + 各自 accountSeq）
+  → 按 account_id + "#" + balance_type + "#" prefix 掃描可取出一個帳戶某 Balance Type 所有幣種的餘額
   → 按 account_id prefix 掃描可取出一個帳戶的所有 balance
+  → position 為邏輯映射，不體現在 Key 中；讀取後根據 position 路由到對應 Value 欄位
 
 CF_IDEMPOTENCY:
   Key: request_id
@@ -2879,7 +2930,7 @@ Raft Learner
     ├─ journal（供 F-006 Journal Query）
     ├─ journal_line（供 F-006 Journal Query）
     ├─ account（帳戶資料，供 F-010 Account Query）
-    ├─ account_balance（供 F-007 Reconciliation；含 frozen_amount、locked_amount）
+    ├─ account_balance（供 F-007 Reconciliation；三個餘額欄位 amount/locked_amount/frozen_amount 對應 CURRENT/LOCKED/FROZEN position）
     ├─ balance_type_registry（Balance Type 配置）
     └─ balance_snapshot（供 F-005 As-of Query）
 ```
@@ -3044,13 +3095,13 @@ Step 10 新帳期 OPEN（T+1）
 ## 6. API 設計
 
 ```
-# 查詢帳期列表
+#### 查詢帳期列表
 GET /ledger/accounting-periods?status=OPEN
 
-# 手動觸發 EOD（測試或補跑）
+#### 手動觸發 EOD（測試或補跑）
 POST /ledger/accounting-periods/{periodId}/eod/trigger
 
-# 查詢 EOD 任務狀態
+#### 查詢 EOD 任務狀態
 GET /ledger/accounting-periods/{periodId}/eod/status
 ```
 
@@ -3202,6 +3253,578 @@ POST /ledger/accounts/{accountId}/balance-types
 | AC-03 | 解凍後，Posting 正常執行 | 功能測試 |
 | AC-04 | 帳戶餘額不為零時關閉，返回 `ACCOUNT_HAS_NON_ZERO_BALANCE` | 功能測試 |
 | AC-05 | 新增 Balance Type 後，可立即對該 type 做 Posting | 功能測試 |
+
+---
+
+# F-011 Balance Change Event / Kafka Outbox — 功能需求規格
+
+**文件版本**: v0.1  
+**功能**: F-011 Balance Change Event & Kafka Outbox（餘額變動事件發布）  
+**系統**: Next-Gen Internal Ledger Platform  
+**狀態**: Draft for Review  
+**依賴**: ADR-001、F-008 State Machine、Kafka Cluster
+
+---
+
+## 1. 功能概述
+
+每筆帳務操作（Posting / Reversal / Adjustment）在 State Machine apply 完成後，必須發布一筆 `BalanceChangeEvent` 至 Kafka，供下游系統（風控、報表、數據倉儲、即時監控）消費。
+
+**核心原則**：
+
+- **事件發布與帳務落帳原子綁定**：事件在 State Machine apply 內部產生，寫入 RocksDB Outbox（CF_OUTBOX），由 AsyncKafkaPublisher 異步發送至 Kafka
+- **Outbox Pattern**：確保事件不丟失、不重複（at-least-once），Kafka 宕機不影響帳務寫入
+- **Per-Key Sequential `accountSeq`**：每個 `(accountId, balanceType, position, currency)` 獨立維護單調遞增序號，消費者可用於偵測事件遺漏與排序
+- **事件不可變**：發布後不可撤回或修改；修正需發布新的 Correction Event
+
+---
+
+## 2. 事件結構
+
+### 2.1 BalanceChangeEvent Schema（v1.2）
+
+| 欄位 | 類型 | 必填 | 說明 |
+|---|---|---|---|
+| `eventId` | `string` | ✅ | 事件唯一 ID（UUID v7） |
+| `eventType` | `enum` | ✅ | `BALANCE_CHANGE` / `BALANCE_SNAPSHOT` / `BALANCE_CORRECTION` |
+| `eventVersion` | `string` | ✅ | Schema 版本，當前 `"1.2"` |
+| `eventTime` | `datetime` | ✅ | 事件產生時間（Raft apply 時間戳） |
+| `requestId` | `string` | ✅ | 觸發此事件的原始 requestId（Posting / Reversal / Adjustment） |
+| `journalId` | `string` | ✅ | 對應的 Journal ID |
+| `journalLineId` | `string` | ✅ | 對應的 JournalLine ID |
+| `accountId` | `string` | ✅ | 受影響帳戶 |
+| `balanceType` | `string` | ✅ | 餘額類型 |
+| `position` | `enum` | ✅ | 餘額位置：`CURRENT` / `LOCKED` / `FROZEN` |
+| `currency` | `string` | ✅ | ISO 4217 幣種代碼 |
+| `entryType` | `enum` | ✅ | `DEBIT` / `CREDIT` |
+| `amount` | `decimal` | ✅ | 變動金額（絕對值） |
+| `balanceBefore` | `decimal` | ✅ | 變動前餘額 |
+| `balanceAfter` | `decimal` | ✅ | 變動後餘額 |
+| `accountSeq` | `long` | ✅ | 此 Key 的單調遞增序號（從 1 開始） |
+| `prevAccountSeq` | `long` | ✅ | 此 Key 上一筆事件的 accountSeq（首筆為 0） |
+| `businessEventType` | `string` | ✅ | 原始業務事件類型（如 `RFQ_SETTLEMENT`） |
+| `businessEventRef` | `string` | ✅ | 原始業務事件 ID |
+| `valueDate` | `date` | ✅ | 帳務生效日 |
+| `operatorId` | `string` | ❌ | 操作員 ID（Reversal / Adjustment 時必填） |
+| `configVersion` | `int` | ✅ | Balance Type 配置版本（供下游追溯規則） |
+| `metadata` | `map<string,string>` | ❌ | 擴展欄位 |
+
+### 2.2 事件示例
+
+```json
+{
+  "eventId": "evt-0193a8b0-7c1d-7e5f-a2b3-c4d5e6f78901",
+  "eventType": "BALANCE_CHANGE",
+  "eventVersion": "1.2",
+  "eventTime": "2026-05-16T10:30:22.341Z",
+  "requestId": "req-550e8400-e29b-41d4-a716-446655440000",
+  "journalId": "JNL-20260516-000012345",
+  "journalLineId": "JL-000024689",
+  "accountId": "CLIENT_ACC_001",
+  "balanceType": "AVAILABLE_BALANCE",
+  "position": "CURRENT",
+  "currency": "USD",
+  "entryType": "DEBIT",
+  "amount": 800000.00,
+  "balanceBefore": 1000000.00,
+  "balanceAfter": 200000.00,
+  "accountSeq": 42,
+  "prevAccountSeq": 41,
+  "businessEventType": "RFQ_SETTLEMENT",
+  "businessEventRef": "RFQ-2026051600123",
+  "valueDate": "2026-05-16",
+  "configVersion": 3
+}
+```
+
+---
+
+## 3. accountSeq 機制
+
+### 3.1 設計目標
+
+`accountSeq` 為每個邏輯維度 `(accountId, balanceType, position, currency)` 提供嚴格單調遞增的序號。注意 position 為邏輯映射概念，物理存儲在 BalanceEntry 中以三個獨立欄位追蹤：`currentAccountSeq`（對應 CURRENT）、`lockedAccountSeq`（對應 LOCKED）、`frozenAccountSeq`（對應 FROZEN）。
+
+- **Gap Detection**：消費者若收到 `accountSeq=102`（同 position）而上一條為 `100`，可判定 `101` 遺漏，觸發告警或 reconciliation
+- **Ordering**：消費者按同一 position 的 `accountSeq` 排序，保證事件按發生順序處理
+- **Deduplication**：消費者按 `(accountId, balanceType, position, currency, accountSeq)` 去重
+
+### 3.2 遞增規則
+
+```
+規則 1：accountSeq 從 1 開始，每個 Key 獨立計數
+規則 2：每次 Posting / Reversal / Adjustment apply 後，該 Key 的 accountSeq += 1
+規則 3：同一筆 Posting 涉及多個 Key，各 Key 的 accountSeq 各自遞增，互不影響
+規則 4：不同 position（CURRENT / LOCKED / FROZEN）的 accountSeq 各自獨立
+規則 5：accountSeq 不可跳號（gap 代表事件遺漏或系統異常）
+規則 6：帳期關閉或 Snapshot 不重置 accountSeq（貫穿帳戶完整生命週期）
+規則 7：若 accountSeq 接近 Long.MAX_VALUE 的 80%，觸發 PagerDuty 告警（帳戶需遷移）
+```
+
+### 3.3 示例
+
+```
+CLIENT_ACC_001, AVAILABLE_BALANCE, CURRENT, USD:
+  Posting #1 (DEBIT 100)  → accountSeq=1,  prevAccountSeq=0
+  Posting #2 (CREDIT 50)  → accountSeq=2,  prevAccountSeq=1
+  Reversal #1              → accountSeq=3,  prevAccountSeq=2
+
+CLIENT_ACC_001, AVAILABLE_BALANCE, LOCKED, USD:
+  Posting #1 (DEBIT 100)  → accountSeq=1,  prevAccountSeq=0
+  （與 CURRENT position 的 seq 獨立）
+
+CLIENT_ACC_001, TRADE_AHEAD_BALANCE, CURRENT, USD:
+  Posting #1 (DEBIT 500)  → accountSeq=1,  prevAccountSeq=0
+  （與 AVAILABLE_BALANCE 的 seq 獨立）
+```
+
+---
+
+## 4. Kafka Outbox 機制
+
+### 4.1 架構
+
+```
+State Machine apply()
+        │
+        ├─ 1. 更新 balanceStore（in-memory）
+        ├─ 2. 生成 Journal + JournalLine
+        ├─ 3. 構建 BalanceChangeEvent（含 accountSeq）
+        ├─ 4. 寫入 RocksDB CF_OUTBOX（與帳務數據在同一 WriteBatch）
+        └─ 5. 更新 idempotencyStore
+                │
+                │  （異步，非阻塞）
+                ▼
+        AsyncKafkaPublisher
+                │
+                ├─ 輪詢 CF_OUTBOX（每 100ms 或累積 500 條）
+                ├─ 批量發送至 Kafka Topic: ledger.balance.change.v1
+                ├─ 發送成功 → 刪除 CF_OUTBOX 記錄
+                └─ 發送失敗 → 保留記錄，下次重試
+```
+
+### 4.2 Kafka Topic 配置
+
+| 屬性 | 值 | 說明 |
+|---|---|---|
+| Topic Name | `ledger.balance.change.v1` | 事件主題 |
+| Partitions | 64 | 按 `accountId` hash 分區，保證同一帳戶事件有序 |
+| Replication Factor | 3 | 與 Raft 集群節點數一致 |
+| Compression | LZ4 | 平衡壓縮率與 CPU |
+| Retention | 7 days | 合規與回溯需求 |
+| `acks` | `all` | 最強持久保證 |
+| `min.insync.replicas` | 2 | Quorum ≥ 2 |
+| Partition Key | `accountId:balanceType:currency` | 保證同一 Key 事件有序 |
+
+### 4.3 CF_OUTBOX 設計
+
+```
+CF_OUTBOX:
+  Key:   eventId（UUID v7，可按時間排序）
+  Value: 序列化的 BalanceChangeEvent JSON
+  
+特性：
+  - 與帳務數據在同一 WriteBatch，原子寫入
+  - AsyncKafkaPublisher 定時掃描並發送
+  - 發送成功後異步刪除（不阻塞 apply）
+  - 發送失敗保留，下次掃描時重試（at-least-once）
+  - 節點重啟後，CF_OUTBOX 中未發送事件會被重新發送
+```
+
+### 4.4 At-Least-Once 語義與消費者去重
+
+```
+生產端：AsyncKafkaPublisher 可能因網路超時重試導致重複發送
+消費端去重策略：
+  - 按 (accountId, balanceType, position, currency, accountSeq) 去重
+  - 或按 eventId 去重
+  - Consumer 必須實現冪等處理
+
+Gap Detection：
+  - Consumer 維護每個 Key 的 lastSeenSeq
+  - 收到新事件時：if newSeq > lastSeenSeq + 1 → 判定 GAP
+  - 觸發告警，可能需要從 Kafka 回溯或 Reconciliation 補齊
+```
+
+---
+
+## 5. Consumer 合約
+
+### 5.1 Consumer 責任
+
+| 責任 | 說明 |
+|---|---|
+| 冪等處理 | 按 `eventId` 或 `(accountBalanceKey, accountSeq)` 去重 |
+| Gap Detection | 追蹤每個 Key 的 `accountSeq`，跳號觸發告警 |
+| 排序保證 | 同 Key 事件按 `accountSeq` 升序處理（Kafka partition 保證有序） |
+| 錯誤處理 | 消費失敗記錄至 dead-letter topic，不阻塞 partition 消費 |
+| 延遲監控 | 監控 `eventTime` 與消費時間的差值，超過 10s 告警 |
+
+### 5.2 Consumer 不負責
+
+- 不修改事件內容（事件不可變）
+- 不做帳務校驗（校驗由 L1 Reconciliation 負責）
+- 不做 Balance 計算（Balance 由 State Machine 計算並記錄在事件中）
+
+---
+
+## 6. 錯誤處理與恢復
+
+### 6.1 Kafka 不可用
+
+```
+Kafka Broker 宕機或網路中斷：
+  → AsyncKafkaPublisher 發送失敗
+  → 事件保留在 CF_OUTBOX，不丟失
+  → 帳務寫入不受影響（Outbox 與帳務在同一 WriteBatch，已持久化）
+  → Kafka 恢復後，AsyncKafkaPublisher 自動從 CF_OUTBOX 重新發送
+```
+
+### 6.2 節點重啟
+
+```
+節點重啟：
+  → RocksDB CF_OUTBOX 中未發送事件被保留（已持久化）
+  → 重啟後 AsyncKafkaPublisher 掃描 CF_OUTBOX，重新發送
+  → 事件 accountSeq 保持不變（在 apply 時已確定）
+  → Consumer 按 accountSeq 去重，不重複處理
+```
+
+---
+
+## 7. 監控指標
+
+| Metric | Type | Labels | 說明 |
+|---|---|---|---|
+| `ledger.outbox.pending.count` | Gauge | — | CF_OUTBOX 中待發送事件數 |
+| `ledger.outbox.publish.latency` | Histogram | — | Outbox → Kafka 發送延遲 |
+| `ledger.kafka.publish.lag` | Gauge | topic | Kafka producer lag |
+| `ledger.kafka.publish.error.count` | Counter | errorType | 發送失敗次數 |
+| `ledger.event.account_seq.gap` | Counter | accountId | Consumer 端偵測到的 gap 次數 |
+
+**告警規則**：
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Outbox pending > 10,000 | 持續 1 分鐘 | WARNING |
+| Outbox pending > 100,000 | 持續 1 分鐘 | CRITICAL |
+| Kafka publish error rate > 10% | 持續 30 秒 | CRITICAL |
+| Consumer gap detected | 任意次 | WARNING |
+| Consumer lag > 1,000 messages | 持續 2 分鐘 | WARNING |
+
+---
+
+## 8. 性能目標
+
+| 指標 | 目標 |
+|---|---|
+| 事件寫入 Outbox Overhead | ≤ 0.1ms（同一 WriteBatch） |
+| Outbox → Kafka P95 延遲 | ≤ 50ms |
+| Kafka Producer 吞吐 | ≥ 20,000 events/s |
+| 節點重啟後 Outbox Drain | ≤ 30s（10,000 條積壓） |
+
+---
+
+## 9. 驗收標準
+
+| # | 驗收條件 | 測試方式 | 對應 TC |
+|---|---|---|---|
+| AC-01 | Posting apply 後 BalanceChangeEvent 發布至 Kafka，accountSeq=1, prevAccountSeq=0 | 整合測試 | TC-F011-01 |
+| AC-02 | 連續 Posting 後 accountSeq 正確遞增，prevAccountSeq 指向上一條 | 整合測試 | TC-F011-02 |
+| AC-03 | Reversal 觸發事件 accountSeq 遞增 | 功能測試 | TC-F011-03 |
+| AC-04 | Consumer 偵測到 accountSeq 跳號（gap），觸發告警 | Consumer 測試 | TC-F011-04 |
+| AC-05 | Outbox at-least-once 重發時 Consumer 按 idempotencyKey 去重 | Consumer 測試 | TC-F011-05 |
+| AC-06 | 節點重啟後 Outbox 重發，accountSeq 保持不變 | 故障測試 | TC-F011-06 |
+| AC-07 | 同一 Posting 涉及多個 BalanceType，各 Key 的 accountSeq 獨立遞增 | 功能測試 | TC-F011-07 |
+| AC-08 | 事件 position 欄位正確反映 JournalLine 的 position | 功能測試 | TC-F011-08 |
+| AC-09 | 同一帳戶不同 position 的 accountSeq 各自獨立 | 功能測試 | TC-F011-09 |
+| AC-10 | Kafka 不可用時帳務寫入不受影響，恢復後 Outbox 自動 drain | 故障測試 | TC-KAFKA-01 |
+| AC-11 | RocksDB CF_OUTBOX 與帳務數據在同一 WriteBatch，原子持久化 | 單元測試 | TC-ROCKS-01 |
+
+
+---
+
+# F-013 Idempotency & Hotspot Account Concurrency — 功能需求規格
+
+**文件版本**: v0.1  
+**功能**: F-013 Idempotency & Hotspot Account Concurrency（冪等性與熱點帳戶併發處理）  
+**系統**: Next-Gen Internal Ledger Platform  
+**狀態**: Draft for Review  
+**依賴**: ADR-001、F-002 Posting API、F-008 State Machine
+
+---
+
+## 1. 功能概述
+
+本功能定義 Ledger Platform 的冪等性保障機制與熱點帳戶（Hotspot Account）高併發處理策略。兩個議題緊密相關：冪等性是分散式系統中安全重試的基礎；熱點帳戶併發控制依賴 Account-Level Queue 的序列化機制，而該機制又需與冪等性協同工作。
+
+**核心設計目標**：
+
+- **Exactly-Once 語義**：相同 `requestId` 的寫入請求，無論重試多少次，只執行一次帳務變動
+- **熱點帳戶無鎖競爭**：Account-Level Queue 將並發轉為序列化排隊，消除 DB row lock 競爭
+- **多帳戶原子性**：跨帳戶操作（RFQ）採用按 accountId 升序取 Token，防止死鎖
+- **背壓保護**：Queue 深度超過閾值時拒絕請求，防止記憶體耗盡
+
+---
+
+## 2. 冪等性機制
+
+### 2.1 Idempotency Key
+
+| 屬性 | 規格 |
+|---|---|
+| Key 格式 | `requestId`（UUID v7） |
+| Key 來源 | 調用方在請求中提供，必須全局唯一 |
+| Key TTL | 預設 24 小時（可配置 `ledger.idempotency.ttl-hours`） |
+| Key 範圍 | 全局（跨所有寫入操作：Posting / Reversal / Adjustment Approve） |
+
+### 2.2 Idempotency Store 架構
+
+```
+雙層保障：
+
+L1: In-Memory Idempotency Store（State Machine 內存）
+    ├─ 數據結構：ConcurrentHashMap<String, IdempotencyEntry>
+    ├─ 讀取延遲：< 0.01ms
+    ├─ TTL：24 小時（定期 eviction job 清理過期條目）
+    └─ 用途：正常路徑的快速冪等檢查
+
+L2: RocksDB CF_IDEMPOTENCY（持久化層）
+    ├─ Key：requestId
+    ├─ Value：序列化的 IdempotencyEntry（含狀態、journalId、errors、timestamp）
+    ├─ 用途：節點重啟後恢復、跨 Leader 切換保持冪等
+    └─ 與帳務數據在同一 WriteBatch，原子寫入
+```
+
+### 2.3 IdempotencyEntry 結構
+
+```java
+record IdempotencyEntry(
+    String requestId,          // 原始 requestId
+    String status,             // COMPLETED / REJECTED
+    String journalId,          // 成功時的 journalId（失敗時為 null）
+    List<String> errors,       // 失敗時的錯誤碼列表（成功時為空）
+    String resultJson,         // 原始 Response JSON（用於冪等返回）
+    Instant completedAt,       // 完成時間
+    Instant expiresAt          // 過期時間（completedAt + TTL）
+) {}
+```
+
+### 2.4 冪等檢查流程
+
+```
+1. Client 發送 Posting 請求（含 requestId = "req-001"）
+
+2. Account Worker 執行前：
+   ├─ L1 檢查：idempotencyStore.contains("req-001")?
+   │   ├─ YES, status=COMPLETED → 直接返回緩存結果，不執行
+   │   ├─ YES, status=REJECTED  → 直接返回緩存錯誤，不執行
+   │   └─ NO                    → 繼續執行
+
+3. 執行 Posting（Balance 校驗 → State Machine apply → RocksDB 持久化）
+
+4. 成功後：
+   ├─ 構建 IdempotencyEntry（status=COMPLETED, journalId=...）
+   ├─ 寫入 L1（idempotencyStore.put）
+   ├─ 寫入 L2（RocksDB CF_IDEMPOTENCY，同一 WriteBatch）
+   └─ 返回 PostingResult
+
+5. 失敗後：
+   ├─ 構建 IdempotencyEntry（status=REJECTED, errors=[...]）
+   ├─ 寫入 L1（idempotencyStore.put）
+   ├─ 寫入 L2（RocksDB CF_IDEMPOTENCY，同一 WriteBatch）
+   └─ 返回錯誤 Response
+```
+
+### 2.5 冪等性與 Leader 切換
+
+```
+Scenario: Leader A 完成 req-003 apply → idempotencyStore.put → Leader A 宕機
+
+1. Raft 選舉新 Leader B
+2. Leader B 從 RocksDB Snapshot + Raft Log Replay 恢復 State Machine
+3. 恢復過程中從 CF_IDEMPOTENCY 載入所有未過期條目到 L1
+4. req-003 的 IdempotencyEntry 在 Snapshot 中 → 恢復後 L1 命中
+5. Client 重試 req-003 → Leader B 返回緩存結果，不重複執行
+
+保證：只要 req-003 的 apply 已 commit（Quorum），冪等記錄就不會丟失
+```
+
+### 2.6 TTL 過期行為
+
+```
+過期策略：
+  - Eviction Job 每 60 秒掃描 L1，刪除 expiresAt < now() 的條目
+  - RocksDB CF_IDEMPOTENCY 中的過期條目在 Compaction 時清理
+  - 已過期的 requestId 若再次出現：視為新請求，重新執行（可能產生重複帳務！）
+
+調用方責任：
+  - 重試必須在 TTL 內完成（預設 24 小時）
+  - 超過 TTL 的重試風險自負（可能產生重複入帳）
+  - 建議：業務系統使用合理的重試策略（maxRetries=3，backoff 遞增，總耗時 < 5 分鐘）
+```
+
+---
+
+## 3. 熱點帳戶併發處理
+
+### 3.1 問題定義
+
+RFQ 場景中，所有客戶交易的對手方為同一公司帳戶（`COMPANY_FX_ACC`），該帳戶成為 Hotspot：
+
+```
+傳統 DB 方案問題：
+  1000 並發 RFQ → 1000 個 thread 競爭 COMPANY_FX_ACC 的 row lock
+  → 大量鎖等待、deadlock、P95 延遲飆升
+  → 無法滿足 Posting P95 ≤ 3ms 目標
+```
+
+### 3.2 解決方案：Account-Level Queue
+
+```
+每個帳戶維護一條 LinkedBlockingQueue + 專屬 Virtual Thread Worker：
+
+  ┌──────────────────────────────────────┐
+  │         AccountQueueManager          │
+  │                                      │
+  │  accountQueues: ConcurrentHashMap    │
+  │    "CLIENT_ACC_001"  → Queue-A       │
+  │    "COMPANY_FX_ACC"  → Queue-B       │
+  │    "CLIENT_ACC_002"  → Queue-C       │
+  │         ...                          │
+  │                                      │
+  │  每條 Queue:                         │
+  │    ├─ LinkedBlockingQueue<Runnable>  │
+  │    ├─ Virtual Thread Worker × 1      │
+  │    └─ 序列化執行，無並發衝突          │
+  └──────────────────────────────────────┘
+
+效果：
+  - COMPANY_FX_ACC 的所有請求在同一 Queue 排隊
+  - 沒有鎖競爭，只有 nanosecond 級的 queue 等待
+  - Hotspot 帳戶延遲與普通帳戶相同
+```
+
+### 3.3 Account Worker 執行模型
+
+```java
+// Virtual Thread Worker — 每個帳戶一個
+void accountWorker(String accountId, LinkedBlockingQueue<Runnable> queue) {
+    while (running) {
+        Runnable task = queue.take();  // blocking until task available
+        task.run();                    // 單線程執行，無需同步
+    }
+}
+```
+
+**特性**：
+- Virtual Thread 極輕量（每個 ~1KB），百萬帳戶亦無壓力
+- `queue.take()` 阻塞等待，無 CPU 空轉
+- 單線程執行保證同一帳戶的請求嚴格序列化
+- Worker 崩潰時自動重建（Supervisor 監控）
+
+### 3.4 多帳戶原子性（RFQ 場景）
+
+跨帳戶操作需在兩個 Account Queue 之間協調：
+
+```
+RFQ 涉及 CLIENT_ACC_001 + COMPANY_FX_ACC
+
+Step 1: 按 accountId 字典序升序排列（防死鎖）
+         CLIENT_ACC_001 < COMPANY_FX_ACC
+         → 先取 CLIENT_ACC_001，再取 COMPANY_FX_ACC
+
+Step 2: 取得 Coordination Token
+         ├─ Queue-A（CLIENT_ACC_001）：取得 Token，暫停消費
+         ├─ Queue-B（COMPANY_FX_ACC）：取得 Token，暫停消費
+         └─ 兩個 Token 都就緒 → 構建 Multi-Account RaftCommand
+
+Step 3: 提交 RaftCommand
+         → State Machine apply 一次性更新所有帳戶
+         → 原子操作
+
+Step 4: 釋放 Token
+         → Queue-A 恢復消費
+         → Queue-B 恢復消費
+
+死鎖預防證明：
+  所有請求均按 accountId 升序取 Token
+  → 不存在循環等待 → 無死鎖
+```
+
+### 3.5 背壓保護（Queue Depth Limit）
+
+| 參數 | 預設值 | 說明 |
+|---|---|---|
+| `MAX_QUEUE_SIZE` | 1000 | 每條 Account Queue 最大深度 |
+| 行為 | 拒絕 | 超過 MAX_QUEUE_SIZE 時返回 HTTP 429 |
+
+```
+拒絕流程：
+  1. Request 到達 → AccountQueueManager.enqueue(accountId, task)
+  2. queue.size() >= MAX_QUEUE_SIZE?
+     ├─ YES → throw QueueFullException
+     │         → 返回 HTTP 429 QUEUE_FULL
+     └─ NO  → queue.offer(task) → 成功
+
+監控：
+  - Gauge: ledger.account_queue.depth{accountId}
+  - Alert: queue.depth > 80% MAX_QUEUE_SIZE → WARNING
+  - Alert: queue.depth >= MAX_QUEUE_SIZE → CRITICAL（請求被拒絕）
+```
+
+---
+
+## 4. 並發安全保證
+
+### 4.1 保證層級
+
+| 場景 | 機制 | 保證 |
+|---|---|---|
+| 同一帳戶多次 Posting | Account Queue 序列化 | 嚴格順序執行，無 race condition |
+| 多帳戶 RFQ Posting | 按 accountId 升序取 Token | 原子執行，無死鎖 |
+| 同一 requestId 重試 | L1 + L2 Idempotency Store | Exactly-once |
+| Queue 滿 | MAX_QUEUE_SIZE 背壓 | 快速失敗，不阻塞調用方 |
+| Worker 崩潰 | Supervisor 重建 | Queue 中請求不丟失 |
+
+### 4.2 不保證的場景
+
+| 場景 | 說明 |
+|---|---|
+| 跨 Account Queue 的請求順序 | 不同帳戶的 Queue 之間無順序保證 |
+| 調用方層面的全局順序 | Ledger 只保證帳戶級順序，不保證全局 FIFO |
+| TTL 過期後的冪等 | 調用方需在 TTL 內完成重試 |
+
+---
+
+## 5. 效能目標
+
+| 指標 | 目標 | 測試條件 |
+|---|---|---|
+| 冪等檢查（L1 命中） | ≤ 0.01ms | ConcurrentHashMap.get() |
+| 熱點帳戶 Queue 等待 | ≤ 0.1ms（排隊延遲） | 1000 並發 |
+| Hotspot Posting P95 | ≤ 3ms | COMPANY_FX_ACC，1000 並發 |
+| 多帳戶 Token 獲取 | ≤ 0.5ms | 雙帳戶 RFQ |
+| Queue Full 響應 | ≤ 1ms | 立即拒絕 |
+| Worker 重建 | ≤ 100ms | 故障恢復 |
+
+---
+
+## 6. 驗收標準
+
+| # | 驗收條件 | 測試方式 | 對應 TC |
+|---|---|---|---|
+| AC-01 | 相同 requestId 重試返回原結果（journalId 相同），State Machine 不重新 apply | 單元測試 | TC-F013-01 |
+| AC-02 | 被拒絕的 requestId（如 INSUFFICIENT_BALANCE）重試時返回原錯誤碼 | 單元測試 | TC-F013-02 |
+| AC-03 | Leader 切換後 idempotencyStore 從 RocksDB 恢復，冪等仍然有效 | 故障測試 | TC-F013-03 |
+| AC-04 | TTL 過期後相同 requestId 視為新請求，重新執行 | 單元測試 | TC-F013-04 |
+| AC-05 | 並發重複 requestId 請求只產生 1 筆 Journal | 並發測試 | TC-F013-05 |
+| AC-06 | 1000 並發打同一 HOTSPOT 帳戶，無重複扣款、無負數、餘額精確 | 並發安全測試 | TC-F013-06 |
+| AC-07 | Hotspot 帳戶 1000 並發 Posting P95 ≤ 3ms | 性能測試 | TC-F013-07 |
+| AC-08 | Queue 深度超過 MAX_QUEUE_SIZE 時返回 HTTP 429 QUEUE_FULL | 背壓測試 | TC-F013-08 |
+| AC-09 | 多帳戶 RFQ 無死鎖（反向帳戶順序同時執行） | 死鎖測試 | TC-F013-09 |
+| AC-10 | Virtual Thread Worker 崩潰後自動重建，Queue 繼續消費 | 故障測試 | TC-F013-10 |
+
 
 ---
 
@@ -3762,6 +4385,584 @@ long successCount = futures.stream()
 | AC-09 | SDK 內部 overhead ≤ 0.5ms（不含網路） | 效能測試 |
 | AC-10 | 效能測試模組可通過 SDK 替代 raw HTTP/RestTemplate | 整合測試 |
 | AC-11 | SDK 關閉（`close()`）後所有資源（連線池、執行緒池）正確釋放 | 單元測試 |
+
+
+---
+
+# OPS-001 SRE 運維指南 — 運維需求規格
+
+**文件版本**: v0.1  
+**功能**: OPS-001 SRE 運維指南（SRE Operational Guide）  
+**系統**: Next-Gen Internal Ledger Platform  
+**狀態**: Draft for Review  
+**依賴**: ADR-001、F-008 State Machine、Appendix A Docker Compose Stack
+
+---
+
+## 1. 概述
+
+本文件定義 Ledger Platform 的日常運維操作流程（Runbook），涵蓋 RocksDB 維護、Raft 集群管理、MySQL View Layer 同步修復、監控告警響應、災難恢復演練。所有操作均需通過管理 API 或標準化腳本執行，禁止直接操作底層檔案系統或資料庫。
+
+**核心原則**：
+
+- **所有操作可審計**：管理 API 記錄操作員、時間、操作內容
+- **優先無停機操作**：節點替換、RocksDB 壓實、配置變更均支援滾動執行
+- **SOP 書面化**：每項操作有標準步驟清單，減少人為失誤
+- **監控先行**：操作前檢查監控面板，操作後驗證指標恢復
+
+---
+
+## 2. RocksDB 運維
+
+### 2.1 RocksDB 目錄結構
+
+```
+/var/lib/ledger/rocksdb/          # Docker container 內路徑
+├── CF_JOURNAL/                   # Journal 記錄
+├── CF_JOURNAL_LINE/              # JournalLine 記錄
+├── CF_BALANCE/                   # 餘額快照
+├── CF_IDEMPOTENCY/               # 冪等記錄
+├── CF_ACCOUNT_META/              # 帳戶 metadata
+├── CF_BALANCE_TYPE/              # Balance Type 配置
+├── CF_SM_SNAPSHOT/               # State Machine Snapshot
+├── CF_OUTBOX/                    # Kafka 待發送事件
+├── MANIFEST-*                    # RocksDB MANIFEST
+├── CURRENT                       # 當前 MANIFEST 指針
+├── OPTIONS-*                     # 配置快照
+└── LOG                           # RocksDB 內部日誌
+
+Host mount: ./jraft_ledger/node{N}/ (Docker Compose)
+```
+
+### 2.2 壓實策略（Compaction）
+
+```
+Level Compaction 策略（預設）：
+  Level 0: 4 files max
+  Level 1: 256 MB
+  Level 2: 2.56 GB
+  Level 3: 25.6 GB
+  ...
+
+配置參數（rocksdb.properties）：
+  write_buffer_size=64MB
+  max_write_buffer_number=3
+  max_background_jobs=4
+  level0_file_num_compaction_trigger=4
+  target_file_size_base=64MB
+  max_bytes_for_level_base=256MB
+```
+
+**手動觸發全量壓實**（低流量時段執行）：
+
+```
+POST /admin/ledger/rocksdb/compact
+  { "nodeId": "node-001", "compactAll": true }
+
+注意：
+  - 全量壓實期間寫入吞吐可能下降 30–50%
+  - 建議在每日 02:00–04:00 低流量窗口執行
+  - 單節點執行，完成後逐節點滾動
+```
+
+**定期壓實排程**：
+
+| 頻率 | 操作 | 說明 |
+|---|---|---|
+| 每日 03:00 | 增量壓實 | 清除 CF_IDEMPOTENCY 過期條目 |
+| 每週日 03:00 | 全量壓實 | 每個節點輪流執行，間隔 30 分鐘 |
+| 每月首日 03:00 | 全量壓實 + 備份 | 壓實後立即做 RocksDB checkpoint 備份 |
+
+### 2.3 備份與恢復
+
+**RocksDB Checkpoint 備份**：
+
+```
+每日備份流程（由 cron job 觸發）：
+  1. POST /admin/ledger/rocksdb/checkpoint
+     → RocksDB 建立 Checkpoint（硬連結，瞬時完成，不阻塞寫入）
+  2. 備份 Checkpoint 目錄至對象存儲（S3 / MinIO）
+     → 路徑：s3://ledger-backup/rocksdb/{date}/node-{N}/checkpoint/
+  3. 保留策略：
+     - 最近 7 天：每日保留
+     - 最近 4 週：每週保留（週日備份）
+     - 最近 12 月：每月保留（首日備份）
+     - 超過 12 月：歸檔至 Glacier
+
+備份驗證：
+  - 每週隨機抽取一個備份，在隔離環境 restore 並驗證 balanceStore 完整性
+  - 驗證腳本：scripts/verify-rocksdb-backup.sh {backup_path}
+```
+
+**從備份恢復**：
+
+```
+Single Node Recovery（節點損壞，集群仍正常）：
+  1. 停止損壞節點
+  2. 從 S3 下載最新 Checkpoint 備份
+  3. 清空損壞節點的 /var/lib/ledger/rocksdb/
+  4. 解壓備份到 rocksdb 目錄
+  5. 啟動節點
+  6. 節點以 Follower 身份加入集群
+  7. Raft 自動從 Leader 補齊備份後的增量 Log
+  8. 驗證：GET /admin/ledger/health → status=HEALTHY
+
+Full Cluster Recovery（極端場景，全部節點損壞）：
+  1. 從 S3 下載最近一次完整備份
+  2. 恢復到 node-001
+  3. node-001 以單節點集群啟動（bootstrap mode）
+  4. 驗證 Snapshot 完整性（scripts/verify-rocksdb-backup.sh）
+  5. 啟動 node-002、node-003，以 Follower 加入集群
+  6. 執行 L1 Reconciliation 驗證數據完整性
+```
+
+### 2.4 磁碟空間管理
+
+| 指標 | 預警閾值 | 處理 |
+|---|---|---|
+| RocksDB 目錄大小 | > 80% 磁碟空間 | WARNING — 考慮擴容或清理老舊 Snapshot |
+| RocksDB 目錄大小 | > 95% 磁碟空間 | CRITICAL — 立即執行全量壓實，暫停寫入 |
+| SST File 數量 | > 10,000 | WARNING — 觸發手動壓實 |
+| WAL 堆積 | > 1,000 文件 | WARNING — 檢查 Raft Log 消費速度 |
+
+**清理命令**：
+
+```
+# 刪除指定日期之前的 RocksDB 備份
+POST /admin/ledger/rocksdb/cleanup
+  { "before": "2026-01-01", "dryRun": true }
+```
+
+---
+
+## 3. Raft 集群運維
+
+### 3.1 集群狀態查詢
+
+```
+GET /raft/status
+Response:
+{
+  "clusterId": "ledger-cluster-01",
+  "nodes": [
+    { "nodeId": "node-001", "role": "LEADER", "endpoint": "http://ledger-node-1:8081", "term": 7 },
+    { "nodeId": "node-002", "role": "FOLLOWER", "endpoint": "http://ledger-node-2:8082", "term": 7 },
+    { "nodeId": "node-003", "role": "FOLLOWER", "endpoint": "http://ledger-node-3:8083", "term": 7 }
+  ],
+  "leaderId": "node-001",
+  "term": 7,
+  "lastLogIndex": 12345678,
+  "lastAppliedIndex": 12345678,
+  "commitIndex": 12345678,
+  "followerLag": {
+    "node-002": 0,
+    "node-003": 0
+  },
+  "snapshotIndex": 12200000
+}
+```
+
+### 3.2 節點替換（滾動升級）
+
+```
+標準節點替換流程（不影響服務）：
+
+Step 1: 確認集群健康
+  GET /raft/status → 所有節點 HEALTHY，Leader 正常
+
+Step 2: 停止目標節點
+  docker stop ledger-node-3
+
+Step 3: 等待集群重新穩定（約 15 秒）
+  GET /raft/status → node-003 標記為 OFFLINE，集群正常
+
+Step 4: 執行維護（升級版本、擴容磁碟、更換硬體等）
+
+Step 5: 啟動新節點
+  docker start ledger-node-3-new
+
+Step 6: 新節點以 Follower 加入集群
+  → 從 Leader 拉取 Snapshot（若 Log 差距大）
+  → 或從 Raft Log 增量追上（若 Log 差距小）
+
+Step 7: 驗證
+  GET /raft/status → node-003 HEALTHY, followerLag < 100
+
+Step 8: 對下一個節點重複 Step 2–7
+  每次只替換一個節點，間隔 ≥ 5 分鐘
+```
+
+### 3.3 Leader 切換處理
+
+```
+場景：Leader 節點宕機或網路隔離
+
+自動處理：
+  1. Follower 心跳超時（預設 300ms × 3 = 900ms）
+  2. 觸發 Leader Election（150–300ms）
+  3. 新 Leader 選出 → 從 RocksDB Snapshot + Raft Log 恢復 State Machine
+  4. 恢復完成 → 開始接受新寫入
+
+人工介入場景：
+  - 選舉持續超過 10 秒 → 人工檢查集群狀態
+  - 新 Leader 恢復超過 1 分鐘 → 可能 Snapshot 過大或 Log 堆積過多
+
+手動觸發 Leader Transfer（計劃維護前）：
+  POST /admin/raft/transfer-leadership
+    { "targetNodeId": "node-002" }
+
+  → Leader 主動將領導權轉移給 node-002
+  → 無選舉延遲，無 in-flight 請求丟失
+  → 建議在計劃維護前 5 分鐘執行
+```
+
+### 3.4 Follower 追趕
+
+```
+Follower Lag 監控：
+
+正常：   followerLag < 100
+警告：   followerLag > 1,000     → WARNING，檢查網路
+嚴重：   followerLag > 100,000   → CRITICAL，可能需要 Snapshot Install
+
+Snapshot Install（Follower 嚴重落後時）：
+  1. Leader 檢測到 Follower 需要的 Log Index 已被 Snapshot 覆蓋
+  2. Leader 自動發起 Snapshot Transfer
+  3. Follower 接收 Snapshot → 替換本地 State Machine → 從 Install 後的 Index 開始追 Log
+  4. 傳輸時間：取決於 Snapshot 大小和網路頻寬
+     - 100 萬帳戶 Snapshot ≈ 2 GB → 約 30 秒（1 Gbps 內網）
+```
+
+### 3.5 集群擴縮容
+
+```
+增加節點（3 → 5）：
+  1. 準備新節點 node-004、node-005
+  2. 更新集群配置（raft.group.nodes = node-001,node-002,node-003,node-004,node-005）
+  3. 新節點以 Learner 模式加入（初始不參與 Quorum）
+  4. Learner 從 Leader 同步 Snapshot + Log
+  5. 同步完成 → 升級為 Follower（參與投票）
+  6. Quorum 從 2 變為 3
+
+減少節點（5 → 3）：
+  1. 將 node-004、node-005 降級為 Learner
+  2. 更新集群配置，移除 node-004、node-005
+  3. Quorum 從 3 變為 2
+  4. 停止 node-004、node-005
+```
+
+---
+
+## 4. MySQL View Layer 運維
+
+### 4.1 同步狀態監控
+
+```
+GET /admin/ledger/view-layer/sync-status
+Response:
+{
+  "learnerId": "learner-001",
+  "lastAppliedRaftLogIndex": 12345678,
+  "lastSyncedToMysqlAt": "2026-05-16T10:35:22.000Z",
+  "lagInLogEntries": 12,
+  "lagInSeconds": 0.05,
+  "status": "HEALTHY"
+}
+```
+
+### 4.2 MySQL 同步修復
+
+```
+場景 1：Learner 同步中斷（網路中斷 / Learner crash）
+  自動恢復：
+    - Learner 重啟後從中斷的 Raft Log Index 繼續消費
+    - Learner 本身無狀態，消費 Raft Log 後重新投影到 MySQL
+    - 自動追趕，無需人工介入
+
+場景 2：MySQL 數據損壞（誤操作 DELETE / 人為錯誤）
+  修復流程：
+    1. 識別損壞範圍（時間段、帳戶、表）
+    2. 停止 Learner 對損壞表的寫入
+    3. 從 RocksDB Snapshot + Raft Log 重建損壞表的數據
+       POST /admin/ledger/view-layer/rebuild
+         { "tables": ["journal_line"], "fromRaftLogIndex": 12000000 }
+    4. 驗證：執行 L1 Reconciliation，比對 MySQL 與 State Machine
+    5. 恢復 Learner 正常同步
+
+場景 3：MySQL 完全損壞（資料庫無法啟動）
+  災難恢復流程：
+    1. 從最新 MySQL 備份恢復（mysqldump / XtraBackup）
+    2. 啟動 MySQL
+    3. 確認備份時間點對應的 Raft Log Index
+    4. Learner 從該 Index 開始追趕
+    5. 執行 L1 Reconciliation 驗證完整性
+```
+
+### 4.3 MySQL 備份
+
+```
+備份策略：
+  - 每日 02:00：全量 mysqldump
+  - 每 6 小時：增量 binlog 備份
+  - 保留策略：同 RocksDB 備份（7 天 / 4 週 / 12 月）
+
+備份驗證：
+  - 每週在隔離環境 restore 最新備份
+  - 執行 L1 Reconciliation 比對備份數據與 State Machine Snapshot
+```
+
+### 4.4 JournalLine 分片管理
+
+```
+MySQL journal_line 表按 account_id 哈希分 4 片（ShardingSphere-JDBC）：
+  journal_line_0, journal_line_1, journal_line_2, journal_line_3
+
+新增分片（當單片接近容量上限時）：
+  1. 建立新分片表 journal_line_4
+  2. 更新 ShardingSphere 配置，調整分片規則（4 → 5 片）
+  3. 滾動重啟 Learner 節點
+  4. 不需要數據遷移（新數據寫入新分片，舊數據保留原分片）
+```
+
+---
+
+## 5. 監控告警響應
+
+### 5.1 告警級別與響應時間
+
+| 級別 | 說明 | 響應時間 | 升級規則 |
+|---|---|---|---|
+| CRITICAL | 服務中斷或數據一致性風險 | ≤ 5 分鐘 | 15 分鐘未處理 → 升級至 Tech Lead |
+| WARNING | 指標異常但服務正常 | ≤ 30 分鐘 | 1 小時未處理 → 升級至 CRITICAL |
+| INFO | 資訊性通知 | ≤ 4 小時 | 無需升級 |
+
+### 5.2 關鍵告警 Runbook
+
+**CRITICAL — Posting P95 > 50ms（持續 2 分鐘）**：
+
+```
+1. 檢查監控面板：
+   - 哪個節點延遲飆升？
+   - 哪個帳戶 Queue 深度異常？
+   - RocksDB write stall？
+
+2. 常見原因與處理：
+   a. RocksDB Compaction 導致 write stall
+      → 檢查 Compaction stats：POST /admin/ledger/rocksdb/stats
+      → 若正在全量壓實：等待完成
+      → 若 write stall 持續：手動暫停 Compaction，低谷時段再執行
+
+   b. 單一帳戶 Queue 堆積
+      → 檢查 Gauge: ledger.account_queue.depth{accountId}
+      → 若單帳戶堆積 > 500：檢查該帳戶是否有異常大量請求
+      → 考慮臨時限流該帳戶
+
+   c. GC pause
+      → 檢查 JVM GC log
+      → 若 Full GC 頻繁：考慮增加 heap 或調整 GC 策略
+
+3. 若以上均正常：
+   → 可能為網路延遲 → 檢查節點間 RTT
+   → 可能為 OSCPU 資源耗盡 → 檢查容器資源限制
+```
+
+**CRITICAL — L1 Reconciliation 發現 JOURNAL_UNBALANCED**：
+
+```
+1. 立即取得 Reconciliation Report：
+   GET /ledger/reconciliation/reports?date={today}
+
+2. 定位問題 Journal：
+   GET /ledger/journals?reconStatus=UNBALANCED
+
+3. 分析原因：
+   a. 若 journal_line 總額不平衡（DEBIT ≠ CREDIT）：
+      → 嚴重 BUG，需 Root Cause Analysis
+      → 暫時凍結相關帳戶，防止進一步惡化
+
+   b. 若 Balance 與 Journal 不一致：
+      → 從 RocksDB Snapshot 與 MySQL journal_line 交叉比對
+      → 可能是 Learner 同步遺漏或部分寫入失敗
+
+4. 修復：
+   - 若 MySQL 數據落後：觸發 Learner 重新同步
+   - 若 RocksDB 數據異常：從 Follower 節點恢復數據
+   - 若確認是 Bug：修復程式碼後，通過 Manual Adjustment 修正
+
+5. 事後檢討（Post-mortem）必做
+```
+
+**CRITICAL — Raft Leader Election 觸發（非計劃內）**：
+
+```
+1. 確認舊 Leader 狀態：
+   GET /raft/status → 檢查舊 Leader 是否 OFFLINE
+
+2. 檢查舊 Leader 日誌：
+   tail -n 500 /var/log/ledger/ledger-node-{N}.log | grep ERROR
+
+3. 可能原因：
+   a. OOM Kill → 檢查 dmesg / syslog
+   b. 硬體故障 → 檢查硬體監控
+   c. 網路分區 → 檢查網路設備
+   d. JVM crash → 檢查 hs_err_pid*.log
+
+4. 若舊 Leader 可恢復：
+   → 以 Follower 身份重新加入集群
+   → 不建議立即切回（避免二次切換震盪）
+
+5. 監控新 Leader 穩定性 30 分鐘
+```
+
+### 5.3 告警靜默規則
+
+```
+計劃維護期間告警靜默：
+  POST /admin/alerting/silence
+    {
+      "matchers": ["node=~node-003"],
+      "startsAt": "2026-05-17T02:00:00Z",
+      "endsAt": "2026-05-17T04:00:00Z",
+      "comment": "Rolling RocksDB compaction on node-003"
+    }
+
+靜默限制：
+  - 單次靜默最長 4 小時
+  - 同一服務同時靜默規則不超過 3 條
+  - 靜默結束後自動恢復告警
+```
+
+---
+
+## 6. 常規巡檢清單
+
+### 6.1 每日巡檢（Daily Checklist）
+
+| # | 檢查項 | 命令 / 面板 | 正常值 |
+|---|---|---|---|
+| 1 | 所有節點 HEALTHY | `GET /admin/ledger/health` | 全部 200 |
+| 2 | Raft Leader 穩定 | `GET /raft/status` | term 無頻繁變化 |
+| 3 | Follower Lag | `GET /raft/status` | < 100 |
+| 4 | Posting P95 | Grafana dashboard | ≤ 3ms |
+| 5 | Account Queue 最大深度 | Prometheus | < 500 |
+| 6 | CF_OUTBOX 待發送數 | Prometheus | < 1000 |
+| 7 | Kafka Consumer Lag | Prometheus | < 1000 |
+| 8 | RocksDB 磁碟使用率 | `df -h` | < 80% |
+| 9 | MySQL 同步延遲 | `GET /admin/ledger/view-layer/sync-status` | < 1s |
+| 10 | 昨日 EOD 完成狀態 | `GET /ledger/accounting-periods/{yesterday}/eod/status` | CLOSED |
+
+### 6.2 每週巡檢（Weekly Checklist）
+
+| # | 檢查項 |
+|---|---|
+| 1 | 隨機抽驗一筆 Journal 的完整審計鏈路（Posting → JournalLine → BalanceChangeEvent → MySQL） |
+| 2 | 驗證最近一次 RocksDB 備份可恢復（隔離環境） |
+| 3 | 檢查 Idempotency Store 條目數量（不應異常增長） |
+| 4 | 檢查過期 Snapshot 是否已清理 |
+| 5 | 檢查 PagerDuty 告警歷史，關閉已解決的告警規則 |
+
+### 6.3 每月巡檢（Monthly Checklist）
+
+| # | 檢查項 |
+|---|---|
+| 1 | 全量 Reconciliation 報告審查（L1 + L2 + L3） |
+| 2 | DR 演練：從備份恢復單節點，驗證 RTO ≤ 1 分鐘 |
+| 3 | 性能壓測：確認 Posting P95 ≤ 3ms，Balance Query P95 ≤ 2ms |
+| 4 | 容量規劃：評估未來 3 個月的帳戶增長、Journal 增長趨勢 |
+| 5 | 安全審計：檢查管理 API 調用日誌，確認無未授權操作 |
+| 6 | 依賴更新評估：SOFAJRaft、Spring Boot、RocksDB 是否有安全更新 |
+
+---
+
+## 7. 管理 API 彙總
+
+```
+# 健康檢查
+GET  /admin/ledger/health
+GET  /raft/status
+GET  /raft/leader
+
+# RocksDB 管理
+POST /admin/ledger/rocksdb/compact         # 觸發壓實
+POST /admin/ledger/rocksdb/checkpoint      # 建立 Checkpoint
+GET  /admin/ledger/rocksdb/stats           # 查詢 RocksDB 內部統計
+POST /admin/ledger/rocksdb/cleanup         # 清理過期備份/數據
+
+# Raft 管理
+POST /admin/raft/transfer-leadership       # Leader 轉移
+POST /admin/raft/add-node                  # 新增節點
+POST /admin/raft/remove-node               # 移除節點
+
+# View Layer 管理
+GET  /admin/ledger/view-layer/sync-status  # Learner 同步狀態
+POST /admin/ledger/view-layer/rebuild      # 重建指定表數據
+POST /admin/ledger/view-layer/pause        # 暫停 Learner 同步
+POST /admin/ledger/view-layer/resume       # 恢復 Learner 同步
+
+# 告警管理
+POST /admin/alerting/silence               # 靜默告警
+DELETE /admin/alerting/silence/{id}        # 取消靜默
+GET  /admin/alerting/silences              # 查詢靜默列表
+
+# Authentication
+所有 /admin/* API 需 ADMIN 角色 + JWT Bearer Token
+Header: Authorization: Bearer {adminToken}
+```
+
+---
+
+## 8. 災難恢復演練（DR Drill）
+
+### 8.1 演練頻率與範圍
+
+| 類型 | 頻率 | 範圍 | 驗證目標 |
+|---|---|---|---|
+| Tabletop（桌上演練） | 每月 | 流程審查 | 確認 Runbook 正確性 |
+| Single Node Recovery | 每季 | 單節點恢復 | RTO ≤ 1 分鐘，RPO = 0 |
+| Full Cluster Recovery | 每半年 | 全集群重建 | 從備份完整恢復，RTO ≤ 30 分鐘 |
+| Cross-AZ Failover | 每年 | 單 AZ 故障 | 服務不中斷，自動 Failover |
+
+### 8.2 DR Drill SOP
+
+```
+Step 1: 演練前準備
+  - 發出演練通知（提前 3 天）
+  - 確認所有備份可用（RocksDB + MySQL）
+  - 準備隔離演練環境（不影響生產）
+
+Step 2: 執行演練
+  - 按 Runbook 執行恢復步驟
+  - 記錄每步耗時、遇到的問題
+
+Step 3: 驗證
+  - L1 Reconciliation 通過
+  - Posting P95 ≤ 3ms（確認正常寫入）
+  - Balance Query 結果與備份前一致
+  - Journal 審計鏈路完整
+
+Step 4: 演練報告
+  - 記錄 RTO（實際 vs 目標）
+  - 記錄遇到的問題與解決方案
+  - 更新 Runbook（若有步驟變更）
+  - 歸檔至 Wiki
+```
+
+---
+
+## 9. 驗收標準
+
+| # | 驗收條件 | 測試方式 |
+|---|---|---|
+| AC-01 | RocksDB 全量壓實 API 可正常觸發，不影響正在進行的寫入 | 功能測試 |
+| AC-02 | Checkpoint 備份可建立，restore 後數據與原節點完全一致 | 恢復測試 |
+| AC-03 | 單節點故障後，集群自動恢復，Posting 服務中斷 < 30 秒 | 故障測試 |
+| AC-04 | Leader Transfer 無 in-flight 請求丟失 | 功能測試 |
+| AC-05 | Follower Lag > 100,000 時，Snapshot Install 自動觸發並成功 | 故障測試 |
+| AC-06 | MySQL View Layer 損壞後可從 RocksDB + Raft Log 重建 | 恢復測試 |
+| AC-07 | 每日巡檢清單全部項目可通過 API 或 Prometheus 查詢完成 | 功能測試 |
+| AC-08 | 所有 /admin/* API 需 ADMIN 角色，無權限返回 403 | 安全測試 |
+| AC-09 | 告警靜默 API 可正常設置、查詢、取消 | 功能測試 |
+| AC-10 | DR Drill 全流程在隔離環境可在 30 分鐘內完成 | 演練測試 |
 
 
 ---

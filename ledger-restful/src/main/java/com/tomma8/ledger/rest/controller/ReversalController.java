@@ -2,6 +2,7 @@ package com.tomma8.ledger.rest.controller;
 
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.ReversalCommand;
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.ReversalService;
@@ -43,7 +44,7 @@ public class ReversalController {
                 String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
                 return ResponseEntity.status(503).body(Map.of(
                         "status", "REJECTED",
-                        "errorCodes", List.of("NOT_LEADER"),
+                        "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                         "leaderHint", leader
                 ));
             }
@@ -63,9 +64,9 @@ public class ReversalController {
 
             if (result.isRejected()) {
                 outcome = "REJECTED";
-                return ResponseEntity.badRequest().body(result);
+                return ResponseEntity.badRequest().body(toResponseMap(result));
             }
-            return ResponseEntity.ok(result);
+            return ResponseEntity.ok(toResponseMap(result));
         } catch (Exception e) {
             outcome = "ERROR";
             throw e;
@@ -73,5 +74,13 @@ public class ReversalController {
             meterRegistry.timer("ledger.reversal.duration", "outcome", outcome)
                     .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
         }
+    }
+
+    private Map<String, Object> toResponseMap(CommandResult result) {
+        return Map.of(
+                "status", result.status(),
+                "journalId", result.journalId() != null ? result.journalId() : "",
+                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
+        );
     }
 }

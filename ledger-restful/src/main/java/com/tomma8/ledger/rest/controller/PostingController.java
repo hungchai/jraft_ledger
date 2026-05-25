@@ -3,6 +3,7 @@ package com.tomma8.ledger.rest.controller;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.EntryType;
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.PostingService;
@@ -44,10 +45,10 @@ public class PostingController {
             if (!nodeRole.isLeader()) {
                 outcome = "REJECTED";
                 String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-                meterRegistry.counter("ledger.posting.rejected.count", "errorCode", "NOT_LEADER").increment();
+                meterRegistry.counter("ledger.posting.rejected.count", "errorCode", LedgerErrorCode.NOT_LEADER.name()).increment();
                 return ResponseEntity.status(503).body(Map.of(
                         "status", "REJECTED",
-                        "errorCodes", List.of("NOT_LEADER"),
+                        "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                         "leaderHint", leader
                 ));
             }
@@ -86,11 +87,11 @@ public class PostingController {
 
             if (result.isRejected()) {
                 outcome = "REJECTED";
-                String errorCode = result.errorCodes().isEmpty() ? "UNKNOWN" : result.errorCodes().get(0);
-                meterRegistry.counter("ledger.posting.rejected.count", "errorCode", errorCode).increment();
-                return ResponseEntity.badRequest().body(result);
+                LedgerErrorCode errorCode = result.errorCodes().isEmpty() ? LedgerErrorCode.INVALID_REQUEST_ID : result.errorCodes().get(0);
+                meterRegistry.counter("ledger.posting.rejected.count", "errorCode", errorCode.name()).increment();
+                return ResponseEntity.badRequest().body(toResponseMap(result));
             }
-            return ResponseEntity.ok(result);
+            return ResponseEntity.ok(toResponseMap(result));
         } catch (Exception e) {
             outcome = "ERROR";
             throw e;
@@ -100,5 +101,13 @@ public class PostingController {
                             "businessEventType", businessEventType != null ? businessEventType : "UNKNOWN")
                     .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
         }
+    }
+
+    private Map<String, Object> toResponseMap(CommandResult result) {
+        return Map.of(
+                "status", result.status(),
+                "journalId", result.journalId() != null ? result.journalId() : "",
+                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
+        );
     }
 }

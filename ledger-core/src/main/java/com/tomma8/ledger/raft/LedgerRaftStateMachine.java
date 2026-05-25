@@ -18,6 +18,7 @@ import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.domain.command.ReversalCommand;
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,7 +100,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                         if (future != null) future.complete(result);
                     }
                     if (done != null) {
-                        done.run(result.isCompleted() ? Status.OK() : new Status(RaftError.EBUSY, String.join(",", result.errorCodes())));
+                        done.run(result.isCompleted() ? Status.OK() : new Status(RaftError.EBUSY, result.errorCodes().toString()));
                     }
                 } catch (Exception e) {
                     log.error("Failed to apply raft command", e);
@@ -112,7 +113,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                         if (cmd != null) {
                             var future = pendingCommands.remove(cmd.requestId());
                             if (future != null) {
-                                future.complete(CommandResult.rejected("RAFT_APPLY_ERROR: " + e.getMessage()));
+                                future.complete(CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR));
                             }
                         }
                     }

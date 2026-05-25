@@ -5,11 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.dao.mapper.AccountBalanceMapper;
 import com.tomma8.ledger.dao.mapper.AccountMapper;
-import com.tomma8.ledger.dao.mapper.BalanceTypeMapper;
 import com.tomma8.ledger.dao.mapper.JournalMapper;
+import com.tomma8.ledger.dao.mapper.ProjectionEventLogMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
@@ -27,19 +28,23 @@ public class ProjectionConsumer {
     private final JournalMapper journalMapper;
     private final AccountMapper accountMapper;
     private final AccountBalanceMapper accountBalanceMapper;
-    private final BalanceTypeMapper balanceTypeMapper;
+    private final ProjectionEventLogMapper eventLogMapper;
     private final SnowflakeIdGenerator idGenerator;
 
     public ProjectionConsumer(JournalMapper journalMapper,
                               AccountMapper accountMapper,
                               AccountBalanceMapper accountBalanceMapper,
-                              BalanceTypeMapper balanceTypeMapper) {
+                              ProjectionEventLogMapper eventLogMapper) {
         this.journalMapper = journalMapper;
         this.accountMapper = accountMapper;
         this.accountBalanceMapper = accountBalanceMapper;
-        this.balanceTypeMapper = balanceTypeMapper;
+        this.eventLogMapper = eventLogMapper;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
     }
+
+    // ============================================================
+    // Account events
+    // ============================================================
 
     @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection")
     public void onAccountCreated(String message) {
@@ -61,56 +66,120 @@ public class ProjectionConsumer {
         }
     }
 
+    // ============================================================
+    // Balance change events
+    // ============================================================
+
     @KafkaListener(topics = "ledger.balance.change.v1", groupId = "ledger-projection")
     public void onBalanceChange(String message) {
         try {
             JsonNode event = mapper.readTree(message);
 
-            String journalId      = event.get("journalId").asText();
-            String journalLineId  = event.get("journalLineId").asText();
-            String requestId      = event.get("requestId").asText();
-            String commandType    = event.get("commandType").asText();
-            String accountId      = event.get("accountId").asText();
-            String balanceType    = event.get("balanceType").asText();
-            String position       = event.has("position") ? event.get("position").asText() : "CURRENT";
-            String currency       = event.get("currency").asText();
-            String entryType      = event.get("entryType").asText();
-            BigDecimal amount     = toBigDecimal(event.get("amount"));
-            BigDecimal preBalance = toBigDecimal(event.get("preBalance"));
+            // --- Parse event fields ---
+            String eventId         = event.has("eventId") ? event.get("eventId").asText() : "";
+            String journalId       = event.get("journalId").asText();
+            String journalLineId   = event.get("journalLineId").asText();
+            String requestId       = event.get("requestId").asText();
+            String commandType     = event.get("commandType").asText();
+            String accountId       = event.get("accountId").asText();
+            String balanceType     = event.get("balanceType").asText();
+            String position        = event.has("position") ? event.get("position").asText() : "CURRENT";
+            String currency        = event.get("currency").asText();
+            String entryType       = event.get("entryType").asText();
+            BigDecimal amount      = toBigDecimal(event.get("amount"));
             BigDecimal postBalance = toBigDecimal(event.get("postBalance"));
-            long accountSeq       = event.get("accountSeq").asLong();
-            String businessRef    = event.has("businessEventRef") ? event.get("businessEventRef").asText() : "";
-            LocalDate valueDate   = toLocalDate(event.get("valueDate"));
+            long accountSeq        = event.get("accountSeq").asLong();
+            String businessRef     = event.has("businessEventRef") ? event.get("businessEventRef").asText() : "";
+            LocalDate valueDate    = toLocalDate(event.get("valueDate"));
+            int configVersion      = event.has("configVersion") ? event.get("configVersion").asInt() : 1;
+            BigDecimal preBalance  = event.has("preBalance") ? toBigDecimal(event.get("preBalance")) : BigDecimal.ZERO;
 
-            // Idempotent journal insert
+            // --- Step 1: Ensure account exists ---
+            accountMapper.upsertAccount(accountId, "CLIENT", "", null, "ACTIVE", LocalDateTime.now());
+            Long accountPk = accountMapper.findIdByAccountId(accountId);
+            if (accountPk == null) {
+                log.error("Failed to get account surrogate id for {}", accountId);
+                return;
+            }
+
+            // --- Step 2: Insert journal header (idempotent by journal_id UNIQUE) ---
+            long journalPk = idGenerator.nextId();
+            boolean journalInserted = false;
             try {
                 journalMapper.insertJournal(
-                        idGenerator.nextId(),
+                        journalPk,
                         journalId,
                         "REVERSAL".equals(commandType) ? "REVERSAL" : "NORMAL",
                         requestId, commandType, businessRef,
                         valueDate, "CONFIRMED", false, LocalDateTime.now());
-            } catch (Exception e) {
-                log.debug("Journal {} already exists", journalId);
+                journalInserted = true;
+            } catch (DuplicateKeyException e) {
+                // Journal already exists from a previous event replay
+                Long existingPk = journalMapper.findIdByJournalId(journalId);
+                if (existingPk != null) {
+                    journalPk = existingPk;
+                }
+                log.debug("Journal {} already exists, using id={}", journalId, journalPk);
             }
 
-            // Idempotent journal line insert
+            // --- Step 3: Upsert account_balance with accountSeq guard ---
+            accountBalanceMapper.upsertBalance(
+                    accountPk, accountId, balanceType, currency,
+                    postBalance, position, accountSeq, journalId);
+
+            Long balancePk = accountBalanceMapper.findIdByKey(accountId, balanceType, currency);
+            if (balancePk == null) {
+                log.error("Failed to get account_balance id for {} {} {}", accountId, balanceType, currency);
+                return;
+            }
+
+            // --- Step 4: Verify balance change was applied (seq guard) ---
+            Long storedSeq = accountBalanceMapper.getAccountSeq(balancePk);
+            if (storedSeq != null && storedSeq > accountSeq) {
+                // Stale event — seq guard rejected the update. Log and skip journal_line.
+                log.debug("Stale event: incoming seq={} < stored seq={} for {} {} {}",
+                        accountSeq, storedSeq, accountId, balanceType, currency);
+                try {
+                    eventLogMapper.insertEvent(accountId, balanceType, currency, accountSeq,
+                            journalLineId, journalId, eventId, "SKIPPED_STALE");
+                } catch (DuplicateKeyException ignored) {
+                    // already logged
+                }
+                return;
+            }
+
+            // --- Step 5: Insert journal_line (idempotent by journal_line_id UNIQUE) ---
+            // Only insert if journal was newly created (avoid re-insert on replay)
+            long linePk = idGenerator.nextId();
             try {
                 journalMapper.insertJournalLine(
-                        idGenerator.nextId(),
-                        journalLineId, journalId, "",
-                        accountId, balanceType, position, currency, entryType,
-                        amount, preBalance, postBalance, 1, LocalDateTime.now());
-            } catch (Exception e) {
+                        linePk,
+                        journalPk,             // journal_id (surrogate → journal.id)
+                        accountPk,             // account_id (surrogate → account.id)
+                        balancePk,             // account_balance_id (surrogate → account_balance.id)
+                        journalLineId,         // journal_line_id (business key)
+                        journalId,             // journal_journal_id (denormalized business key)
+                        accountId,             // account_account_id (denormalized business key)
+                        "",                    // leg_id (not available per-event; set empty)
+                        balanceType,
+                        position,
+                        currency,
+                        entryType,
+                        amount,
+                        preBalance,
+                        postBalance,
+                        configVersion,
+                        LocalDateTime.now());
+            } catch (DuplicateKeyException e) {
                 log.debug("JournalLine {} already exists", journalLineId);
             }
 
-            // Upsert account balance
+            // --- Step 6: Record in projection_event_log (last, after all mutations) ---
             try {
-                accountBalanceMapper.upsertBalance(
-                        accountId, balanceType, position, currency, postBalance, accountSeq, journalId);
-            } catch (Exception e) {
-                log.error("Failed to upsert balance for {} {} {} {}", accountId, balanceType, position, currency, e);
+                eventLogMapper.insertEvent(accountId, balanceType, currency, accountSeq,
+                        journalLineId, journalId, eventId, "APPLIED");
+            } catch (DuplicateKeyException e) {
+                log.debug("Event already logged: {} seq={}", journalLineId, accountSeq);
             }
 
             log.info("Projected: {} {} {} {} seq={} balance={}", journalId, accountId, entryType, amount, accountSeq, postBalance);
@@ -119,6 +188,10 @@ public class ProjectionConsumer {
             log.error("Failed to project event: {}", message, e);
         }
     }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
 
     private static BigDecimal toBigDecimal(JsonNode node) {
         if (node == null) return BigDecimal.ZERO;
@@ -137,7 +210,6 @@ public class ProjectionConsumer {
     private static LocalDateTime toLocalDateTime(JsonNode node) {
         if (node == null) return LocalDateTime.now();
         if (node.isArray() && node.size() == 2) {
-            // Jackson serializes Instant as [epochSecond, nano]
             return java.time.Instant.ofEpochSecond(node.get(0).asLong(), node.get(1).asLong())
                     .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime();
         }

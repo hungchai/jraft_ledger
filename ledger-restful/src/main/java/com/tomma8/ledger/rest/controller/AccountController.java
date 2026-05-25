@@ -37,7 +37,7 @@ public class AccountController {
             String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
+                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                     "leaderHint", leader));
         }
         String accountId = (String) body.get("accountId");
@@ -60,7 +60,7 @@ public class AccountController {
         } else {
             result = accountService.createAccount(cmd);
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(toResponseMap(result));
     }
 
     @PostMapping("/{accountId}/freeze")
@@ -69,7 +69,7 @@ public class AccountController {
             String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
+                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                     "leaderHint", leader));
         }
         AccountFreezeCommand cmd = new AccountFreezeCommand(body.get("requestId"), accountId, true);
@@ -79,7 +79,7 @@ public class AccountController {
         } else {
             result = accountService.freezeAccount(cmd);
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(toResponseMap(result));
     }
 
     @PostMapping("/{accountId}/unfreeze")
@@ -88,7 +88,7 @@ public class AccountController {
             String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
+                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                     "leaderHint", leader));
         }
         AccountFreezeCommand cmd = new AccountFreezeCommand(body.get("requestId"), accountId, false);
@@ -98,7 +98,7 @@ public class AccountController {
         } else {
             result = accountService.unfreezeAccount(cmd);
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(toResponseMap(result));
     }
 
     @PostMapping("/{accountId}/close")
@@ -107,7 +107,7 @@ public class AccountController {
             String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
+                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                     "leaderHint", leader));
         }
         // Close is an AccountCloseCommand, not AccountFreezeCommand
@@ -119,7 +119,7 @@ public class AccountController {
         } else {
             result = accountService.closeAccount(accountId, body.get("requestId"));
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(toResponseMap(result));
     }
 
     @PostMapping("/{accountId}/balance-types")
@@ -128,7 +128,7 @@ public class AccountController {
             String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
             return ResponseEntity.status(503).body(Map.of(
                     "status", "REJECTED",
-                    "errorCodes", List.of("NOT_LEADER"),
+                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
                     "leaderHint", leader));
         }
         com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand cmd =
@@ -141,6 +141,14 @@ public class AccountController {
         } else {
             result = accountService.addBalanceType(accountId, body.get("balanceType"), body.get("currency"), body.get("requestId"));
         }
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(toResponseMap(result));
+    }
+
+    private Map<String, Object> toResponseMap(CommandResult result) {
+        return Map.of(
+                "status", result.status(),
+                "journalId", result.journalId() != null ? result.journalId() : "",
+                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
+        );
     }
 }

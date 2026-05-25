@@ -4,6 +4,7 @@ import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.BalanceQueryResult;
 import com.tomma8.ledger.domain.model.EntryType;
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -246,7 +247,7 @@ class LedgerClientTest {
         CommandResult result = client.post(validPosting());
 
         assertThat(result.isRejected()).isTrue();
-        assertThat(result.errorCodes()).contains("JOURNAL_UNBALANCED");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.JOURNAL_UNBALANCED);
         // Business errors are NOT retried at SDK level — at least 1 POST call
         assertThat(leader.postingCount.get()).isGreaterThanOrEqualTo(1);
     }

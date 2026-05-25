@@ -1,12 +1,18 @@
 package com.tomma8.ledger.domain.command;
 
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
+
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Result of a command applied to the State Machine.
+ * Immutable record containing status, journalId, and error codes.
+ */
 public record CommandResult(
         String status,
         String journalId,
-        List<String> errorCodes) {
+        List<LedgerErrorCode> errorCodes) {
 
     public static final String COMPLETED = "COMPLETED";
     public static final String REJECTED = "REJECTED";
@@ -19,11 +25,11 @@ public record CommandResult(
         return new CommandResult(COMPLETED, journalId, List.of());
     }
 
-    public static CommandResult rejected(List<String> errorCodes) {
+    public static CommandResult rejected(List<LedgerErrorCode> errorCodes) {
         return new CommandResult(REJECTED, null, List.copyOf(errorCodes));
     }
 
-    public static CommandResult rejected(String errorCode) {
+    public static CommandResult rejected(LedgerErrorCode errorCode) {
         return rejected(List.of(errorCode));
     }
 

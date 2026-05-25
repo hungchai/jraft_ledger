@@ -276,7 +276,7 @@ public class LedgerStateMachine {
             var existing = idempotencyStore.get(requestId);
             if (existing.isPresent()) {
                 var entry = existing.get();
-                if ("COMPLETED".equals(entry.status())) {
+                if (CommandResult.COMPLETED.equals(entry.status())) {
                     return CommandResult.completed(entry.journalId());
                 }
                 return CommandResult.rejected(entry.errors());
@@ -286,13 +286,13 @@ public class LedgerStateMachine {
             for (String accountId : reusableAccountSet) {
                 var account = accountMetaStore.get(accountId);
                 if (account.isEmpty()) {
-                    var result = CommandResult.rejected("ACCOUNT_NOT_FOUND");
+                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND);
                     idempotencyStore.put(requestId,
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
                 }
                 if (account.get().status() == AccountStatus.FROZEN) {
-                    var result = CommandResult.rejected("ACCOUNT_FROZEN");
+                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN);
                     idempotencyStore.put(requestId,
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
@@ -307,8 +307,14 @@ public class LedgerStateMachine {
                         var account = accountMetaStore.get(line.accountId());
                         if (account.isPresent()) {
                             var type = account.get().accountType();
-                            if (type == AccountType.CLIENT || type == AccountType.CONTROL) {
-                                var result = CommandResult.rejected("SEED_NOT_ALLOWED_FOR_" + type);
+                            if (type == AccountType.CLIENT) {
+                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT);
+                                idempotencyStore.put(requestId,
+                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
+                                return result;
+                            }
+                            if (type == AccountType.CONTROL) {
+                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL);
                                 idempotencyStore.put(requestId,
                                         IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                                 return result;
@@ -320,7 +326,7 @@ public class LedgerStateMachine {
                 // For multi-line legs, validate that the leg's amount is positive
                 // (debits and credits will use the same leg amount)
                 if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
-                    var result = CommandResult.rejected("INVALID_LEG_AMOUNT");
+                    var result = CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT);
                     idempotencyStore.put(requestId,
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
@@ -365,7 +371,7 @@ public class LedgerStateMachine {
                     BigDecimal debit = debitByCurrency.get(cc);
                     BigDecimal credit = creditByCurrency.getOrDefault(cc, BigDecimal.ZERO);
                     if (debit.compareTo(credit) != 0) {
-                        var result = CommandResult.rejected("JOURNAL_UNBALANCED");
+                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED);
                         idempotencyStore.put(requestId,
                                 IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                         return result;
@@ -373,7 +379,7 @@ public class LedgerStateMachine {
                 }
                 for (String cc : creditByCurrency.keySet()) {
                     if (!debitByCurrency.containsKey(cc)) {
-                        var result = CommandResult.rejected("JOURNAL_UNBALANCED");
+                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED);
                         idempotencyStore.put(requestId,
                                 IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                         return result;
@@ -394,7 +400,7 @@ public class LedgerStateMachine {
                 // V-13: LOCKED/FROZEN positions cannot go negative
                 if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
                         && after.compareTo(BigDecimal.ZERO) < 0) {
-                    var result = CommandResult.rejected("LOCKED_BALANCE_CANNOT_BE_NEGATIVE");
+                    var result = CommandResult.rejected(LedgerErrorCode.POSITION_BALANCE_FLOOR_BREACH);
                     idempotencyStore.put(requestId,
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
@@ -409,14 +415,14 @@ public class LedgerStateMachine {
                             account.get().accountType() == AccountType.NOSTRO ||
                             account.get().accountType() == AccountType.SUSPENSE);
                     if (!isInstitutional) {
-                        var result = CommandResult.rejected("INSUFFICIENT_BALANCE");
+                        var result = CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE);
                         idempotencyStore.put(requestId,
                                 IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                         return result;
                     }
                 }
                 if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
-                    var result = CommandResult.rejected("CREDIT_EXCEEDS_LIMIT");
+                    var result = CommandResult.rejected(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT);
                     idempotencyStore.put(requestId,
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
@@ -539,7 +545,7 @@ public class LedgerStateMachine {
                     && Objects.equals(acc.ownerId(), cmd.ownerId())) {
                 return CommandResult.completed(null);
             }
-            return CommandResult.rejected("ACCOUNT_ALREADY_EXISTS");
+            return CommandResult.rejected(LedgerErrorCode.ACCOUNT_ALREADY_EXISTS);
         }
 
         Set<String> allowedBalanceTypes = new HashSet<>();
@@ -621,7 +627,7 @@ public class LedgerStateMachine {
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
             var entry = existing.get();
-            if ("COMPLETED".equals(entry.status())) {
+            if (CommandResult.COMPLETED.equals(entry.status())) {
                 return CommandResult.completed(entry.journalId());
             }
             return CommandResult.rejected(entry.errors());
@@ -629,7 +635,7 @@ public class LedgerStateMachine {
 
         Journal originalJournal = journalStore.get(cmd.originalJournalId());
         if (originalJournal == null) {
-            var result = CommandResult.rejected("JOURNAL_NOT_FOUND");
+            var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND);
             idempotencyStore.put(cmd.requestId(),
                     IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
             return result;
@@ -645,7 +651,7 @@ public class LedgerStateMachine {
             var existing2 = idempotencyStore.get(cmd.requestId());
             if (existing2.isPresent()) {
                 var entry = existing2.get();
-                if ("COMPLETED".equals(entry.status())) {
+                if (CommandResult.COMPLETED.equals(entry.status())) {
                     return CommandResult.completed(entry.journalId());
                 }
                 return CommandResult.rejected(entry.errors());
@@ -654,19 +660,19 @@ public class LedgerStateMachine {
             // Re-fetch original journal inside lock
             Journal orig = journalStore.get(cmd.originalJournalId());
             if (orig == null) {
-                var result = CommandResult.rejected("JOURNAL_NOT_FOUND");
+                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND);
                 idempotencyStore.put(cmd.requestId(),
                         IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
                 return result;
             }
             if (orig.status() == JournalStatus.REVERSED) {
-                var result = CommandResult.rejected("JOURNAL_ALREADY_REVERSED");
+                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED);
                 idempotencyStore.put(cmd.requestId(),
                         IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
                 return result;
             }
             if (orig.journalType() == JournalType.REVERSAL) {
-                var result = CommandResult.rejected("CANNOT_REVERSE_REVERSAL");
+                var result = CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL);
                 idempotencyStore.put(cmd.requestId(),
                         IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), Instant.now()));
                 return result;

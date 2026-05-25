@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## Technical Requirements Specification (Full Document)
 
-**Version**: v0.5  
-**Date**: 2026-05-23  
+**Version**: v0.7  
+**Date**: 2026-05-25  
 **Status**: Draft for Review  
 **System**: Next-Gen Internal Ledger Platform  
 **Positioning**: iBank core ledger foundation, supporting multi-entity, multi-product, multi-currency, multi-ledger double-entry bookkeeping
@@ -29,6 +29,9 @@ This document contains the complete technical requirements specification for the
 | v0.3 | 2026-05-23 | F-002/F-005/F-008: Added `position` field (CURRENT/LOCKED/FROZEN) to support balance position tracking; AccountBalanceKey expanded to (accountId, balanceType, position, currency); Added validation rule V-13 | Ledger Platform Team |
 | v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position and their relationships | Ledger Platform Team |
 | v0.5 | 2026-05-23 | Merged docs/architecture.md, docs/persistence-flow.md into Appendix A/B/C; Added F-013 Idempotency & Hotspot Account Concurrency spec | Ledger Platform Team |
+| v0.6 | 2026-05-24 | Added F-011 Balance Change Event / Kafka Outbox, F-013 Idempotency & Hotspot Account Concurrency, F-014 Java Client SDK, OPS-001 SRE Operational Guidelines; Fixed F-007/F-009 header levels; Corrected account_balance schema: position is logical mapping (amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN), removed position physical column | Ledger Platform Team |
+| v0.7 | 2026-05-25 | Added centralized LedgerErrorCode enum as single source of truth for error codes (matches V-01~V-13 validation rules); Code must use enum, not string literals | Ledger Platform Team |
+
 
 ---
 
@@ -48,9 +51,10 @@ This document contains the complete technical requirements specification for the
 | F-008 | State Machine Design | Core Raft State Machine design |
 | F-009 | Accounting Period / EOD | Accounting period management and EOD closing flow |
 | F-010 | Account Management | Account lifecycle management |
-| F-011 | Balance Change Event / Kafka Outbox | Kafka balance change event publishing |
-| F-013 | Idempotency & Hotspot Concurrency | Idempotency and hotspot account concurrency handling |
-| OPS-001 | SRE Operational Guidelines | RocksDB compaction, Raft recovery, MySQL sync recovery |
+| F-011 | Balance Change Event / Kafka Outbox | Kafka balance change event publishing (accountSeq, Outbox Pattern) |
+| F-013 | Idempotency & Hotspot Concurrency | Idempotency (requestId) and hotspot account Account Queue concurrency |
+| F-014 | Java Client SDK | Java client SDK: Leader discovery, auto-retry, sync/async API |
+| OPS-001 | SRE Operational Guidelines | RocksDB compaction/backup, Raft recovery, MySQL sync recovery, DR drills |
 | NFR | Non-Functional Requirements | Performance, availability, consistency, security, capacity |
 | Appendix A | Module Dependency & Docker Compose | Module dependency graph and deployment architecture |
 | Appendix B | Detailed Persistence Flow | Detailed posting persistence flow |
@@ -60,7 +64,7 @@ This document contains the complete technical requirements specification for the
 
 ## Core Concepts
 
-This section defines the three core concepts of the Ledger Platform: Account, BalanceType, and Position. These concepts run through all functional requirements (F-001 to F-011).
+This section defines the three core concepts of the Ledger Platform: Account, BalanceType, and Position. These concepts run through all functional requirements (F-001 to F-014).
 
 ### Account
 
@@ -153,22 +157,30 @@ Position is a field added in v0.4 to distinguish different sub-balance states un
 }
 ```
 
-**AccountBalanceKey Expansion:**
+**AccountBalanceKey (v0.7 correction):**
 
 ```
-AccountBalanceKey = (accountId, balanceType, position, currency)
+AccountBalanceKey = (accountId, balanceType, currency)
 ```
 
-Each Account maintains an independent balance for every BalanceType + Position + Currency combination.
+**Position is a logical mapping concept**, not a physical column. Each `(accountId, balanceType, currency)` balance storage contains three amount fields:
+
+| Physical Column | Logical Position | Description |
+|---|---|---|
+| `amount` | `CURRENT` | Real-time available balance |
+| `locked_amount` | `LOCKED` | Locked pending-approval balance |
+| `frozen_amount` | `FROZEN` | Regulatory frozen balance |
+
+The `position` field in JournalLine specifies which physical column the posting should affect. State Machine apply routes to `amount` / `locked_amount` / `frozen_amount` based on `JournalLine.position`.
 
 **Balance Aggregate Query:**
 
 ```
 GET /ledger/balances?accountId=X&balanceType=AVAILABLE&position=CURRENT
-  → returns CURRENT sub-balance
+  → returns amount (CURRENT sub-balance)
 
 GET /ledger/balances?accountId=X&aggregate=true
-  → returns sum of all Positions (CURRENT + LOCKED + FROZEN)
+  → returns sum of all Positions (amount + locked_amount + frozen_amount)
 ```
 
 **See F-002 Posting API v2 §3.4 Position Field and F-005 Balance Query v2 for detailed specification.**
@@ -888,11 +900,14 @@ CREATE TABLE balance_type_registry (
 
 > **Complete View Layer Schema**: See project root `init.sql`, containing full DDL for `journal`, `journal_line`, `account`, `account_balance`, and all other tables.
 >
-> **account_balance Table Structure (v0.3 Update)**:
-> - Added `position VARCHAR(16) NOT NULL` field (values CURRENT / LOCKED / FROZEN)
-> - UNIQUE KEY updated from `(account_id, balance_type, currency)` to `(account_id, balance_type, position, currency)`
-> - `frozen_amount` / `locked_amount` retained as legacy fields (can be used for report compatibility), but primary balance tracking uses the `position` mechanism
-> - Idempotent UPSERT uses `(account_id, balance_type, position, currency)` as UNIQUE KEY
+> **account_balance Table Structure (v0.3 Update → v0.7 correction)**:
+> - UNIQUE KEY is `(account_id, balance_type, currency)`, **does NOT include position**
+> - Each `(account_id, balance_type, currency)` has a single row with three balance columns:
+>   - `amount` → maps to `CURRENT` position balance
+>   - `locked_amount` → maps to `LOCKED` position balance
+>   - `frozen_amount` → maps to `FROZEN` position balance
+> - `position` is a **logical mapping concept**, not a physical column in account_balance; `JournalLine.position` specifies which balance column the posting affects
+> - Idempotent UPSERT uses `(account_id, balance_type, currency)` as UNIQUE KEY
 
 ---
 
@@ -1061,6 +1076,24 @@ Under the same (accountId, balanceType, currency), there can be balances for mul
 ## 4. Validation Rules
 
 ### 4.1 Pre-validation (Network Layer, before Raft)
+
+**Error Code Implementation**: All error codes are defined in `ledger-core/src/main/java/com/tomma8/ledger/domain/model/LedgerErrorCode.java`. This enum is the single source of truth; code must not use string literals for error codes.
+
+```java
+public enum LedgerErrorCode {
+    // Pre-validation (V-01 ~ V-05)
+    INVALID_REQUEST_ID, LEGS_EMPTY, BALANCE_TYPE_NOT_FOUND,
+    INVALID_AMOUNT, JOURNAL_UNBALANCED, INVALID_LEG_AMOUNT,
+    // Business Validation (V-08 ~ V-13)
+    ACCOUNT_NOT_FOUND, BALANCE_NOT_INITIALIZED, INSUFFICIENT_BALANCE,
+    CREDIT_EXCEEDS_LIMIT, ACCOUNT_FROZEN, POSITION_BALANCE_FLOOR_BREACH,
+    // Account Management, Reversal, Maker-Checker, Infrastructure
+    ACCOUNT_ALREADY_EXISTS, JOURNAL_NOT_FOUND, JOURNAL_ALREADY_REVERSED,
+    CANNOT_REVERSE_REVERSAL, MAKER_CHECKER_SAME_PERSON, DRAFT_EXPIRED,
+    DRAFT_NOT_PENDING, NOT_LEADER, QUEUE_FULL, PERIOD_CLOSED
+}
+```
+
 
 | # | Rule | Error Code |
 |---|---|---|
@@ -1957,30 +1990,44 @@ Because it reads from in-memory State Machine, batch query performance is greatl
 ## 4. State Machine Internal Data Structure
 
 ```java
-// In-memory State Machine Balance storage structure (v0.3)
-// Key: AccountKey = (accountId, balanceType, position, currency)
+// In-memory State Machine Balance storage structure (v0.7)
+// Key: AccountBalanceKey = (accountId, balanceType, currency)
+// position is a logical mapping concept: CURRENT→amount, LOCKED→lockedAmount, FROZEN→frozenAmount
 // Value: BalanceEntry
 
 class BalanceEntry {
-    BigDecimal amount;        // Current balance
-    long stateVersion;        // Corresponding Raft Log Index
-    String lastJournalId;     // Last Journal ID
-    Instant lastUpdatedAt;    // Last update time
+    BigDecimal amount;          // CURRENT position balance
+    BigDecimal lockedAmount;    // LOCKED position balance
+    BigDecimal frozenAmount;    // FROZEN position balance
+    long stateVersion;          // Corresponding Raft Log Index
+    String lastJournalId;       // Last Journal ID
+    String lastJournalLineId;   // Last JournalLine ID
+    long currentAccountSeq;     // accountSeq for CURRENT position
+    long lockedAccountSeq;      // accountSeq for LOCKED position
+    long frozenAccountSeq;      // accountSeq for FROZEN position
+    Instant lastUpdatedAt;      // Last update time
 }
 
-ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
+ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore = new ConcurrentHashMap<>();
 
-// Position Query Support
-// Aggregate query sums all positions for a given (accountId, balanceType, currency)
-Map<String, BigDecimal> getPositions(String accountId, String balanceType, String currency) {
-    return Stream.of(Position.values())
-        .collect(Collectors.toMap(
-            Position::name,
-            pos -> balanceStore.getOrDefault(
-                new AccountBalanceKey(accountId, balanceType, pos.name(), currency),
-                BalanceEntry.ZERO
-            ).amount
-        ));
+// Position-based Balance Query (routes to correct amount column based on position)
+BigDecimal getBalanceByPosition(AccountBalanceKey key, String position) {
+    BalanceEntry entry = balanceStore.get(key);
+    return switch (position) {
+        case "CURRENT" -> entry.amount;
+        case "LOCKED"   -> entry.lockedAmount;
+        case "FROZEN"  -> entry.frozenAmount;
+    };
+}
+
+// Get all position breakdown for API response
+Map<String, BigDecimal> getPositions(AccountBalanceKey key) {
+    BalanceEntry entry = balanceStore.get(key);
+    return Map.of(
+        "CURRENT", entry.amount,
+        "LOCKED", entry.lockedAmount,
+        "FROZEN", entry.frozenAmount
+    );
 }
 ```
 
@@ -2248,8 +2295,10 @@ CREATE INDEX idx_account_balance  ON journal_line (account_id, balance_type, pos
 -- account table
 CREATE INDEX idx_owner_id         ON account (owner_id);
 
--- account_balance table (v0.3: includes position field)
--- UNIQUE KEY: (account_id, balance_type, position, currency)
+-- account_balance table (three balance columns: amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN)
+-- position is a logical mapping concept, not a physical column
+-- UNIQUE KEY: (account_id, balance_type, currency)
+CREATE UNIQUE INDEX idx_account_balance ON account_balance (account_id, balance_type, currency);
 CREATE INDEX idx_account_id       ON account_balance (account_id);
 ```
 
@@ -2482,21 +2531,21 @@ Standardized report generated after each reconciliation:
 ## 7. API Design
 
 ```
-# Trigger manual reconciliation
+#### Trigger manual reconciliation
 POST /ledger/reconciliation/trigger
   { "reconDate": "2026-05-16", "reconType": "L1" }
 
-# Query reconciliation report
+#### Query reconciliation report
 GET /ledger/reconciliation/reports?date=2026-05-16
 
-# Query unresolved cases
+#### Query unresolved cases
 GET /ledger/reconciliation/cases?status=OPEN&reconType=L3
 
-# Update case status
+#### Update case status
 PATCH /ledger/reconciliation/cases/{caseId}
   { "status": "RESOLVED", "resolutionAction": "ADJUSTMENT", "resolutionJournalId": "..." }
 
-# Upload external settlement file (L3)
+#### Upload external settlement file (L3)
 POST /ledger/reconciliation/external-files
   Content-Type: multipart/form-data
 ```
@@ -2557,34 +2606,50 @@ State Machine is the core computing unit of the Ledger Platform, running on the 
 ### 2.1 In-Memory Balance Store
 
 ```java
-// Account balance Key (v0.3: expanded to include position)
+// Account balance Key (v0.7: position removed; position is logical mapping concept)
 record AccountBalanceKey(
     String accountId,
     String balanceType,
-    String position,            // CURRENT / LOCKED / FROZEN
     String currency
 ) {}
 
-// Account balance Entry
+// Account balance Entry (v0.7: three position balance fields + per-position accountSeq)
+// position mapping: amount=CURRENT, lockedAmount=LOCKED, frozenAmount=FROZEN
 record BalanceEntry(
-    BigDecimal amount,          // Current balance
+    BigDecimal amount,          // CURRENT position balance
+    BigDecimal lockedAmount,    // LOCKED position balance
+    BigDecimal frozenAmount,    // FROZEN position balance
     long stateVersion,          // Last updated Raft Log Index
     String lastJournalId,       // Last Journal ID
+    String lastJournalLineId,   // Last JournalLine ID
+    long currentAccountSeq,     // accountSeq for CURRENT position
+    long lockedAccountSeq,      // accountSeq for LOCKED position
+    long frozenAccountSeq,      // accountSeq for FROZEN position
     Instant lastUpdatedAt       // Last update time
 ) {}
 
 // Balance Store: lock-free read, Account Worker serial write
 ConcurrentHashMap<AccountBalanceKey, BalanceEntry> balanceStore;
 
-// Position-aware query helper
-Map<String, BigDecimal> getPositionBalances(String accountId, String balanceType, String currency) {
-    Map<String, BigDecimal> result = new HashMap<>();
-    for (Position pos : Position.values()) {
-        AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, pos.name(), currency);
-        BalanceEntry entry = balanceStore.getOrDefault(key, BalanceEntry.ZERO);
-        result.put(pos.name(), entry.amount);
-    }
-    return result;
+// Position-aware balance query (routes to correct amount column based on position)
+BigDecimal getBalanceByPosition(AccountBalanceKey key, String position) {
+    BalanceEntry entry = balanceStore.get(key);
+    return switch (position) {
+        case "CURRENT" -> entry.amount();
+        case "LOCKED"   -> entry.lockedAmount();
+        case "FROZEN"  -> entry.frozenAmount();
+        default -> throw new IllegalArgumentException("Unknown position: " + position);
+    };
+}
+
+// Get all position breakdown for API response
+Map<String, BigDecimal> getPositionBalances(AccountBalanceKey key) {
+    BalanceEntry entry = balanceStore.get(key);
+    return Map.of(
+        "CURRENT", entry.amount(),
+        "LOCKED", entry.lockedAmount(),
+        "FROZEN", entry.frozenAmount()
+    );
 }
 ```
 
@@ -2872,7 +2937,7 @@ Raft Learner
     ├─ journal (for F-006 Journal Query)
     ├─ journal_line (for F-006 Journal Query)
     ├─ account (account data, for F-010 Account Query)
-    ├─ account_balance (for F-007 Reconciliation; includes frozen_amount, locked_amount)
+    ├─ account_balance (for F-007 Reconciliation; three balance columns amount/locked_amount/frozen_amount mapping to CURRENT/LOCKED/FROZEN positions)
     ├─ balance_type_registry (Balance Type configuration)
     └─ balance_snapshot (for F-005 As-of Query)
 ```
@@ -2890,8 +2955,11 @@ To avoid Learner becoming a bottleneck, Learner adopts batch write strategy:
 ```
 Learner buffers 500ms or 1000 Raft Log entries (whichever comes first)
 → Batch INSERT INTO journal_line VALUES (...)
-→ Batch UPSERT account_balance SET amount, account_seq, last_journal_id
-  (frozen_amount, locked_amount preserved and not overwritten)
+→ Batch UPSERT account_balance SET 
+    amount = CASE WHEN position='CURRENT' THEN new_value ELSE amount END,
+    locked_amount = CASE WHEN position='LOCKED' THEN new_value ELSE locked_amount END,
+    frozen_amount = CASE WHEN position='FROZEN' THEN new_value ELSE frozen_amount END
+  (only the target position column is updated; other two columns preserved)
 → commit
 ```
 
@@ -3037,13 +3105,13 @@ Any step failure: raise alert, manual intervention, do not auto-skip.
 ## 6. API Design
 
 ```
-# Query period list
+#### Query period list
 GET /ledger/accounting-periods?status=OPEN
 
-# Manually trigger EOD (testing or re-run)
+#### Manually trigger EOD (testing or re-run)
 POST /ledger/accounting-periods/{periodId}/eod/trigger
 
-# Query EOD task status
+#### Query EOD task status
 GET /ledger/accounting-periods/{periodId}/eod/status
 ```
 
@@ -3196,6 +3264,1025 @@ Go through Raft, initialize new balance entry in State Machine (initial value 0)
 | AC-03 | After unfreezing, Posting executes normally | Functional test |
 | AC-04 | Closing account with non-zero balance returns `ACCOUNT_HAS_NON_ZERO_BALANCE` | Functional test |
 | AC-05 | After adding Balance Type, Posting to this type can be done immediately | Functional test |
+
+
+---
+
+# F-011 Balance Change Event / Kafka Outbox — Functional Requirements Specification
+
+**Document Version**: v0.1  
+**Feature**: F-011 Balance Change Event & Kafka Outbox  
+**System**: Next-Gen Internal Ledger Platform  
+**Status**: Draft for Review  
+**Dependencies**: ADR-001, F-008 State Machine, Kafka Cluster
+
+---
+
+## 1. Overview
+
+Every ledger operation (Posting / Reversal / Adjustment) must publish a `BalanceChangeEvent` to Kafka upon State Machine apply completion. Downstream systems (Risk Engine, Reporting, Data Warehouse, Real-time Monitoring) consume these events.
+
+**Core Principles**:
+
+- **Atomic Event Publishing**: Events are generated inside State Machine apply and written to RocksDB CF_OUTBOX in the same WriteBatch as the ledger data
+- **Outbox Pattern**: Ensures no event loss; Kafka downtime does not affect ledger writes
+- **Per-Key Sequential `accountSeq`**: Each `(accountId, balanceType, position, currency)` maintains an independent monotonically increasing sequence number for consumer gap detection and ordering
+- **Immutable Events**: Once published, events are never modified or retracted; corrections are published as new Correction Events
+
+---
+
+## 2. Event Schema
+
+### 2.1 BalanceChangeEvent (v1.2)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `eventId` | `string` | ✅ | Unique event ID (UUID v7) |
+| `eventType` | `enum` | ✅ | `BALANCE_CHANGE` / `BALANCE_SNAPSHOT` / `BALANCE_CORRECTION` |
+| `eventVersion` | `string` | ✅ | Schema version, current `"1.2"` |
+| `eventTime` | `datetime` | ✅ | Event generation time (Raft apply timestamp) |
+| `requestId` | `string` | ✅ | Original requestId that triggered this event |
+| `journalId` | `string` | ✅ | Corresponding Journal ID |
+| `journalLineId` | `string` | ✅ | Corresponding JournalLine ID |
+| `accountId` | `string` | ✅ | Affected account |
+| `balanceType` | `string` | ✅ | Balance type code |
+| `position` | `enum` | ✅ | `CURRENT` / `LOCKED` / `FROZEN` |
+| `currency` | `string` | ✅ | ISO 4217 currency code |
+| `entryType` | `enum` | ✅ | `DEBIT` / `CREDIT` |
+| `amount` | `decimal` | ✅ | Change amount (absolute value) |
+| `balanceBefore` | `decimal` | ✅ | Balance before change |
+| `balanceAfter` | `decimal` | ✅ | Balance after change |
+| `accountSeq` | `long` | ✅ | Monotonic sequence number for this Key (starts at 1) |
+| `prevAccountSeq` | `long` | ✅ | Previous accountSeq for this Key (0 for first event) |
+| `businessEventType` | `string` | ✅ | Original business event type (e.g., `RFQ_SETTLEMENT`) |
+| `businessEventRef` | `string` | ✅ | Original business event reference |
+| `valueDate` | `date` | ✅ | Value date |
+| `operatorId` | `string` | ❌ | Operator ID (required for Reversal / Adjustment) |
+| `configVersion` | `int` | ✅ | Balance Type config version (for downstream tracing) |
+| `metadata` | `map<string,string>` | ❌ | Extension fields |
+
+### 2.2 Event Example
+
+```json
+{
+  "eventId": "evt-0193a8b0-7c1d-7e5f-a2b3-c4d5e6f78901",
+  "eventType": "BALANCE_CHANGE",
+  "eventVersion": "1.2",
+  "eventTime": "2026-05-16T10:30:22.341Z",
+  "requestId": "req-550e8400-e29b-41d4-a716-446655440000",
+  "journalId": "JNL-20260516-000012345",
+  "journalLineId": "JL-000024689",
+  "accountId": "CLIENT_ACC_001",
+  "balanceType": "AVAILABLE_BALANCE",
+  "position": "CURRENT",
+  "currency": "USD",
+  "entryType": "DEBIT",
+  "amount": 800000.00,
+  "balanceBefore": 1000000.00,
+  "balanceAfter": 200000.00,
+  "accountSeq": 42,
+  "prevAccountSeq": 41,
+  "businessEventType": "RFQ_SETTLEMENT",
+  "businessEventRef": "RFQ-2026051600123",
+  "valueDate": "2026-05-16",
+  "configVersion": 3
+}
+```
+
+---
+
+## 3. accountSeq Mechanism
+
+### 3.1 Design Goals
+
+`accountSeq` provides a strictly monotonically increasing sequence number for each logical dimension `(accountId, balanceType, position, currency)`. Note: position is a logical mapping concept; physically, `BalanceEntry` tracks three independent seq fields: `currentAccountSeq` (CURRENT), `lockedAccountSeq` (LOCKED), `frozenAccountSeq` (FROZEN).
+
+- **Gap Detection**: If consumer receives `accountSeq=102` (same position) but last seen was `100`, sequence `101` is missing → trigger alert or reconciliation
+- **Ordering**: Consumer processes events in per-position `accountSeq` order, guaranteeing per-Key ordering
+- **Deduplication**: Consumer deduplicates by `(accountId, balanceType, position, currency, accountSeq)`
+
+### 3.2 Increment Rules
+
+```
+Rule 1: accountSeq starts at 1, independently per Key
+Rule 2: Each Posting / Reversal / Adjustment increments accountSeq of affected Keys by 1
+Rule 3: Multi-account Postings increment each Key's accountSeq independently
+Rule 4: Different positions (CURRENT/LOCKED/FROZEN) have independent accountSeq
+Rule 5: accountSeq MUST NOT skip (gap = event loss or system anomaly)
+Rule 6: Period closing / Snapshot does NOT reset accountSeq (spans full account lifecycle)
+Rule 7: If accountSeq approaches 80% of Long.MAX_VALUE, trigger PagerDuty alert (account migration needed)
+```
+
+### 3.3 Example
+
+```
+CLIENT_ACC_001, AVAILABLE_BALANCE, CURRENT, USD:
+  Posting #1 (DEBIT 100)  → accountSeq=1,  prevAccountSeq=0
+  Posting #2 (CREDIT 50)  → accountSeq=2,  prevAccountSeq=1
+  Reversal #1              → accountSeq=3,  prevAccountSeq=2
+
+CLIENT_ACC_001, AVAILABLE_BALANCE, LOCKED, USD:
+  Posting #1 (DEBIT 100)  → accountSeq=1,  prevAccountSeq=0
+  (independent from CURRENT position)
+
+CLIENT_ACC_001, TRADE_AHEAD_BALANCE, CURRENT, USD:
+  Posting #1 (DEBIT 500)  → accountSeq=1,  prevAccountSeq=0
+  (independent from AVAILABLE_BALANCE)
+```
+
+---
+
+## 4. Kafka Outbox Mechanism
+
+### 4.1 Architecture
+
+```
+State Machine apply()
+        │
+        ├─ 1. Update balanceStore (in-memory)
+        ├─ 2. Generate Journal + JournalLine
+        ├─ 3. Build BalanceChangeEvent (with accountSeq)
+        ├─ 4. Write to RocksDB CF_OUTBOX (same WriteBatch as ledger data)
+        └─ 5. Update idempotencyStore
+                │
+                │  (async, non-blocking)
+                ▼
+        AsyncKafkaPublisher
+                │
+                ├─ Poll CF_OUTBOX (every 100ms or batch of 500)
+                ├─ Batch send to Kafka Topic: ledger.balance.change.v1
+                ├─ On success → delete CF_OUTBOX record
+                └─ On failure → retain record, retry next cycle
+```
+
+### 4.2 Kafka Topic Configuration
+
+| Property | Value | Description |
+|---|---|---|
+| Topic Name | `ledger.balance.change.v1` | Event topic |
+| Partitions | 64 | Hash by `accountId` for per-account ordering |
+| Replication Factor | 3 | Match Raft cluster size |
+| Compression | LZ4 | Balanced compression/CPU |
+| Retention | 7 days | Compliance & replay needs |
+| `acks` | `all` | Strongest durability guarantee |
+| `min.insync.replicas` | 2 | Quorum ≥ 2 |
+| Partition Key | `accountId:balanceType:currency` | Guarantees per-Key ordering |
+
+### 4.3 At-Least-Once Semantics & Consumer Dedup
+
+```
+Producer side: AsyncKafkaPublisher may retry due to network timeout → duplicate delivery
+Consumer dedup strategy:
+  - Dedup by (accountId, balanceType, position, currency, accountSeq)
+  - Or dedup by eventId
+  - Consumer MUST implement idempotent processing
+
+Gap Detection:
+  - Consumer maintains lastSeenSeq per Key
+  - On new event: if newSeq > lastSeenSeq + 1 → GAP detected
+  - Trigger alert, may need Kafka replay or Reconciliation backfill
+```
+
+---
+
+## 5. Error Handling & Recovery
+
+### 5.1 Kafka Unavailability
+
+```
+Kafka Broker down or network partition:
+  → AsyncKafkaPublisher send fails
+  → Events retained in CF_OUTBOX, no data loss
+  → Ledger writes unaffected (Outbox in same WriteBatch, already persisted)
+  → When Kafka recovers, AsyncKafkaPublisher auto-drains CF_OUTBOX
+```
+
+### 5.2 Node Restart
+
+```
+Node restart:
+  → RocksDB CF_OUTBOX unsent events preserved (persisted)
+  → AsyncKafkaPublisher scans CF_OUTBOX on startup, re-sends
+  → Event accountSeq unchanged (determined at apply time)
+  → Consumer deduplicates by accountSeq, no double-processing
+```
+
+---
+
+## 6. Monitoring
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `ledger.outbox.pending.count` | Gauge | — | Pending events in CF_OUTBOX |
+| `ledger.outbox.publish.latency` | Histogram | — | Outbox → Kafka publish latency |
+| `ledger.kafka.publish.lag` | Gauge | topic | Kafka producer lag |
+| `ledger.kafka.publish.error.count` | Counter | errorType | Publish failure count |
+| `ledger.event.account_seq.gap` | Counter | accountId | Consumer-detected gap count |
+
+**Alerting Rules**:
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Outbox pending > 10,000 | Sustained 1 min | WARNING |
+| Outbox pending > 100,000 | Sustained 1 min | CRITICAL |
+| Kafka publish error rate > 10% | Sustained 30s | CRITICAL |
+| Consumer gap detected | Any occurrence | WARNING |
+| Consumer lag > 1,000 messages | Sustained 2 min | WARNING |
+
+---
+
+## 7. Performance Targets
+
+| Metric | Target |
+|---|---|
+| Event write to Outbox overhead | ≤ 0.1ms (same WriteBatch) |
+| Outbox → Kafka P95 latency | ≤ 50ms |
+| Kafka Producer throughput | ≥ 20,000 events/s |
+| Node restart Outbox drain | ≤ 30s (10,000 backlog) |
+
+---
+
+## 8. Acceptance Criteria
+
+| # | Criterion | Test Method | Related TC |
+|---|---|---|---|
+| AC-01 | Posting apply publishes BalanceChangeEvent to Kafka with accountSeq=1, prevAccountSeq=0 | Integration test | TC-F011-01 |
+| AC-02 | accountSeq increments correctly across sequential Postings | Integration test | TC-F011-02 |
+| AC-03 | Reversal triggers event with incremented accountSeq | Functional test | TC-F011-03 |
+| AC-04 | Consumer detects accountSeq gap and triggers alert | Consumer test | TC-F011-04 |
+| AC-05 | Outbox at-least-once redelivery is deduplicated by consumer | Consumer test | TC-F011-05 |
+| AC-06 | Node restart Outbox re-send preserves accountSeq unchanged | Fault test | TC-F011-06 |
+| AC-07 | Multi-BalanceType Posting increments each Key's accountSeq independently | Functional test | TC-F011-07 |
+| AC-08 | Event `position` field reflects JournalLine position correctly | Functional test | TC-F011-08 |
+| AC-09 | Different positions on same account have independent accountSeq | Functional test | TC-F011-09 |
+| AC-10 | Kafka down does not affect ledger writes; Outbox auto-drains on recovery | Fault test | TC-KAFKA-01 |
+| AC-11 | RocksDB CF_OUTBOX atomically persisted with ledger data in same WriteBatch | Unit test | TC-ROCKS-01 |
+
+
+---
+
+# F-013 Idempotency & Hotspot Account Concurrency — Functional Requirements Specification
+
+**Document Version**: v0.1  
+**Feature**: F-013 Idempotency & Hotspot Account Concurrency  
+**System**: Next-Gen Internal Ledger Platform  
+**Status**: Draft for Review  
+**Dependencies**: ADR-001, F-002 Posting API, F-008 State Machine
+
+---
+
+## 1. Overview
+
+This specification defines the idempotency guarantee mechanism and hotspot account high-concurrency processing strategy. The two topics are tightly coupled: idempotency is the foundation for safe retries in distributed systems; hotspot account concurrency control relies on Account-Level Queue serialization, which must coordinate with idempotency.
+
+**Core Design Goals**:
+
+- **Exactly-Once Semantics**: Write requests with the same `requestId` execute ledger mutation exactly once, regardless of retry count
+- **Hotspot No Lock Contention**: Account-Level Queue converts concurrency into serialized queuing, eliminating DB row lock contention
+- **Multi-Account Atomicity**: Cross-account operations (RFQ) acquire Coordination Tokens in ascending accountId order to prevent deadlock
+- **Back-Pressure Protection**: Reject requests when queue depth exceeds threshold to prevent memory exhaustion
+
+---
+
+## 2. Idempotency Mechanism
+
+### 2.1 Idempotency Key
+
+| Property | Specification |
+|---|---|
+| Key Format | `requestId` (UUID v7) |
+| Key Source | Provided by caller in request; must be globally unique |
+| Key TTL | Default 24 hours (configurable `ledger.idempotency.ttl-hours`) |
+| Key Scope | Global (across all write operations: Posting / Reversal / Adjustment Approve) |
+
+### 2.2 Idempotency Store Architecture
+
+```
+Dual-layer protection:
+
+L1: In-Memory Idempotency Store (State Machine memory)
+    ├─ Data Structure: ConcurrentHashMap<String, IdempotencyEntry>
+    ├─ Read Latency: < 0.01ms
+    ├─ TTL: 24 hours (periodic eviction job cleans expired entries)
+    └─ Purpose: Fast-path idempotency check
+
+L2: RocksDB CF_IDEMPOTENCY (persistence layer)
+    ├─ Key: requestId
+    ├─ Value: Serialized IdempotencyEntry (status, journalId, errors, timestamp)
+    ├─ Purpose: Recovery after restart; survive Leader failover
+    └─ Written in same WriteBatch as ledger data, atomically
+```
+
+### 2.3 IdempotencyEntry Structure
+
+```java
+record IdempotencyEntry(
+    String requestId,          // Original requestId
+    String status,             // COMPLETED / REJECTED
+    String journalId,          // journalId on success (null on failure)
+    List<String> errors,       // Error codes on failure (empty on success)
+    String resultJson,         // Original response JSON (for idempotent reply)
+    Instant completedAt,       // Completion time
+    Instant expiresAt          // Expiry time (completedAt + TTL)
+) {}
+```
+
+### 2.4 Idempotency Check Flow
+
+```
+1. Client sends Posting request (requestId = "req-001")
+
+2. Account Worker pre-execution:
+   ├─ L1 check: idempotencyStore.contains("req-001")?
+   │   ├─ YES, status=COMPLETED → return cached result immediately, no execution
+   │   ├─ YES, status=REJECTED  → return cached errors immediately
+   │   └─ NO                    → continue
+
+3. Execute Posting (Balance validation → State Machine apply → RocksDB persist)
+
+4. On success:
+   ├─ Build IdempotencyEntry (status=COMPLETED, journalId=...)
+   ├─ Write to L1 (idempotencyStore.put)
+   ├─ Write to L2 (RocksDB CF_IDEMPOTENCY, same WriteBatch)
+   └─ Return PostingResult
+
+5. On failure:
+   ├─ Build IdempotencyEntry (status=REJECTED, errors=[...])
+   ├─ Write to L1 (idempotencyStore.put)
+   ├─ Write to L2 (RocksDB CF_IDEMPOTENCY, same WriteBatch)
+   └─ Return error response
+```
+
+### 2.5 Idempotency Across Leader Failover
+
+```
+Scenario: Leader A completes req-003 apply → idempotencyStore.put → Leader A crashes
+
+1. Raft elects new Leader B
+2. Leader B restores State Machine from RocksDB Snapshot + Raft Log replay
+3. During restore, loads all unexpired entries from CF_IDEMPOTENCY into L1
+4. req-003's IdempotencyEntry is in Snapshot → L1 hit after restore
+5. Client retries req-003 → Leader B returns cached result, no re-execution
+
+Guarantee: As long as req-003's apply was committed (Quorum), idempotency record cannot be lost
+```
+
+### 2.6 TTL Expiry Behavior
+
+```
+Expiry Strategy:
+  - Eviction Job scans L1 every 60s, removes entries where expiresAt < now()
+  - RocksDB CF_IDEMPOTENCY expired entries cleaned during Compaction
+  - Expired requestId appearing again → treated as new request, may re-execute
+
+Caller Responsibility:
+  - Retries MUST complete within TTL (default 24 hours)
+  - Retries beyond TTL risk duplicate booking
+  - Recommendation: Use reasonable retry strategy (maxRetries=3, exponential backoff, total time < 5 min)
+```
+
+---
+
+## 3. Hotspot Account Concurrency
+
+### 3.1 Problem Definition
+
+In RFQ scenarios, all client trades have the same counterparty account (`COMPANY_FX_ACC`), making it a hotspot:
+
+```
+Traditional DB approach problem:
+  1000 concurrent RFQ → 1000 threads contending for COMPANY_FX_ACC row lock
+  → Massive lock wait, deadlock risk, P95 latency explosion
+  → Cannot meet Posting P95 ≤ 3ms target
+```
+
+### 3.2 Solution: Account-Level Queue
+
+```
+Each account has a LinkedBlockingQueue + dedicated Virtual Thread Worker:
+
+  ┌──────────────────────────────────────┐
+  │         AccountQueueManager          │
+  │                                      │
+  │  accountQueues: ConcurrentHashMap    │
+  │    "CLIENT_ACC_001"  → Queue-A       │
+  │    "COMPANY_FX_ACC"  → Queue-B       │
+  │    "CLIENT_ACC_002"  → Queue-C       │
+  │         ...                          │
+  │                                      │
+  │  Per Queue:                          │
+  │    ├─ LinkedBlockingQueue<Runnable>  │
+  │    ├─ Virtual Thread Worker × 1      │
+  │    └─ Serialized execution, no concurrency conflict │
+  └──────────────────────────────────────┘
+
+Effect:
+  - All requests for COMPANY_FX_ACC queue up in same Queue
+  - No lock contention, only nanosecond-level queue wait
+  - Hotspot account latency same as normal accounts
+```
+
+### 3.3 Multi-Account Atomicity (RFQ Scenario)
+
+```
+RFQ involves CLIENT_ACC_001 + COMPANY_FX_ACC
+
+Step 1: Sort accountIds lexicographically ascending (deadlock prevention)
+         CLIENT_ACC_001 < COMPANY_FX_ACC
+         → Acquire CLIENT_ACC_001 first, then COMPANY_FX_ACC
+
+Step 2: Acquire Coordination Tokens
+         ├─ Queue-A (CLIENT_ACC_001): acquire Token, pause consumption
+         ├─ Queue-B (COMPANY_FX_ACC): acquire Token, pause consumption
+         └─ Both Tokens ready → build Multi-Account RaftCommand
+
+Step 3: Submit RaftCommand
+         → State Machine apply updates all accounts atomically
+
+Step 4: Release Tokens
+         → Queue-A resumes consumption
+         → Queue-B resumes consumption
+
+Deadlock Prevention Proof:
+  All requests acquire Tokens in ascending accountId order
+  → No circular wait → No deadlock
+```
+
+### 3.4 Back-Pressure (Queue Depth Limit)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `MAX_QUEUE_SIZE` | 1000 | Maximum depth per Account Queue |
+| Behavior | Reject | Return HTTP 429 when exceeded |
+
+```
+Rejection flow:
+  1. Request arrives → AccountQueueManager.enqueue(accountId, task)
+  2. queue.size() >= MAX_QUEUE_SIZE?
+     ├─ YES → throw QueueFullException
+     │         → return HTTP 429 QUEUE_FULL
+     └─ NO  → queue.offer(task) → success
+
+Monitoring:
+  - Gauge: ledger.account_queue.depth{accountId}
+  - Alert: queue.depth > 80% MAX_QUEUE_SIZE → WARNING
+  - Alert: queue.depth >= MAX_QUEUE_SIZE → CRITICAL (requests being rejected)
+```
+
+---
+
+## 4. Concurrency Safety Guarantees
+
+| Scenario | Mechanism | Guarantee |
+|---|---|---|
+| Same account multiple Postings | Account Queue serialization | Strict ordered execution, no race condition |
+| Multi-account RFQ Posting | Ascending accountId Token acquisition | Atomic execution, no deadlock |
+| Same requestId retry | L1 + L2 Idempotency Store | Exactly-once |
+| Queue full | MAX_QUEUE_SIZE back-pressure | Fast-fail, non-blocking to caller |
+| Worker crash | Supervisor rebuild | Queue requests not lost |
+
+---
+
+## 5. Performance Targets
+
+| Metric | Target | Test Condition |
+|---|---|---|
+| Idempotency check (L1 hit) | ≤ 0.01ms | ConcurrentHashMap.get() |
+| Hotspot Queue wait | ≤ 0.1ms (queue delay) | 1000 concurrent |
+| Hotspot Posting P95 | ≤ 3ms | COMPANY_FX_ACC, 1000 concurrent |
+| Multi-account Token acquisition | ≤ 0.5ms | 2-account RFQ |
+| Queue Full response | ≤ 1ms | Immediate rejection |
+| Worker rebuild | ≤ 100ms | Fault recovery |
+
+---
+
+## 6. Acceptance Criteria
+
+| # | Criterion | Test Method | Related TC |
+|---|---|---|---|
+| AC-01 | Same requestId retry returns original result (same journalId), State Machine does not re-apply | Unit test | TC-F013-01 |
+| AC-02 | Rejected requestId (e.g., INSUFFICIENT_BALANCE) retry returns original error codes | Unit test | TC-F013-02 |
+| AC-03 | Idempotency survives Leader failover via RocksDB recovery | Fault test | TC-F013-03 |
+| AC-04 | TTL-expired requestId treated as new request, re-executed | Unit test | TC-F013-04 |
+| AC-05 | Concurrent duplicate requestIds produce only 1 Journal | Concurrency test | TC-F013-05 |
+| AC-06 | 1000 concurrent RFQ on same HOTSPOT account: no duplicate debit, no negative balance, balance accurate | Concurrency safety test | TC-F013-06 |
+| AC-07 | Hotspot account 1000 concurrent Posting P95 ≤ 3ms | Performance test | TC-F013-07 |
+| AC-08 | Queue depth exceeds MAX_QUEUE_SIZE returns HTTP 429 QUEUE_FULL | Back-pressure test | TC-F013-08 |
+| AC-09 | Multi-account RFQ no deadlock (reversed account order concurrent execution) | Deadlock test | TC-F013-09 |
+| AC-10 | Virtual Thread Worker crash auto-rebuilds, Queue resumes consumption | Fault test | TC-F013-10 |
+
+
+---
+
+# F-014 Java Client SDK — Functional Requirements Specification
+
+**Document Version**: v0.1  
+**Feature**: F-014 Java Client SDK  
+**System**: Next-Gen Internal Ledger Platform  
+**Status**: Draft for Review  
+**Dependencies**: ledger-core (DTOs only), no Raft internal dependencies
+
+---
+
+## 1. Overview
+
+The Java Client SDK (`ledger-client-sdk`) provides callers with a type-safe, high-performance Java client that encapsulates Raft Leader discovery, request routing, automatic retry, and idempotent writes. Upstream business systems can safely call the Ledger without understanding internal cluster topology.
+
+**Design Goals**:
+- **Hide Raft Cluster Topology**: Callers configure only an endpoint list; SDK auto-discovers and caches the Leader address
+- **Automatic Fault Tolerance**: On Leader switch, SDK auto-refreshes and retries idempotent writes transparently
+- **High Performance**: SDK internal overhead ≤ 0.5ms (excluding network), preserving Posting P95 ≤ 3ms target
+- **Dual-Mode API**: Synchronous (blocking) and asynchronous (CompletableFuture) for different call scenarios
+
+### Module Positioning
+
+| Responsibility | ledger-client-sdk | NOT Responsible |
+|---|---|---|
+| Leader discovery & caching | ✅ | ❌ |
+| HTTP request encapsulation & routing | ✅ | ❌ |
+| Idempotent write automatic retry | ✅ | ❌ |
+| Read request failover | ✅ | ❌ |
+| Balance Type config management | ❌ | F-001 |
+| Ledger logic & validation | ❌ | F-002, F-008 |
+
+---
+
+## 2. Leader Discovery
+
+### 2.1 Discovery Flow
+
+```
+1. SDK Initialization
+   → Check local cache validity (within TTL)
+   → Valid: use cached Leader endpoint
+   → Invalid/expired: query /raft/leader from any endpoint
+
+2. Query Leader
+   GET {anyEndpoint}/raft/leader
+   → Response: { "leaderId": "node-001", "leaderEndpoint": "http://ledger-node-1:8081" }
+   → Update local cache, record TTL start time
+
+3. Request Routing
+   → All writes (Posting/Reversal/Adjustment Approve) → leaderEndpoint
+   → All reads (Balance Query/Journal Query) → leaderEndpoint (strong consistency)
+
+4. Leader Change Detection
+   → Request returns HTTP 503 (NOT_LEADER) or connection failure
+   → Immediately invalidate cache
+   → Re-query /raft/leader (excluding failed endpoint)
+   → Update cache and retry
+```
+
+### 2.2 Leader Hint Cache Specification
+
+| Property | Value | Description |
+|---|---|---|
+| Cache Key | None (singleton) | One cluster has one Leader |
+| Cache TTL | Default 5s, configurable | `LedgerClientConfig.leaderCacheTtl` |
+| Cache Update Trigger | TTL expiry or NOT_LEADER response | Passive invalidation + timed expiry |
+| Thread Safety | `volatile` + `synchronized` double-check | Prevent concurrent refresh |
+
+---
+
+## 3. Retry Strategy
+
+| Request Type | Operations | Retry Strategy |
+|---|---|---|
+| **Idempotent Writes** | `post()`, `reverse()`, `approveAdjustment()` | Carry `requestId`, auto-retry up to `maxRetries` (default 3) |
+| **Non-idempotent Reads** | `queryBalance()`, `queryJournal()` | Failover to new Leader, retry (naturally idempotent) |
+
+### 3.1 Retry Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `maxRetries` | 3 | Max idempotent write retries |
+| `retryBackoffMs` | 100 | Base retry interval, doubles each retry (100, 200, 400) |
+| `leaderCacheTtl` | 5s | Leader Hint cache validity |
+
+---
+
+## 4. API Surface
+
+```java
+public interface LedgerClient extends AutoCloseable {
+    // Synchronous API
+    PostingResult post(PostingRequest request);
+    ReversalResult reverse(ReversalRequest request);
+    AdjustmentResult approveAdjustment(ApproveRequest request);
+    BalanceQueryResult queryBalance(BalanceQueryRequest request);
+    List<BalanceQueryResult> queryBalances(List<BalanceQueryRequest> requests);
+    JournalQueryResult queryJournal(JournalQueryRequest request);
+
+    // Asynchronous API
+    CompletableFuture<PostingResult> postAsync(PostingRequest request);
+    CompletableFuture<ReversalResult> reverseAsync(ReversalRequest request);
+    CompletableFuture<AdjustmentResult> approveAdjustmentAsync(ApproveRequest request);
+    CompletableFuture<BalanceQueryResult> queryBalanceAsync(BalanceQueryRequest request);
+    CompletableFuture<List<BalanceQueryResult>> queryBalancesAsync(List<BalanceQueryRequest> requests);
+    CompletableFuture<JournalQueryResult> queryJournalAsync(JournalQueryRequest request);
+
+    // Lifecycle
+    @Override void close();
+}
+```
+
+---
+
+## 5. Performance Targets
+
+| Operation | Target (excl. network) | Description |
+|---|---|---|
+| Leader Discovery (cache hit) | ≤ 0.01ms | Volatile field read |
+| Leader Discovery (cache miss) | ≤ 5ms | One HTTP GET /raft/leader |
+| Request serialization/deserialization | ≤ 0.2ms | Jackson JSON |
+| Retry logic overhead | ≤ 0.1ms | Retry counter + backoff timer |
+| **Total SDK overhead** | **≤ 0.5ms** | |
+
+### End-to-End Latency Budget
+
+```
+Posting P95 ≤ 3ms budget:
+  ├─ SDK overhead         ≤ 0.5ms
+  ├─ Network RTT          ≤ 1.0ms
+  ├─ Ledger Processing    ≤ 1.0ms
+  └─ Response Network     ≤ 0.5ms
+                          = 3.0ms
+```
+
+---
+
+## 6. Error Handling
+
+| Error Type | HTTP Status | Retry? | Final Behavior |
+|---|---|---|---|
+| Business rejection | 400 / 422 | ❌ | Throw `LedgerClientException` (with errorCode) |
+| NOT_LEADER | 503 | ✅ | Refresh cache and retry |
+| Connection Refused | N/A | ✅ | Refresh cache and retry |
+| Read Timeout | N/A | ✅ | Refresh cache and retry |
+| Server Error | 500 | ✅ (1x) | Retry once then throw |
+| Exceeded maxRetries | N/A | ❌ | Throw `LedgerClientException` (errorCode=MAX_RETRIES_EXCEEDED) |
+
+---
+
+## 7. Acceptance Criteria
+
+| # | Criterion | Test Method | Related TC |
+|---|---|---|---|
+| AC-01 | SDK auto-discovers Leader on initialization; caller does not specify Leader endpoint | Integration test | TC-F014-01 |
+| AC-02 | Leader cache hit within TTL; no repeated /raft/leader queries | Unit test | TC-F014-02 |
+| AC-03 | HTTP 503 / NOT_LEADER triggers cache refresh and retry for idempotent writes | Integration test | TC-F014-03 |
+| AC-04 | Idempotent writes auto-retry up to maxRetries on Leader switch | Fault test | TC-F014-04 |
+| AC-05 | Non-idempotent reads failover without request body retry | Unit test | TC-F014-05 |
+| AC-06 | All LedgerClientConfig parameters independently configurable | Unit test | TC-F014-06 |
+| AC-07 | queryBalance() returns correct balance matching direct HTTP call | Integration test | TC-F014-07 |
+| AC-08 | Business rejections (e.g., JOURNAL_UNBALANCED) correctly propagated to LedgerClientException | Unit test | TC-F014-08 |
+| AC-09 | SDK internal overhead ≤ 0.5ms (excluding network) | Performance test | TC-F014-09 |
+| AC-10 | Performance test module can use SDK in place of raw HTTP/RestTemplate | Integration test | TC-F014-10 |
+| AC-11 | SDK close() releases all resources (connection pool, thread pool) | Unit test | TC-F014-11 |
+
+
+---
+
+# OPS-001 SRE Operational Guidelines — Operational Requirements Specification
+
+**Document Version**: v0.1
+**Feature**: OPS-001 SRE Operational Guide
+**System**: Next-Gen Internal Ledger Platform
+**Status**: Draft for Review
+**Dependencies**: ADR-001, F-008 State Machine, Appendix A Docker Compose Stack
+
+---
+
+## 1. Overview
+
+This document defines the day-to-day operational procedures (Runbook) for the Ledger Platform, covering RocksDB maintenance, Raft cluster management, MySQL View Layer sync repair, monitoring alert response, and disaster recovery drills. All operations must be performed via management APIs or standardized scripts; direct manipulation of underlying filesystems or databases is prohibited.
+
+**Core Principles**:
+
+- **All operations auditable**: Management APIs log operator, timestamp, operation content
+- **Zero-downtime preferred**: Node replacement, RocksDB compaction, config changes support rolling execution
+- **SOP documented**: Each operation has a standard step checklist to minimize human error
+- **Monitor-first**: Check dashboards before operations, verify metrics recovery after
+
+---
+
+## 2. RocksDB Operations
+
+### 2.1 Directory Structure
+
+```
+/var/lib/ledger/rocksdb/          # Inside Docker container
+├── CF_JOURNAL/                   # Journal records
+├── CF_JOURNAL_LINE/              # JournalLine records
+├── CF_BALANCE/                   # Balance snapshots
+├── CF_IDEMPOTENCY/               # Idempotency records
+├── CF_ACCOUNT_META/              # Account metadata
+├── CF_BALANCE_TYPE/              # Balance Type configs
+├── CF_SM_SNAPSHOT/               # State Machine Snapshots
+├── CF_OUTBOX/                    # Kafka pending events
+├── MANIFEST-*                    # RocksDB MANIFEST
+├── CURRENT                       # Current MANIFEST pointer
+├── OPTIONS-*                     # Config snapshots
+└── LOG                           # RocksDB internal log
+
+Host mount: ./jraft_ledger/node{N}/ (Docker Compose)
+```
+
+### 2.2 Compaction Strategy
+
+```
+Level Compaction (default):
+  Level 0: 4 files max
+  Level 1: 256 MB
+  Level 2: 2.56 GB
+  ...
+
+Configuration (rocksdb.properties):
+  write_buffer_size=64MB
+  max_write_buffer_number=3
+  max_background_jobs=4
+  level0_file_num_compaction_trigger=4
+  target_file_size_base=64MB
+  max_bytes_for_level_base=256MB
+```
+
+**Manual Full Compaction** (execute during low-traffic window):
+
+```
+POST /admin/ledger/rocksdb/compact
+  { "nodeId": "node-001", "compactAll": true }
+
+Note:
+  - Write throughput may drop 30-50% during full compaction
+  - Recommended window: daily 02:00-04:00
+  - Execute per node, rolling, with ≥ 30 min interval
+```
+
+**Scheduled Compaction**:
+
+| Frequency | Operation | Description |
+|---|---|---|
+| Daily 03:00 | Incremental compaction | Clean expired CF_IDEMPOTENCY entries |
+| Weekly Sun 03:00 | Full compaction | Per node, rolling, 30 min interval |
+| Monthly 1st 03:00 | Full compaction + backup | Compact then immediately do RocksDB checkpoint backup |
+
+### 2.3 Backup & Recovery
+
+**RocksDB Checkpoint Backup**:
+
+```
+Daily backup flow (cron-triggered):
+  1. POST /admin/ledger/rocksdb/checkpoint
+     → RocksDB creates Checkpoint (hard links, instantaneous, non-blocking writes)
+  2. Backup Checkpoint directory to object storage (S3 / MinIO)
+     → Path: s3://ledger-backup/rocksdb/{date}/node-{N}/checkpoint/
+  3. Retention policy:
+     - Last 7 days: daily
+     - Last 4 weeks: weekly (Sunday)
+     - Last 12 months: monthly (1st)
+     - Beyond 12 months: archive to Glacier
+
+Backup verification:
+  - Weekly: randomly select one backup, restore in isolated env, verify balanceStore integrity
+  - Verification script: scripts/verify-rocksdb-backup.sh {backup_path}
+```
+
+**Recovery from Backup**:
+
+```
+Single Node Recovery (node damaged, cluster healthy):
+  1. Stop damaged node
+  2. Download latest Checkpoint backup from S3
+  3. Clear damaged node's /var/lib/ledger/rocksdb/
+  4. Extract backup to rocksdb directory
+  5. Start node
+  6. Node joins cluster as Follower
+  7. Raft auto-catches-up incremental Log from Leader
+  8. Verify: GET /admin/ledger/health → status=HEALTHY
+
+Full Cluster Recovery (extreme: all nodes damaged):
+  1. Download latest complete backup from S3
+  2. Restore to node-001
+  3. Start node-001 as single-node cluster (bootstrap mode)
+  4. Verify Snapshot integrity
+  5. Start node-002, node-003 as Followers joining cluster
+  6. Run L1 Reconciliation to verify data integrity
+```
+
+### 2.4 Disk Space Management
+
+| Metric | Warning Threshold | Action |
+|---|---|---|
+| RocksDB directory size | > 80% disk | WARNING — consider expansion or clean old snapshots |
+| RocksDB directory size | > 95% disk | CRITICAL — immediate full compaction, suspend writes |
+| SST File count | > 10,000 | WARNING — trigger manual compaction |
+| WAL backlog | > 1,000 files | WARNING — check Raft Log consumption rate |
+
+---
+
+## 3. Raft Cluster Operations
+
+### 3.1 Cluster Status Query
+
+```
+GET /raft/status
+Response:
+{
+  "clusterId": "ledger-cluster-01",
+  "nodes": [
+    { "nodeId": "node-001", "role": "LEADER", "endpoint": "http://ledger-node-1:8081", "term": 7 },
+    { "nodeId": "node-002", "role": "FOLLOWER", "endpoint": "http://ledger-node-2:8082", "term": 7 },
+    { "nodeId": "node-003", "role": "FOLLOWER", "endpoint": "http://ledger-node-3:8083", "term": 7 }
+  ],
+  "leaderId": "node-001",
+  "term": 7,
+  "lastLogIndex": 12345678,
+  "commitIndex": 12345678,
+  "followerLag": { "node-002": 0, "node-003": 0 }
+}
+```
+
+### 3.2 Node Replacement (Rolling Upgrade)
+
+```
+Standard node replacement (no service impact):
+
+Step 1: Confirm cluster health → GET /raft/status → all HEALTHY
+Step 2: Stop target node → docker stop ledger-node-3
+Step 3: Wait for cluster stabilization (~15s)
+Step 4: Perform maintenance (upgrade, disk expansion, hardware replacement)
+Step 5: Start new node → docker start ledger-node-3-new
+Step 6: New node joins as Follower → pulls Snapshot or catches up via Raft Log
+Step 7: Verify → followerLag < 100
+Step 8: Repeat Step 2-7 for next node, ≥ 5 min interval between nodes
+```
+
+### 3.3 Leader Transfer (Planned Maintenance)
+
+```
+POST /admin/raft/transfer-leadership
+  { "targetNodeId": "node-002" }
+
+→ Leader gracefully transfers leadership to node-002
+→ No election delay, no in-flight request loss
+→ Recommended: execute 5 min before planned maintenance
+```
+
+### 3.4 Follower Catch-up
+
+```
+Follower Lag Monitoring:
+  Normal:   followerLag < 100
+  Warning:  followerLag > 1,000     → WARNING, check network
+  Critical: followerLag > 100,000   → CRITICAL, Snapshot Install may be needed
+
+Snapshot Install (when Follower severely behind):
+  1. Leader detects required Log Index already covered by Snapshot
+  2. Leader auto-initiates Snapshot Transfer
+  3. Follower receives Snapshot → replaces local State Machine → catches up from install point
+  4. Transfer time: depends on Snapshot size and bandwidth
+     - 1M accounts ≈ 2 GB → ~30s (1 Gbps internal network)
+```
+
+---
+
+## 4. MySQL View Layer Operations
+
+### 4.1 Sync Status Monitoring
+
+```
+GET /admin/ledger/view-layer/sync-status
+Response:
+{
+  "lastAppliedRaftLogIndex": 12345678,
+  "lastSyncedToMysqlAt": "2026-05-16T10:35:22.000Z",
+  "lagInLogEntries": 12,
+  "lagInSeconds": 0.05,
+  "status": "HEALTHY"
+}
+```
+
+### 4.2 MySQL Sync Recovery
+
+**Scenario 1: Learner sync interrupted (network / crash)**:
+  - Auto-recovery: Learner restarts from last applied Raft Log Index
+  - Learner is stateless; replays Raft Log to re-project to MySQL
+
+**Scenario 2: MySQL data corruption (accidental DELETE / human error)**:
+  - Identify affected range (time, account, table)
+  - Pause Learner writes to affected tables
+  - Rebuild from RocksDB Snapshot + Raft Log:
+    `POST /admin/ledger/view-layer/rebuild { "tables": ["journal_line"], "fromRaftLogIndex": 12000000 }`
+  - Verify via L1 Reconciliation comparing MySQL vs State Machine
+
+**Scenario 3: MySQL total failure (database won't start)**:
+  - Restore from latest MySQL backup (mysqldump / XtraBackup)
+  - Note backup timepoint's corresponding Raft Log Index
+  - Learner catches up from that Index
+  - Run L1 Reconciliation to verify integrity
+
+---
+
+## 5. Daily/Weekly/Monthly Checklist
+
+### 5.1 Daily Checklist
+
+| # | Check Item | Normal Value |
+|---|---|---|
+| 1 | All nodes HEALTHY | All 200 |
+| 2 | Raft Leader stable | term no frequent changes |
+| 3 | Follower Lag | < 100 |
+| 4 | Posting P95 | ≤ 3ms |
+| 5 | Account Queue max depth | < 500 |
+| 6 | CF_OUTBOX pending | < 1000 |
+| 7 | Kafka Consumer Lag | < 1000 |
+| 8 | RocksDB disk usage | < 80% |
+| 9 | MySQL sync delay | < 1s |
+| 10 | Yesterday EOD status | CLOSED |
+
+### 5.2 Weekly Checklist
+
+| # | Check Item |
+|---|---|
+| 1 | Random spot-check one Journal's full audit chain |
+| 2 | Verify latest RocksDB backup is recoverable (isolated env) |
+| 3 | Check Idempotency Store entry count (no abnormal growth) |
+| 4 | Verify expired Snapshots have been cleaned |
+| 5 | Review PagerDuty alert history, close resolved alert rules |
+
+### 5.3 Monthly Checklist
+
+| # | Check Item |
+|---|---|
+| 1 | Full Reconciliation report review (L1 + L2 + L3) |
+| 2 | DR Drill: recover single node from backup, verify RTO ≤ 1 min |
+| 3 | Performance test: confirm Posting P95 ≤ 3ms, Balance Query P95 ≤ 2ms |
+| 4 | Capacity planning: forecast 3-month account/Journal growth |
+| 5 | Security audit: review management API call logs |
+| 6 | Dependency update assessment: SOFAJRaft, Spring Boot, RocksDB |
+
+---
+
+## 6. Disaster Recovery Drill
+
+| Type | Frequency | Scope | Verification Goal |
+|---|---|---|---|
+| Tabletop | Monthly | Process review | Confirm Runbook correctness |
+| Single Node Recovery | Quarterly | Single node restore | RTO ≤ 1 min, RPO = 0 |
+| Full Cluster Recovery | Semi-annually | Full cluster rebuild | Complete restore from backup, RTO ≤ 30 min |
+| Cross-AZ Failover | Annually | Single AZ failure | Service uninterrupted, auto-failover |
+
+---
+
+## 7. Management API Summary
+
+```
+# Health Check
+GET  /admin/ledger/health
+GET  /raft/status
+GET  /raft/leader
+
+# RocksDB Management
+POST /admin/ledger/rocksdb/compact
+POST /admin/ledger/rocksdb/checkpoint
+GET  /admin/ledger/rocksdb/stats
+POST /admin/ledger/rocksdb/cleanup
+
+# Raft Management
+POST /admin/raft/transfer-leadership
+POST /admin/raft/add-node
+POST /admin/raft/remove-node
+
+# View Layer Management
+GET  /admin/ledger/view-layer/sync-status
+POST /admin/ledger/view-layer/rebuild
+POST /admin/ledger/view-layer/pause
+POST /admin/ledger/view-layer/resume
+
+# Alerting
+POST /admin/alerting/silence
+DELETE /admin/alerting/silence/{id}
+GET  /admin/alerting/silences
+
+# Auth: All /admin/* APIs require ADMIN role + JWT Bearer Token
+```
+
+---
+
+## 8. Acceptance Criteria
+
+| # | Criterion | Test Method |
+|---|---|---|
+| AC-01 | RocksDB full compaction API triggers successfully without affecting ongoing writes | Functional test |
+| AC-02 | Checkpoint backup can be restored; data matches original node exactly | Recovery test |
+| AC-03 | Single node failure auto-recovers, Posting service interruption < 30s | Fault test |
+| AC-04 | Leader Transfer has zero in-flight request loss | Functional test |
+| AC-05 | Follower Lag > 100,000 triggers automatic Snapshot Install | Fault test |
+| AC-06 | MySQL View Layer can be rebuilt from RocksDB + Raft Log after corruption | Recovery test |
+| AC-07 | All daily checklist items queryable via API or Prometheus | Functional test |
+| AC-08 | All /admin/* APIs require ADMIN role; unauthorized returns 403 | Security test |
+| AC-09 | Alert silence API supports create, query, cancel | Functional test |
+| AC-10 | DR Drill full flow completes in isolated env within 30 min | Drill test |
 
 
 ---

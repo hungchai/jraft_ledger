@@ -44,11 +44,10 @@ public class ProjectionQueryController {
         try {
             List<Map<String, Object>> balances;
             if (balanceType != null && currency != null) {
-                String pos = position != null ? position : "CURRENT";
-                Map<String, Object> single = accountBalanceMapper.findByKey(accountId, balanceType, pos, currency);
+                Map<String, Object> single = accountBalanceMapper.findByKey(accountId, balanceType, currency);
                 balances = single != null ? List.of(single) : List.of();
             } else {
-                balances = accountBalanceMapper.findByAccountId(accountId);
+                balances = accountBalanceMapper.findByAccountAccountId(accountId);
             }
             return ResponseEntity.ok(Map.of(
                     "accountId", accountId,
@@ -64,7 +63,7 @@ public class ProjectionQueryController {
     @GetMapping("/journals/{journalId}")
     public ResponseEntity<?> getJournal(@PathVariable String journalId) {
         try {
-            Map<String, Object> journal = journalMapper.findJournalById(journalId);
+            Map<String, Object> journal = journalMapper.findById(journalId);
             if (journal == null) {
                 return ResponseEntity.notFound().build();
             }

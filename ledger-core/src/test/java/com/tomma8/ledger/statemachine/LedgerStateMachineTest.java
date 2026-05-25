@@ -118,7 +118,7 @@ class LedgerStateMachineTest {
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
-        assertThat(result.errorCodes()).contains("INSUFFICIENT_BALANCE");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.INSUFFICIENT_BALANCE);
         assertThat(balanceStore.getOrThrow(clientKey).amount()).isEqualByComparingTo(new BigDecimal("100.00"));
     }
 
@@ -156,7 +156,7 @@ class LedgerStateMachineTest {
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
-        assertThat(result.errorCodes()).contains("CREDIT_EXCEEDS_LIMIT");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT);
     }
 
     @Test
@@ -201,7 +201,7 @@ class LedgerStateMachineTest {
         CommandResult result = stateMachine.applyPosting(cmd);
 
         assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
-        assertThat(result.errorCodes()).contains("ACCOUNT_FROZEN");
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_FROZEN);
     }
 
     @Test
@@ -394,7 +394,7 @@ class LedgerStateMachineTest {
                 "rev-012b", journalId, "Second", "CANCEL", LocalDate.now()));
 
         assertThat(secondRev.isRejected()).isTrue();
-        assertThat(secondRev.errorCodes()).contains("JOURNAL_ALREADY_REVERSED");
+        assertThat(secondRev.errorCodes()).contains(LedgerErrorCode.JOURNAL_ALREADY_REVERSED);
     }
 
     @Test
@@ -420,7 +420,7 @@ class LedgerStateMachineTest {
                 "rev-013b", reversalJournalId, "Reverse reversal", "CANCEL", LocalDate.now()));
 
         assertThat(revOfRev.isRejected()).isTrue();
-        assertThat(revOfRev.errorCodes()).contains("CANNOT_REVERSE_REVERSAL");
+        assertThat(revOfRev.errorCodes()).contains(LedgerErrorCode.CANNOT_REVERSE_REVERSAL);
     }
 
     @Test

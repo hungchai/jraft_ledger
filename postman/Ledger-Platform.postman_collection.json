@@ -11,7 +11,8 @@
     { "key": "request_id", "value": "{{$guid}}" },
     { "key": "journal_id", "value": "" },
     { "key": "draft_id", "value": "" },
-    { "key": "leader_url", "value": "http://localhost:8081" }
+    { "key": "leader_url", "value": "http://localhost:8081" },
+    { "key": "projection_url", "value": "http://localhost:8089" }
   ],
   "item": [
     {
@@ -362,6 +363,102 @@
             "method": "GET",
             "header": [],
             "url": { "raw": "{{base_url}}/ledger/journals/chain/{{journal_id}}", "host": ["{{base_url}}"], "path": ["ledger", "journals", "chain", "{{journal_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Projection Read Path",
+      "description": "Read-path APIs served by ledger-projection (port 8089). Queries MySQL View Layer directly — bypasses Raft State Machine. Use these for read-heavy workloads.",
+      "item": [
+        {
+          "name": "Get Projected Balances",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/balances?balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "balances"],
+              "query": [
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Balances by Position",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/balances?balanceType=AVAILABLE_BALANCE&position=CURRENT&currency=USD",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "balances"],
+              "query": [
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "position", "value": "CURRENT" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journal by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has dataSource VIEW_LAYER', () => pm.expect(json.dataSource).to.eql('VIEW_LAYER'));",
+                  "pm.test('Has journal_id', () => pm.expect(json.journal_id).to.be.a('string'));",
+                  "pm.test('Has lines array', () => pm.expect(json.lines).to.be.an('array'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/journals/{{journal_id}}",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "journals", "{{journal_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journals by Account (paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/journals?page=0&size=50",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "journals"],
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journal by Request ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/journals/by-request-id?requestId={{request_id}}",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "journals", "by-request-id"],
+              "query": [
+                { "key": "requestId", "value": "{{request_id}}" }
+              ]
+            }
           }
         }
       ]

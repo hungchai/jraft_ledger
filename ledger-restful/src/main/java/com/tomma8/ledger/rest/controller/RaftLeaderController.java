@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.controller;
 
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,7 +25,7 @@ public class RaftLeaderController {
     public ResponseEntity<?> leader() {
         if (raftNodeManager == null || !raftNodeManager.isLeader()) {
             return ResponseEntity.status(503).body(Map.of(
-                    "errorCode", "NOT_LEADER",
+                    "errorCode", LedgerErrorCode.NOT_LEADER.name(),
                     "message", "not the leader",
                     "leaderHint", raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown"
             ));
