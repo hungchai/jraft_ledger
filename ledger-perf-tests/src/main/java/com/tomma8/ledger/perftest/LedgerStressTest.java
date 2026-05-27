@@ -15,6 +15,10 @@ import java.util.concurrent.atomic.LongAdder;
 
 public class LedgerStressTest {
 
+    // FX rate: 1 BTC = 100,000 USD
+    private static final BigDecimal BTC_USD_RATE = new BigDecimal("100000");
+    private static final BigDecimal ONE_BTC = new BigDecimal("1.00000000");
+
     public static void main(String[] args) throws Exception {
         String endpointsStr = System.getProperty("endpoints", "http://localhost:8081");
         String phase = System.getProperty("phase", "all");
@@ -46,7 +50,7 @@ public class LedgerStressTest {
     }
 
     private static void runRfq(LedgerClient client, String hotspot, String prefix, int accountCount, int concurrency) throws Exception {
-        System.out.println("--- RFQ Phase ---");
+        System.out.println("--- RFQ Phase (BTC/USD BUY+SELL) ---");
         LongAdder ok = new LongAdder();
         LongAdder fail = new LongAdder();
         int total = concurrency * 100;
@@ -55,24 +59,59 @@ public class LedgerStressTest {
 
         for (int i = 0; i < total; i++) {
             final int idx = i;
+            final boolean isBuy = (idx % 2) == 0;
+            final BigDecimal amountUsd = new BigDecimal("100.00");
+            final BigDecimal amountBtc = amountUsd.divide(BTC_USD_RATE, 8, java.math.RoundingMode.HALF_UP);
+
             pool.submit(() -> {
                 String acc = prefix + String.format("%04d", (idx % accountCount) + 1);
-                PostingCommand cmd = new PostingCommand(
-                        UUID.randomUUID().toString(),
-                        "RFQ",
-                        "RFQ-" + idx,
-                        LocalDate.of(2026, 5, 23),
-                        List.of(new PostingCommand.Leg(
-                                "leg-1",
-                                "RFQ",
-                                new BigDecimal("1.00"),
-                                "USD",
-                                List.of(
-                                        new PostingCommand.Line(acc, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "RFQ"),
-                                        new PostingCommand.Line(hotspot, "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "RFQ")
-                                )
-                        ))
-                );
+
+                PostingCommand cmd;
+                if (isBuy) {
+                    // BUY: Client buys USD, sells BTC
+                    // Leg 1 (USD): Client DEBIT USD → Company CREDIT USD
+                    // Leg 2 (BTC): Company DEBIT BTC → Client CREDIT BTC
+                    cmd = new PostingCommand(
+                            UUID.randomUUID().toString(),
+                            "RFQ_SETTLEMENT",
+                            "RFQ-BUY-" + idx,
+                            LocalDate.of(2026, 5, 27),
+                            List.of(
+                                    new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", amountUsd, "USD",
+                                            List.of(
+                                                    new PostingCommand.Line(acc, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "RFQ Client USD sell"),
+                                                    new PostingCommand.Line(hotspot, "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "RFQ Company USD receive")
+                                            )),
+                                    new PostingCommand.Leg("leg-2", "TRADE_SETTLEMENT", amountBtc, "BTC",
+                                            List.of(
+                                                    new PostingCommand.Line(hotspot, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "RFQ Company BTC pay"),
+                                                    new PostingCommand.Line(acc, "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "RFQ Client BTC receive")
+                                            ))
+                            )
+                    );
+                } else {
+                    // SELL: Client sells USD, buys BTC
+                    // Leg 1 (BTC): Client DEBIT BTC → Company CREDIT BTC
+                    // Leg 2 (USD): Company DEBIT USD → Client CREDIT USD
+                    cmd = new PostingCommand(
+                            UUID.randomUUID().toString(),
+                            "RFQ_SETTLEMENT",
+                            "RFQ-SELL-" + idx,
+                            LocalDate.of(2026, 5, 27),
+                            List.of(
+                                    new PostingCommand.Leg("leg-1", "TRADE_SETTLEMENT", amountBtc, "BTC",
+                                            List.of(
+                                                    new PostingCommand.Line(acc, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "RFQ Client BTC sell"),
+                                                    new PostingCommand.Line(hotspot, "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "RFQ Company BTC receive")
+                                            )),
+                                    new PostingCommand.Leg("leg-2", "TRADE_SETTLEMENT", amountUsd, "USD",
+                                            List.of(
+                                                    new PostingCommand.Line(hotspot, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "RFQ Company USD pay"),
+                                                    new PostingCommand.Line(acc, "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "RFQ Client USD receive")
+                                            ))
+                            )
+                    );
+                }
                 try {
                     CommandResult r = client.post(cmd);
                     if (r.isCompleted()) ok.increment();
@@ -106,7 +145,7 @@ public class LedgerStressTest {
                         UUID.randomUUID().toString(),
                         "WITHDRAWAL",
                         "SA-" + idx,
-                        LocalDate.of(2026, 5, 23),
+                        LocalDate.of(2026, 5, 27),
                         List.of(new PostingCommand.Leg(
                                 "leg-1",
                                 "WITHDRAWAL",
@@ -152,7 +191,7 @@ public class LedgerStressTest {
                             UUID.randomUUID().toString(),
                             "DEPOSIT",
                             "RW",
-                            LocalDate.of(2026, 5, 23),
+                            LocalDate.of(2026, 5, 27),
                             List.of(new PostingCommand.Leg(
                                     "leg-1",
                                     "DEPOSIT",

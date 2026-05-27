@@ -1,6 +1,13 @@
 #!/bin/bash
 # Stress Test Suite — Next-Gen Internal Ledger Platform
 # Implements docs/STRESS-TEST-PLAN.md v1.0
+#
+# Expected seed values:
+#   HOTSPOT (STRESS-HOT-CO-001): 20,000,000 USD + 200 BTC
+#   CLIENT accounts: 10,000 USD + 0.01 BTC each
+#   RFQ BUY:  Client DEBIT USD, Company CREDIT USD + Company DEBIT BTC, Client CREDIT BTC
+#   RFQ SELL: Client DEBIT BTC, Company CREDIT BTC + Company DEBIT USD, Client CREDIT USD
+#
 set -e
 
 BASE="${1:-http://localhost:8081}"
@@ -13,7 +20,7 @@ RFQ_PER_CLIENT=100
 MIX_TOTAL=20000
 MIX_CONCURRENT=500
 SAME_ACC_CONCURRENT=1100
-SAME_ACC_BALANCE="1000.00"
+SAME_ACC_BALANCE="0.01000000"
 IDEM_UNIQUE=100
 IDEM_RETRIES=1000
 BP_CONCURRENT=5000
@@ -83,7 +90,8 @@ http_post "$BASE/ledger/accounts" "{
   \"displayName\": \"Hotspot Co\",
   \"ownerId\": \"CO-HOTSPOT\",
   \"balanceInitializations\": [
-    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"}
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"},
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"BTC\"}
   ]
 }" > /dev/null
 
@@ -105,6 +113,25 @@ http_post "$BASE/ledger/postings" "{
   ]
 }" > /dev/null
 pass "Hotspot account seeded with 10,000,000 USD"
+
+# Deposit 100 BTC into hotspot (for RFQ)
+http_post "$BASE/ledger/postings" "{
+  \"requestId\": \"seed-deposit-hot-btc-$(date +%s)\",
+  \"businessEventType\": \"DEPOSIT\",
+  \"businessEventRef\": \"SEED-HOT-BTC\",
+  \"valueDate\": \"2026-05-23\",
+  \"legs\": [
+    {
+      \"legId\": \"leg-1\",
+      \"postingType\": \"DEPOSIT\",
+      \"lines\": [
+        {\"accountId\": \"SYSTEM_SEED\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"100.00000000\", \"description\": \"Seed BTC\"},
+        {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"100.00000000\", \"description\": \"Seed BTC\"}
+      ]
+    }
+  ]
+}" > /dev/null
+pass "Hotspot account seeded with 100 BTC"
 
 # ───────────────────────────────────────────
 # 2. Create 10,000 Accounts
@@ -161,8 +188,8 @@ for b in $(seq 1 $TOTAL_BATCHES); do
           \"legId\": \"leg-1\",
           \"postingType\": \"DEPOSIT\",
           \"lines\": [
-            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\", \"description\": \"Seed\"},
-            {\"accountId\": \"$ACC_ID\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\", \"description\": \"Seed\"}
+            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"0.01000000\", \"description\": \"Seed\"},
+            {\"accountId\": \"$ACC_ID\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"0.01000000\", \"description\": \"Seed\"}
           ]
         }
       ]
@@ -174,6 +201,77 @@ for b in $(seq 1 $TOTAL_BATCHES); do
   fi
 done
 pass "Seeded 9,990 CLIENT accounts with 1,000 USD"
+
+# Seed all CLIENT accounts with 0.01 BTC each
+info "Phase 1c — Seeding CLIENT balances BTC (batched)..."
+for b in $(seq 1 $TOTAL_BATCHES); do
+  for i in $(seq 1 $BATCH_SIZE); do
+    idx=$(((b - 1) * BATCH_SIZE + i))
+    if [ $idx -gt 9990 ]; then continue; fi
+    ACC_ID="STRESS-CLI-$(printf %04d $idx)"
+    http_post "$BASE/ledger/postings" "{
+      \"requestId\": \"seed-bal-hkd-$idx-$(date +%s%N)\",
+      \"businessEventType\": \"DEPOSIT\",
+      \"businessEventRef\": \"SEED-BAL-BTC\",
+      \"valueDate\": \"2026-05-23\",
+      \"legs\": [
+        {
+          \"legId\": \"leg-1\",
+          \"postingType\": \"DEPOSIT\",
+          \"lines\": [
+            {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"0.01000000\", \"description\": \"Seed BTC\"},
+            {\"accountId\": \"$ACC_ID\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"0.01000000\", \"description\": \"Seed BTC\"}
+          ]
+        }
+      ]
+    }" > /dev/null &
+  done
+  wait
+done
+pass "Seeded 9,990 CLIENT accounts with 0.01 BTC each"
+
+
+# ───────────────────────────────────────────
+# 1d. Phase — Topup for RFQ
+# ───────────────────────────────────────────
+info "Phase 1d — Topup hotspot BTC/USD for RFQ"
+# Topup hotspot BTC (for SELL scenario where company pays BTC)
+http_post "$BASE/ledger/postings" "{
+  \"requestId\": \"topup-hot-btc-$(date +%s)\",
+  \"businessEventType\": \"DEPOSIT\",
+  \"businessEventRef\": \"TOPUP-HOT-BTC\",
+  \"valueDate\": \"2026-05-23\",
+  \"legs\": [
+    {
+      \"legId\": \"leg-1\",
+      \"postingType\": \"DEPOSIT\",
+      \"lines\": [
+        {\"accountId\": \"SYSTEM_SEED\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"100.00000000\", \"description\": \"Topup BTC\"},
+        {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"100.00000000\", \"description\": \"Topup BTC\"}
+      ]
+    }
+  ]
+}" > /dev/null
+pass "Hotspot BTC topup complete"
+
+# Topup hotspot USD (for BUY scenario where company pays USD)
+http_post "$BASE/ledger/postings" "{
+  \"requestId\": \"topup-hot-usd-$(date +%s)\",
+  \"businessEventType\": \"DEPOSIT\",
+  \"businessEventRef\": \"TOPUP-HOT-USD\",
+  \"valueDate\": \"2026-05-23\",
+  \"legs\": [
+    {
+      \"legId\": \"leg-1\",
+      \"postingType\": \"DEPOSIT\",
+      \"lines\": [
+        {\"accountId\": \"SYSTEM_SEED\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"amount\": \"10000000.00\", \"description\": \"Topup USD\"},
+        {\"accountId\": \"$HOTSPOT_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"amount\": \"10000000.00\", \"description\": \"Topup USD\"}
+      ]
+    }
+  ]
+}" > /dev/null
+pass "Hotspot USD topup complete"
 
 # Build perf test jar (uses ledger-client-sdk)
 info "Building ledger-perf-tests jar..."
@@ -190,9 +288,9 @@ java -Dendpoints="$BASE" -Dphase=rfq -Dconcurrency=$RFQ_CLIENTS -Daccounts=9990 
 HOT_BAL=$(http_get "$BASE/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD" | grep -oE '"amount":"?[0-9.]+"?' | head -1 | tr -cd '0-9.')
 info "Hotspot balance: $HOT_BAL"
 if echo "$HOT_BAL" | grep -q "10001000"; then
-  pass "Hotspot balance correct after RFQ (10,001,000.00 expected)"
+  pass "Hotspot USD balance correct after RFQ (10,001,000.00 expected)"
 else
-  fail "Hotspot balance drift (got $HOT_BAL, expected ~10001000.00)"
+  fail "Hotspot balance drift (got $HOT_BAL, expected ~10000.01000000)"
 fi
 
 # ───────────────────────────────────────────
@@ -265,7 +363,8 @@ http_post "$BASE/ledger/accounts" "{
   \"displayName\": \"Max Race\",
   \"ownerId\": \"OWN-MAX\",
   \"balanceInitializations\": [
-    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"}
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"},
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"BTC\"}
   ]
 }" > /dev/null
 
@@ -315,7 +414,8 @@ http_post "$BASE/ledger/accounts" "{
   \"displayName\": \"Idem\",
   \"ownerId\": \"OWN-IDEM\",
   \"balanceInitializations\": [
-    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"}
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\"},
+    {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"BTC\"}
   ]
 }" > /dev/null
 

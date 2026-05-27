@@ -3,7 +3,7 @@ spring:
     name: ledger-platform
   threads:
     virtual:
-      enabled: true
+      enabled: false
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
     username: ${SPRING_DATASOURCE_USERNAME:ledger}
@@ -42,6 +42,6 @@ management:
   metrics:
     export:
       prometheus:
-        enabled: true
+        enabled: false
     tags:
       application: ${spring.application.name}

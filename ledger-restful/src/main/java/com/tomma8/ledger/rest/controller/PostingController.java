@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -46,11 +47,11 @@ public class PostingController {
                 outcome = "REJECTED";
                 String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
                 meterRegistry.counter("ledger.posting.rejected.count", "errorCode", LedgerErrorCode.NOT_LEADER.name()).increment();
-                return ResponseEntity.status(503).body(Map.of(
-                        "status", "REJECTED",
-                        "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                        "leaderHint", leader
-                ));
+                var responseBody = new HashMap<String, Object>();
+                responseBody.put("status", "REJECTED");
+                responseBody.put("errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()));
+                responseBody.put("leaderHint", leader);
+                return ResponseEntity.status(503).body(responseBody);
             }
             String requestId = (String) body.get("requestId");
             String businessEventRef = (String) body.get("businessEventRef");
@@ -104,10 +105,10 @@ public class PostingController {
     }
 
     private Map<String, Object> toResponseMap(CommandResult result) {
-        return Map.of(
-                "status", result.status(),
-                "journalId", result.journalId() != null ? result.journalId() : "",
-                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
-        );
+        var map = new HashMap<String, Object>();
+        map.put("status", result.status());
+        map.put("journalId", result.journalId() != null ? result.journalId() : "");
+        map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        return map;
     }
 }

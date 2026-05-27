@@ -61,6 +61,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ledger-node:latest
+    profiles: ["build"]
 
   ledger1:
     image: ledger-node:latest
@@ -79,13 +80,23 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8081
       JAVA_OPTS: >-
+        -Xms2g
+        -Xmx2g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:MaxRAMPercentage=75.0
         -XX:+ExitOnOutOfMemoryError
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
     depends_on:
       mysql:
@@ -115,13 +126,23 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8082
       JAVA_OPTS: >-
+        -Xms2g
+        -Xmx2g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:MaxRAMPercentage=75.0
         -XX:+ExitOnOutOfMemoryError
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
     depends_on:
       ledger1:
@@ -153,13 +174,23 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8083
       JAVA_OPTS: >-
+        -Xms2g
+        -Xmx2g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:MaxRAMPercentage=75.0
         -XX:+ExitOnOutOfMemoryError
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
     depends_on:
       ledger2:

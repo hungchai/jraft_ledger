@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,14 +32,19 @@ public class AccountController {
         this.nodeRole = nodeRole;
     }
 
+    private ResponseEntity<?> notLeaderResponse() {
+        String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
+        var body = new HashMap<String, Object>();
+        body.put("status", "REJECTED");
+        body.put("errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()));
+        body.put("leaderHint", leader);
+        return ResponseEntity.status(503).body(body);
+    }
+
     @PostMapping
     public ResponseEntity<?> createAccount(@RequestBody Map<String, Object> body) {
         if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                    "leaderHint", leader));
+            return notLeaderResponse();
         }
         String accountId = (String) body.get("accountId");
         AccountType type = AccountType.valueOf((String) body.get("accountType"));
@@ -66,11 +72,7 @@ public class AccountController {
     @PostMapping("/{accountId}/freeze")
     public ResponseEntity<?> freeze(@PathVariable String accountId, @RequestBody Map<String, String> body) {
         if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                    "leaderHint", leader));
+            return notLeaderResponse();
         }
         AccountFreezeCommand cmd = new AccountFreezeCommand(body.get("requestId"), accountId, true);
         CommandResult result;
@@ -85,11 +87,7 @@ public class AccountController {
     @PostMapping("/{accountId}/unfreeze")
     public ResponseEntity<?> unfreeze(@PathVariable String accountId, @RequestBody Map<String, String> body) {
         if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                    "leaderHint", leader));
+            return notLeaderResponse();
         }
         AccountFreezeCommand cmd = new AccountFreezeCommand(body.get("requestId"), accountId, false);
         CommandResult result;
@@ -104,11 +102,7 @@ public class AccountController {
     @PostMapping("/{accountId}/close")
     public ResponseEntity<?> close(@PathVariable String accountId, @RequestBody Map<String, String> body) {
         if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                    "leaderHint", leader));
+            return notLeaderResponse();
         }
         // Close is an AccountCloseCommand, not AccountFreezeCommand
         com.tomma8.ledger.domain.command.AccountCloseCommand cmd =
@@ -125,11 +119,7 @@ public class AccountController {
     @PostMapping("/{accountId}/balance-types")
     public ResponseEntity<?> addBalanceType(@PathVariable String accountId, @RequestBody Map<String, String> body) {
         if (!nodeRole.isLeader()) {
-            String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-            return ResponseEntity.status(503).body(Map.of(
-                    "status", "REJECTED",
-                    "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                    "leaderHint", leader));
+            return notLeaderResponse();
         }
         com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand cmd =
                 new com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand(
@@ -145,10 +135,10 @@ public class AccountController {
     }
 
     private Map<String, Object> toResponseMap(CommandResult result) {
-        return Map.of(
-                "status", result.status(),
-                "journalId", result.journalId() != null ? result.journalId() : "",
-                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
-        );
+        var map = new HashMap<String, Object>();
+        map.put("status", result.status());
+        map.put("journalId", result.journalId() != null ? result.journalId() : "");
+        map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        return map;
     }
 }

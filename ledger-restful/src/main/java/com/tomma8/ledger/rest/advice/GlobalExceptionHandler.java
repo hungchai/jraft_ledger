@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 
 @RestControllerAdvice
@@ -48,11 +49,11 @@ public class GlobalExceptionHandler {
     }
 
     private Map<String, Object> errorBody(HttpStatus status, String message) {
-        return Map.of(
-                "timestamp", Instant.now().toString(),
-                "status", status.value(),
-                "error", status.getReasonPhrase(),
-                "message", message
-        );
+        var map = new HashMap<String, Object>();
+        map.put("timestamp", Instant.now().toString());
+        map.put("status", status.value());
+        map.put("error", status.getReasonPhrase());
+        map.put("message", message != null ? message : "Unknown error");
+        return map;
     }
 }

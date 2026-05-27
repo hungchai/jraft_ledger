@@ -157,7 +157,31 @@ Block new Postings (non-reversal) when period status is CLOSING or CLOSED → PE
 
 Allow cross-period Reversals only with explicit crossPeriod=true in the request and approval.
 
-2.9 Performance Non-Negotiables
+2.9 SQL Schema Documentation Standard
+Every table column in `init.sql` must carry an inline `COMMENT` describing the column's purpose, domain, and unit where applicable.
+
+```sql
+-- ✅ Correct
+amount DECIMAL(24,8) NOT NULL COMMENT 'Transaction amount in the currency unit (e.g., USD cents not required — use decimal unit)',
+status VARCHAR(16) NOT NULL COMMENT 'Account lifecycle status: ACTIVE | FROZEN | CLOSED',
+account_seq BIGINT NOT NULL DEFAULT 0 COMMENT 'Monotonic sequence number incremented per (account_id, balance_type, currency) on every state machine apply',
+
+-- ❌ Wrong
+amount DECIMAL(24,8) NOT NULL,
+status VARCHAR(16) NOT NULL,
+```
+
+Rules:
+- Every column gets a `COMMENT` — no bare columns.
+- New table → all columns described immediately.
+- New column added to existing table → `ALTER TABLE ... ADD COLUMN ... COMMENT '...'` must include description.
+- Enum-like columns list valid values in comment (e.g., `'Account lifecycle status: ACTIVE | FROZEN | CLOSED'`).
+- Numeric columns specify unit/semantics (e.g., `'Transaction amount in the currency unit'`, `'Balance after posting in account currency'`).
+- Timestamp columns note precision and timezone (e.g., `'Record creation timestamp (UTC, microsecond precision)'`).
+- Foreign key columns reference the target (e.g., `'Foreign key to journal.journal_id'`).
+- Boolean columns describe what true/false mean.
+
+2.10 Performance Non-Negotiables
 Operation	Target	Violation Action
 Posting P95	≤ 3 ms	Reject PR, profile hotspot
 Balance Query (live)	≤ 2 ms	Reject PR, check in-memory path
@@ -367,6 +391,7 @@ text
 [ ] smoke-test.sh updated if API structure changed
 [ ] Code compiles successfully (`mvn clean compile` passes)
 [ ] All tests pass (`mvn test` passes) — if test fails, fix before concluding
+[ ] All table/column changes in init.sql include COMMENT descriptions per 2.9
 [ ] No test files left with compilation errors from constructor/field changes
 7. Quick Feature-to-File Reference
    Feature	Requirement Section	Test Case Prefix	Postman Folder

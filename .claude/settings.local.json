@@ -1,6 +1,9 @@
 {
   "permissions": {
     "allow": [
+      "Read(~/git/jraft_ledger/*)",
+      "Write(~/git/jraft_ledger/*)",
+      "Edit(~/git/jraft_ledger/*)",
       "Bash(java -version)",
       "Bash(mvn -version)",
       "Bash(mvn validate *)",
@@ -86,8 +89,32 @@
       "Bash(LeaderDiscoveryClient)",
       "Bash(LedgerHttpTransport)",
       "Bash(currency=USD > /dev/null)",
-      "Bash(java *)"
-    ]
+      "Bash(java *)",
+      "Bash(grep -v \"^# Next-Gen\\\\|^# $\")",
+      "Bash(grep -v \"^# Next-Gen\\\\|^# 觸發\\\\|^# 查詢\\\\|^# 更新\\\\|^# 上傳\\\\|^# $\")",
+      "Bash(xargs ls -la)",
+      "Bash(grep -n \"^---$\" /Users/tomma/GIT/jraft_ledger/requirement/TDD-TEST-CASES.md)",
+      "Bash(sed -i '' '1,10s/v0.6/v0.7/' /Users/tomma/GIT/jraft_ledger/requirement/en/LEDGER-PLATFORM-FULL-REQUIREMENTS.md)",
+      "Bash(sed -i '' '1,10s/2026-05-24/2026-05-25/' /Users/tomma/GIT/jraft_ledger/requirement/en/LEDGER-PLATFORM-FULL-REQUIREMENTS.md)",
+      "Bash(brew install *)",
+      "Bash(k6 run *)",
+      "Bash(awk '/2026-05-26T14:36:00/,/2026-05-26T14:37:35/')",
+      "Bash(awk '/2026-05-26T14:36:59/,/2026-05-26T14:37:34/')",
+      "Bash(grep -v \"^$\\\\|^ledger-node-3  | $\")",
+      "Bash(awk '/2026-05-26T14:36:50/,/2026-05-26T14:37:35/')",
+      "Bash(awk '/2026-05-26T14:50:19/,/2026-05-26T14:51:34/')",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(curl *)",
+      "Bash(perl *)",
+      "Bash(grep -v \"^\\\\s\\\\|^$\\\\|ProducerConfig values\\\\|ssl\\\\.\\\\|sasl\\\\.\\\\|security\\\\.\\\\|send\\\\.buffer\\\\|socket\\\\.\\\\|transaction\\\\.\\\\|value\\\\.serializer\\\\|Kafka version\\\\|Kafka commitId\\\\|Kafka startTimeMs\\\\|Initializing Kafka metrics\\\\|Instantiated an idempotent\")",
+      "Bash(BASE_URL=http://localhost:8082 k6 run *)",
+      "Bash(mv stress-test.sh.tmp stress-test.sh)",
+      "Bash(BASE_URL=http://localhost:8083 k6 run *)",
+      "WebSearch",
+      "WebFetch(domain:www.sofastack.tech)"
+    ],
+    "defaultMode": "auto"
   },
   "worktree": {
     "bgIsolation": "none"

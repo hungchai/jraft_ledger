@@ -8,13 +8,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-/**
- * Per-account serialization via LinkedBlockingQueue + Virtual Thread workers (ADR-001 v0.2).
- *
- * Each account gets a single Virtual Thread worker that processes requests
- * sequentially from its queue. Multi-account requests are coordinated via
- * MultiAccountTask with sorted account locking.
- */
 public class AccountQueueManager implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(AccountQueueManager.class);
@@ -29,12 +22,15 @@ public class AccountQueueManager implements AutoCloseable {
 
     public AccountQueueManager(Consumer<RaftCommand> commandHandler) {
         this.commandHandler = commandHandler;
-        this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+        AtomicInteger counter = new AtomicInteger();
+        this.workerPool = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setName("acct-worker-" + counter.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
     }
 
-    /**
-     * Submit a command for a single account. Returns false if queue is full (backpressure).
-     */
     public boolean submit(String accountId, RaftCommand command) {
         BlockingQueue<QueueTask> queue = queues.computeIfAbsent(accountId, k -> {
             BlockingQueue<QueueTask> q = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
@@ -50,12 +46,8 @@ public class AccountQueueManager implements AutoCloseable {
         return offered;
     }
 
-    /**
-     * Submit a multi-account task. All involved account queues must have room.
-     */
     public boolean submitMultiAccount(java.util.List<String> sortedAccountIds,
                                        RaftCommand command) {
-        // Check all queues have capacity first
         for (String accountId : sortedAccountIds) {
             BlockingQueue<QueueTask> queue = queues.get(accountId);
             if (queue != null && queue.remainingCapacity() == 0) {
@@ -100,11 +92,8 @@ public class AccountQueueManager implements AutoCloseable {
                     QueueTask task = queue.poll(1, TimeUnit.SECONDS);
                     if (task == null) continue;
 
-                    // Notify multi-account coordinator
                     if (task.readyCallback != null) {
                         task.readyCallback.run();
-                        // Non-leader accounts wait for result via the RaftNodeManager
-                        // The leader submits the actual RaftCommand
                         continue;
                     }
 

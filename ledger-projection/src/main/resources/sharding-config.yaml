@@ -1,5 +1,9 @@
-# ShardingSphere-JDBC configuration: journal_line sharded by account_id
+# ShardingSphere-JDBC configuration: journal_line sharded by account_account_id (VARCHAR business key)
 # Docs: https://shardingsphere.apache.org/document/current/en/user-manual/shardingsphere-jdbc/yaml-config/
+#
+# Note: shardingColumn = account_account_id (VARCHAR, reliable hashCode()).
+# Do NOT shard by account_id (BIGINT surrogate FK) — INLINE algorithm may fail
+# on numeric hashCode().
 
 dataSources:
   ds_0:
@@ -19,7 +23,7 @@ rules:
       actualDataNodes: ds_0.journal_line_${0..3}
       tableStrategy:
         standard:
-          shardingColumn: account_id
+          shardingColumn: account_account_id
           shardingAlgorithmName: account-id-hash
       keyGenerateStrategy:
         column: id
@@ -29,7 +33,7 @@ rules:
     account-id-hash:
       type: INLINE
       props:
-        algorithm-expression: journal_line_${Math.abs(account_id.hashCode() % 4)}
+        algorithm-expression: journal_line_${Math.abs(account_account_id.hashCode()) % 4}
 
   keyGenerators:
     snowflake:

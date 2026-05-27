@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -42,11 +43,11 @@ public class ReversalController {
             if (!nodeRole.isLeader()) {
                 outcome = "REJECTED";
                 String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-                return ResponseEntity.status(503).body(Map.of(
-                        "status", "REJECTED",
-                        "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                        "leaderHint", leader
-                ));
+                var responseBody = new HashMap<String, Object>();
+                responseBody.put("status", "REJECTED");
+                responseBody.put("errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()));
+                responseBody.put("leaderHint", leader);
+                return ResponseEntity.status(503).body(responseBody);
             }
             ReversalCommand cmd = new ReversalCommand(
                     body.get("requestId"),
@@ -77,10 +78,10 @@ public class ReversalController {
     }
 
     private Map<String, Object> toResponseMap(CommandResult result) {
-        return Map.of(
-                "status", result.status(),
-                "journalId", result.journalId() != null ? result.journalId() : "",
-                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
-        );
+        var map = new HashMap<String, Object>();
+        map.put("status", result.status());
+        map.put("journalId", result.journalId() != null ? result.journalId() : "");
+        map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        return map;
     }
 }
