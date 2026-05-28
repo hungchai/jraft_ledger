@@ -78,6 +78,8 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_SKIP_PERSIST: ${LEDGER_SKIP_PERSIST:-0}
+      LEDGER_SKIP_EVENTS: ${LEDGER_SKIP_EVENTS:-0}
       LEDGER_ADVERTISE_URL: http://localhost:8081
       JAVA_OPTS: >-
         -Xms2g
@@ -124,6 +126,8 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_SKIP_PERSIST: ${LEDGER_SKIP_PERSIST:-0}
+      LEDGER_SKIP_EVENTS: ${LEDGER_SKIP_EVENTS:-0}
       LEDGER_ADVERTISE_URL: http://localhost:8082
       JAVA_OPTS: >-
         -Xms2g
@@ -172,6 +176,8 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_SKIP_PERSIST: ${LEDGER_SKIP_PERSIST:-0}
+      LEDGER_SKIP_EVENTS: ${LEDGER_SKIP_EVENTS:-0}
       LEDGER_ADVERTISE_URL: http://localhost:8083
       JAVA_OPTS: >-
         -Xms2g

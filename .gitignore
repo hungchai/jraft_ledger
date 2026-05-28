@@ -1,3 +1,7 @@
 */target/
+/target/
 /.idea/
 /jraft_ledger/
+/.claude/scheduled_tasks.lock
+/logs/
+/loadtest/reports/

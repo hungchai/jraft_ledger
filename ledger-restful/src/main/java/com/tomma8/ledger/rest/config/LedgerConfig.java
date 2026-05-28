@@ -147,10 +147,16 @@ public class LedgerConfig {
             @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher) {
         LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
 
-        // Wire Kafka event publisher
-        if (kafkaPublisher != null) {
+        // Kafka publish is intentionally NOT wired as the synchronous
+        // eventListener — that path serialised events with Jackson + invoked
+        // KafkaProducer.send() on the JRaft fsm-caller thread, doubling work
+        // already done by the AsyncOutboxPublisher. With RocksDB CF_OUTBOX
+        // committed in the same WriteBatch as the journal/balance/idempotency,
+        // the async publisher is sole owner of Kafka delivery.
+        // To re-enable for debugging: set LEDGER_SYNC_KAFKA_PUBLISH=1.
+        if (kafkaPublisher != null && "1".equals(System.getenv("LEDGER_SYNC_KAFKA_PUBLISH"))) {
             sm.setEventListener(kafkaPublisher);
-            log.info("Kafka event publisher wired");
+            log.info("Sync Kafka event publisher wired (LEDGER_SYNC_KAFKA_PUBLISH=1)");
         }
 
         if (rocksDBManager != null && rocksDBManager.isOpen()) {
@@ -218,15 +224,41 @@ public class LedgerConfig {
                 .withNodeRole(nodeRole);
         fsm.setNodeId(nodeId);
 
+        // PEER_NODES may be either "host1,host2,host3" (no ports — old docker
+        // shape where every node uses RAFT_SERVER_PORT) or
+        // "host1:port1,host2:port2,host3:port3" (per-node ports — required for
+        // localhost runs where 3 JVMs can't share a port). Honor whatever
+        // shape is given.
         String[] peerArr = peers.split(",");
         StringBuilder raftPeers = new StringBuilder();
         for (String p : peerArr) {
-            String host = p.split(":")[0].trim();
+            p = p.trim();
+            String entry = p.contains(":") ? p : (p + ":" + raftPort);
             if (raftPeers.length() > 0) raftPeers.append(",");
-            raftPeers.append(host).append(":").append(raftPort);
+            raftPeers.append(entry);
         }
 
-        String serverId = nodeId + ":" + raftPort;
+        // serverId — same shape as the peer list entries so JRaft can match it.
+        String serverId;
+        if (peers.contains(":")) {
+            // PEER_NODES had explicit ports; pick our own entry by matching
+            // hostname (NODE_ID) or fall back to raftPort.
+            String myHost = nodeId;
+            String matched = null;
+            for (String p : peerArr) {
+                p = p.trim();
+                if (p.startsWith(myHost + ":") || p.equals(myHost) || p.split(":")[0].equals(myHost)) {
+                    matched = p.contains(":") ? p : (p + ":" + raftPort);
+                    break;
+                }
+            }
+            // Localhost case: NODE_ID won't match "localhost"; trust raftPort.
+            serverId = matched != null ? matched
+                    : ("localhost".equals(peerArr[0].split(":")[0].trim()) ? "localhost:" + raftPort
+                       : nodeId + ":" + raftPort);
+        } else {
+            serverId = nodeId + ":" + raftPort;
+        }
         new File(raftPath).mkdirs(); // ensure dir exists before SOFAJRaft init
         RaftNodeManager mgr = new RaftNodeManager(
                 groupId, serverId, raftPeers.toString(),

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +40,11 @@ public class OutboxStore {
 
     /**
      * Write all pending events to RocksDB CF_OUTBOX atomically.
+     *
+     * Legacy path — kept for callers that don't supply a WriteBatch. Does N
+     * separate native writes; prefer {@link #flushInto(WriteBatch)} which adds
+     * the events to the caller's batch so journal/balance/outbox commit
+     * atomically.
      */
     public void flush() {
         if (pending.isEmpty() || rocksDBManager == null) return;
@@ -51,6 +57,26 @@ public class OutboxStore {
             pending.clear();
         } catch (Exception e) {
             log.error("Failed to flush outbox", e);
+        }
+    }
+
+    /**
+     * Add all pending events to the caller's WriteBatch (single atomic commit
+     * with journal + balance + idempotency). Clears the pending queue on
+     * success; on serialization failure, leaves events queued for next try.
+     */
+    public void flushInto(WriteBatch batch) {
+        if (pending.isEmpty() || rocksDBManager == null) return;
+        try {
+            var handle = rocksDBManager.getHandle("outbox");
+            for (var event : pending) {
+                byte[] key = outboxKey(event.eventId());
+                byte[] value = mapper.writeValueAsBytes(event);
+                batch.put(handle, key, value);
+            }
+            pending.clear();
+        } catch (Exception e) {
+            log.error("Failed to add outbox events to write batch", e);
         }
     }
 

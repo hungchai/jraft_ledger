@@ -53,6 +53,20 @@ public class LedgerStateMachine {
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
 
+    // Skip the RocksDB+Jackson hot path entirely when LEDGER_SKIP_PERSIST=1.
+    // State stays in memory (matches plan-a-jraft architecture). Recovery is
+    // only possible via Raft log replay; no snapshot persistence. Use for
+    // benchmark runs where durability isn't required.
+    private static final boolean SKIP_PERSIST =
+            "1".equals(System.getenv("LEDGER_SKIP_PERSIST"));
+
+    // Skip emitting BalanceChangeEvent + outbox.enqueue per balance line.
+    // Saves Jackson serialization of large events on the fsm-caller thread.
+    // Outbox publisher reads RocksDB CF_OUTBOX, so disabling this also means
+    // no Kafka events flow. Use only for raw apply-throughput benchmarks.
+    private static final boolean SKIP_EVENTS =
+            "1".equals(System.getenv("LEDGER_SKIP_EVENTS"));
+
     public void setOutboxStore(com.tomma8.ledger.rocksdb.OutboxStore outboxStore) {
         this.outboxStore = outboxStore;
     }
@@ -62,7 +76,18 @@ public class LedgerStateMachine {
     }
 
     private void persistIfNeeded() {
-        if (persistAfterApply && rocksDB != null) {
+        // BUG REPLAY: this used to call takeSnapshot() on every apply, which
+        // re-serialised the entire ledger state (balances + accounts + configs
+        // + journals + idempotency) via Jackson per command — pinning the
+        // fsm-caller thread at 100% CPU and dropping apply throughput to
+        // <1 cps after ~30k journals.
+        //
+        // JRaft already invokes onSnapshotSave on its own cadence
+        // (snapshotIntervalSecs in NodeOptions). Per-apply snapshots are
+        // redundant. Keep this hook so callers can request a snapshot
+        // explicitly, but only honour it when LEDGER_PER_APPLY_SNAPSHOT=1.
+        if (persistAfterApply && rocksDB != null
+                && "1".equals(System.getenv("LEDGER_PER_APPLY_SNAPSHOT"))) {
             try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
         }
     }
@@ -84,6 +109,7 @@ public class LedgerStateMachine {
     }
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
+        if (SKIP_PERSIST) return;
         if (rocksDB == null) return;
         try {
             WriteBatch batch = new WriteBatch();
@@ -109,9 +135,10 @@ public class LedgerStateMachine {
             batch.put(rocksDB.getHandle("idempotency"),
                     idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8),
                     objectMapper.writeValueAsBytes(idempotencyEntry));
-            // Outbox
+            // Outbox — fold pending events into the same atomic batch so
+            // journal + balance + idempotency + outbox all commit together.
             if (outboxStore != null) {
-                outboxStore.flush();
+                outboxStore.flushInto(batch);
             }
             rocksDB.write(batch);
         } catch (Exception e) {
@@ -484,7 +511,7 @@ public class LedgerStateMachine {
                 balanceUpdates.put(key, updated);
 
                 // Publish BalanceChangeEvent (F-011)
-                if (eventListener != null) {
+                if (!SKIP_EVENTS && (eventListener != null || outboxStore != null)) {
                     BigDecimal delta = line.entryType() == EntryType.DEBIT
                             ? lwl.amount().negate()
                             : lwl.amount();
@@ -517,7 +544,7 @@ public class LedgerStateMachine {
                             valueDate,
                             valueDate,
                             Map.of("sourceSystem", "LEDGER"));
-                    eventListener.onEvent(event);
+                    if (eventListener != null) eventListener.onEvent(event);
                     if (outboxStore != null) outboxStore.enqueue(event);
                 }
             }

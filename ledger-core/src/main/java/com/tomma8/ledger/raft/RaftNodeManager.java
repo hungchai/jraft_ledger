@@ -7,6 +7,7 @@ import com.alipay.sofa.jraft.conf.Configuration;
 import com.alipay.sofa.jraft.entity.PeerId;
 import com.alipay.sofa.jraft.entity.Task;
 import com.alipay.sofa.jraft.option.NodeOptions;
+import com.alipay.sofa.jraft.option.RaftOptions;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import org.slf4j.Logger;
@@ -52,6 +53,27 @@ public class RaftNodeManager implements AutoCloseable {
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
         nodeOptions.setFsm(this.stateMachine);
+
+        // Tune Raft pipelining for higher throughput. Defaults (256 inflight)
+        // are conservative; the leader can keep more append entries in flight
+        // to fully use the network path between nodes. Sync flag controls
+        // whether log entries fsync before being considered appended; with
+        // sync=false we trade a small durability window for ~2× throughput.
+        // Keep disruptor buffer at default — resizing it at startup broke the
+        // FSM leader callback dispatch in earlier experiments.
+        RaftOptions ro = nodeOptions.getRaftOptions();
+        if (ro == null) {
+            ro = new RaftOptions();
+            nodeOptions.setRaftOptions(ro);
+        }
+        ro.setMaxReplicatorInflightMsgs(
+                Integer.parseInt(System.getenv().getOrDefault("RAFT_MAX_INFLIGHT", "1024")));
+        ro.setApplyBatch(
+                Integer.parseInt(System.getenv().getOrDefault("RAFT_APPLY_BATCH", "128")));
+        ro.setSync(
+                Boolean.parseBoolean(System.getenv().getOrDefault("RAFT_LOG_SYNC", "true")));
+        ro.setMaxByteCountPerRpc(
+                Integer.parseInt(System.getenv().getOrDefault("RAFT_MAX_BYTES_PER_RPC", "1048576")));
     }
 
     public boolean init() {
@@ -83,7 +105,16 @@ public class RaftNodeManager implements AutoCloseable {
     /**
      * Submit a command through the Raft log. Blocks until the command is committed
      * and applied on this node (and replicated to a quorum).
+     *
+     * Timeout default 5 seconds — under saturation, longer waits just block the
+     * caller thread without recovering: the apply queue is FIFO so a request
+     * waiting 30s would still get applied eventually, but the caller has likely
+     * given up. 5s lets the caller surface a clean error and frees the servlet
+     * thread back to the pool. Override via LEDGER_RAFT_SUBMIT_TIMEOUT_MS env.
      */
+    private static final long SUBMIT_TIMEOUT_MS =
+            Long.parseLong(System.getenv().getOrDefault("LEDGER_RAFT_SUBMIT_TIMEOUT_MS", "5000"));
+
     public CommandResult submit(RaftCommand command) {
         CompletableFuture<CommandResult> future = new CompletableFuture<>();
         pendingCommands.put(command.requestId(), future);
@@ -96,7 +127,7 @@ public class RaftNodeManager implements AutoCloseable {
         });
         this.node.apply(task);
         try {
-            return future.get(30, TimeUnit.SECONDS);
+            return future.get(SUBMIT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             pendingCommands.remove(command.requestId());
             throw new RuntimeException("Raft command timeout: " + command.requestId(), e);

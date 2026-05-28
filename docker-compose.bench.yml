@@ -1,0 +1,40 @@
+# Overlay for benchmark runs — matches plan-a-jraft (backend-ledger) shape:
+# in-memory state machine, no per-balance-line event emission, larger JRaft
+# pipelining window, no per-apply snapshot.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d ledger1 ledger2 ledger3
+#
+# These flags trade durability for measurement parity. Do NOT run production
+# load through this overlay.
+
+services:
+  ledger1:
+    environment:
+      LEDGER_SKIP_PERSIST: "1"
+      LEDGER_SKIP_EVENTS: "1"
+      LEDGER_PER_APPLY_SNAPSHOT: "0"
+      RAFT_APPLY_BATCH: "128"
+      RAFT_MAX_INFLIGHT: "1024"
+      RAFT_LOG_SYNC: "true"
+      LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"
+
+  ledger2:
+    environment:
+      LEDGER_SKIP_PERSIST: "1"
+      LEDGER_SKIP_EVENTS: "1"
+      LEDGER_PER_APPLY_SNAPSHOT: "0"
+      RAFT_APPLY_BATCH: "128"
+      RAFT_MAX_INFLIGHT: "1024"
+      RAFT_LOG_SYNC: "true"
+      LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"
+
+  ledger3:
+    environment:
+      LEDGER_SKIP_PERSIST: "1"
+      LEDGER_SKIP_EVENTS: "1"
+      LEDGER_PER_APPLY_SNAPSHOT: "0"
+      RAFT_APPLY_BATCH: "128"
+      RAFT_MAX_INFLIGHT: "1024"
+      RAFT_LOG_SYNC: "true"
+      LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"
