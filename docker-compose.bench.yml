@@ -14,9 +14,9 @@ services:
       LEDGER_SKIP_PERSIST: "1"
       LEDGER_SKIP_EVENTS: "1"
       LEDGER_PER_APPLY_SNAPSHOT: "0"
-      RAFT_APPLY_BATCH: "128"
+      RAFT_APPLY_BATCH: "32"
       RAFT_MAX_INFLIGHT: "1024"
-      RAFT_LOG_SYNC: "true"
+      RAFT_LOG_SYNC: "false"
       LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"
 
   ledger2:
@@ -24,9 +24,9 @@ services:
       LEDGER_SKIP_PERSIST: "1"
       LEDGER_SKIP_EVENTS: "1"
       LEDGER_PER_APPLY_SNAPSHOT: "0"
-      RAFT_APPLY_BATCH: "128"
+      RAFT_APPLY_BATCH: "32"
       RAFT_MAX_INFLIGHT: "1024"
-      RAFT_LOG_SYNC: "true"
+      RAFT_LOG_SYNC: "false"
       LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"
 
   ledger3:
@@ -34,7 +34,7 @@ services:
       LEDGER_SKIP_PERSIST: "1"
       LEDGER_SKIP_EVENTS: "1"
       LEDGER_PER_APPLY_SNAPSHOT: "0"
-      RAFT_APPLY_BATCH: "128"
+      RAFT_APPLY_BATCH: "32"
       RAFT_MAX_INFLIGHT: "1024"
-      RAFT_LOG_SYNC: "true"
+      RAFT_LOG_SYNC: "false"
       LEDGER_RAFT_SUBMIT_TIMEOUT_MS: "5000"

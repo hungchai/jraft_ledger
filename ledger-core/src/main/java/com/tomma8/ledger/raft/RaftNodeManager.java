@@ -68,10 +68,19 @@ public class RaftNodeManager implements AutoCloseable {
         }
         ro.setMaxReplicatorInflightMsgs(
                 Integer.parseInt(System.getenv().getOrDefault("RAFT_MAX_INFLIGHT", "1024")));
+        // applyBatch=128 added ~7-8ms of disruptor-wait latency at low load
+        // on macOS (BlockingWaitStrategy wakeup is several ms). 32 is the
+        // SOFAJRaft default and gives sub-ms p50 under light traffic without
+        // hurting high-rps throughput.
         ro.setApplyBatch(
-                Integer.parseInt(System.getenv().getOrDefault("RAFT_APPLY_BATCH", "128")));
+                Integer.parseInt(System.getenv().getOrDefault("RAFT_APPLY_BATCH", "32")));
+        // sync=false: don't fsync Raft log per batch on the leader. On macOS
+        // F_FULLFSYNC is ~10–20 ms and dominates write p99. Durability comes
+        // from quorum replication across the 3-node group, so per-leader
+        // fsync is redundant for our HA model. Override with RAFT_LOG_SYNC=true
+        // for stricter single-node durability.
         ro.setSync(
-                Boolean.parseBoolean(System.getenv().getOrDefault("RAFT_LOG_SYNC", "true")));
+                Boolean.parseBoolean(System.getenv().getOrDefault("RAFT_LOG_SYNC", "false")));
         ro.setMaxByteCountPerRpc(
                 Integer.parseInt(System.getenv().getOrDefault("RAFT_MAX_BYTES_PER_RPC", "1048576")));
     }

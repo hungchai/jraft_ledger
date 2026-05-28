@@ -23,7 +23,7 @@ mkdir -p /tmp/jraft-ledger/node-1/rocksdb /tmp/jraft-ledger/node-1/raft
 mkdir -p /tmp/jraft-ledger/node-2/rocksdb /tmp/jraft-ledger/node-2/raft
 mkdir -p /tmp/jraft-ledger/node-3/rocksdb /tmp/jraft-ledger/node-3/raft
 
-JAVA_OPTS="-Xms2g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=10 -XX:+ExitOnOutOfMemoryError"
+JAVA_OPTS="-Xms4g -Xmx4g -XX:+UseZGC -XX:+ExitOnOutOfMemoryError"
 PEERS="localhost:28081,localhost:28082,localhost:28083"
 
 # Bench-mode env (override by exporting before running this script).
@@ -32,7 +32,7 @@ export LEDGER_SKIP_EVENTS=${LEDGER_SKIP_EVENTS:-1}
 export LEDGER_PER_APPLY_SNAPSHOT=${LEDGER_PER_APPLY_SNAPSHOT:-0}
 export RAFT_APPLY_BATCH=${RAFT_APPLY_BATCH:-128}
 export RAFT_MAX_INFLIGHT=${RAFT_MAX_INFLIGHT:-1024}
-export RAFT_LOG_SYNC=${RAFT_LOG_SYNC:-true}
+export RAFT_LOG_SYNC=${RAFT_LOG_SYNC:-false}
 export LEDGER_RAFT_SUBMIT_TIMEOUT_MS=${LEDGER_RAFT_SUBMIT_TIMEOUT_MS:-5000}
 
 # Mysql is in docker, exposed on localhost:3306.
