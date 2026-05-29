@@ -55,8 +55,6 @@ public class LedgerStateMachine {
     private RocksDBManager rocksDB;
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
-    private volatile long lastSnapshotNanos = 0;
-    private static final long SNAPSHOT_INTERVAL_NS = 60_000_000_000L; // 60 seconds minimum between snapshots
 
     private final ExecutorService persistExecutor = Executors.newFixedThreadPool(2, r -> {
         Thread t = new Thread(r, "persist-writer");
@@ -87,17 +85,6 @@ public class LedgerStateMachine {
             }
         }
     }
-
-    private void persistIfNeeded() {
-        if (persistAfterApply && rocksDB != null) {
-            long now = System.nanoTime();
-            if (now - lastSnapshotNanos >= SNAPSHOT_INTERVAL_NS) {
-                lastSnapshotNanos = now;
-                try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
-            }
-        }
-    }
-
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
         if (rocksDB == null) return;
@@ -575,8 +562,6 @@ public class LedgerStateMachine {
 
             // 9. Atomic RocksDB persistence
             persistApply(journal, balanceUpdates, idempotencyEntry);
-
-            persistIfNeeded();
             long tEnd = System.nanoTime();
             long totalMs = (tEnd - t0) / 1_000_000;
             if (totalMs > 50) {
@@ -833,7 +818,6 @@ public class LedgerStateMachine {
                 }
             }
 
-            persistIfNeeded();
             return CommandResult.completed(reversalJournalId);
         });
     }
