@@ -48,9 +48,10 @@ class AccountQueueManagerTest {
 
         queueManager = new AccountQueueManager(cmd -> {
             if (cmd instanceof PostingCommand p) {
-                stateMachine.applyPosting(p);
                 processedCount.incrementAndGet();
+                return stateMachine.applyPosting(p);
             }
+            return CommandResult.rejected(LedgerErrorCode.INVALID_REQUEST_ID);
         });
     }
 

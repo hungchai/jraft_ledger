@@ -7,7 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
+import java.util.function.Function;
 
 public class AccountQueueManager implements AutoCloseable {
 
@@ -17,11 +17,11 @@ public class AccountQueueManager implements AutoCloseable {
     private static final int WORKER_SHUTDOWN_TIMEOUT_MS = 5000;
 
     private final ConcurrentHashMap<String, BlockingQueue<QueueTask>> queues = new ConcurrentHashMap<>();
-    private final Consumer<RaftCommand> commandHandler;
+    private final Function<RaftCommand, CommandResult> commandHandler;
     private final ExecutorService workerPool;
     private volatile boolean running = true;
 
-    public AccountQueueManager(Consumer<RaftCommand> commandHandler) {
+    public AccountQueueManager(Function<RaftCommand, CommandResult> commandHandler) {
         this.commandHandler = commandHandler;
         AtomicInteger counter = new AtomicInteger();
         this.workerPool = Executors.newCachedThreadPool(r -> {
@@ -125,9 +125,10 @@ public class AccountQueueManager implements AutoCloseable {
                     }
 
                     try {
-                        commandHandler.accept(task.command);
-                        // If resultFuture is provided, it's completed by commandHandler (RaftNodeManager)
-                        // which uses onApply() → pendingCommands → future.complete()
+                        CommandResult result = commandHandler.apply(task.command);
+                        if (task.resultFuture != null) {
+                            task.resultFuture.complete(result);
+                        }
                     } catch (Exception e) {
                         log.error("Error processing command for account {}", accountId, e);
                         if (task.resultFuture != null) {

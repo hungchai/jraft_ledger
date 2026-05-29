@@ -1,5 +1,6 @@
 package com.tomma8.ledger.queue;
 
+import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
 import com.tomma8.ledger.domain.model.*;
@@ -56,8 +57,9 @@ class QueueAndOutboxIntegrationTest {
 
         queueManager = new AccountQueueManager(cmd -> {
             if (cmd instanceof PostingCommand p) {
-                stateMachine.applyPosting(p);
+                return stateMachine.applyPosting(p);
             }
+            return CommandResult.rejected(LedgerErrorCode.INVALID_REQUEST_ID);
         });
     }
 

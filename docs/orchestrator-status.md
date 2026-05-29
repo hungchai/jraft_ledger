@@ -1,3 +1,13 @@
+## [2026-05-29 18:10] HOTFIX — AccountQueue resultFuture never completed (P0)
+Status: ✅ PASS
+Summary: `AccountQueueManager.startWorker()` used `Consumer<RaftCommand>` for `commandHandler` (wired as `raftNodeManager::submit`). Return value `CommandResult` discarded. `task.resultFuture` never completed on success → `submitAsync().get()` hung forever. On Raft exception, `completeExceptionally` fired → 500 "AccountQueue submit failed". Fix: changed constructor to `Function<RaftCommand, CommandResult>`; worker now calls `commandHandler.apply()` and completes `resultFuture` with returned `CommandResult` on success. Exception path preserved. Two test lambdas updated to return `CommandResult`. LedgerConfig needed no change.
+Findings:
+- AccountQueueManager.java:20,24,127-131 🔴 Consumer discarded CommandResult, resultFuture never completed
+- PostingController.java:96 🔴 .get() blocked indefinitely on success path
+Next: PIPELINE COMPLETE
+
+---
+
 ## [2026-05-29 14:30] Virtual Threads — ROLLED BACK
 Status: 🔄 REVERTED
 Summary: VirtualThreadPerTaskExecutor added +16ms overhead at 1VU. Reverted to CachedThreadPool. No code change.
