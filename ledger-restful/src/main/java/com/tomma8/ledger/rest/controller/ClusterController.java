@@ -29,18 +29,18 @@ public class ClusterController {
 
     @GetMapping("/info")
     public ResponseEntity<?> clusterInfo() {
-        return ResponseEntity.ok(Map.of(
-                "nodeId", nodeId,
-                "role", nodeRole.isLeader() ? "LEADER" : "FOLLOWER",
-                "term", nodeRole.getTerm(),
-                "isLeader", nodeRole.isLeader(),
-                "routing", Map.of(
-                        "writes", nodeRole.isLeader() ? "This node accepts writes" : "Forward writes to leader",
-                        "reads", "This node serves reads (CQRS — any node)",
-                        "writeEndpoints", List.of("POST /ledger/postings", "POST /ledger/journals/{id}/reversal", "POST /ledger/adjustments/drafts/{id}/approve"),
-                        "readEndpoints", List.of("GET /ledger/balances", "GET /ledger/journals", "GET /health")
-                )
-        ));
+        var body = new HashMap<String, Object>();
+        body.put("nodeId", nodeId);
+        body.put("role", nodeRole.isLeader() ? "LEADER" : "FOLLOWER");
+        body.put("term", nodeRole.getTerm());
+        body.put("isLeader", nodeRole.isLeader());
+        var routing = new HashMap<String, Object>();
+        routing.put("writes", nodeRole.isLeader() ? "This node accepts writes" : "Forward writes to leader");
+        routing.put("reads", "This node serves reads (CQRS — any node)");
+        routing.put("writeEndpoints", List.of("POST /ledger/postings", "POST /ledger/journals/{id}/reversal", "POST /ledger/adjustments/drafts/{id}/approve"));
+        routing.put("readEndpoints", List.of("GET /ledger/balances", "GET /ledger/journals", "GET /health"));
+        body.put("routing", routing);
+        return ResponseEntity.ok(body);
     }
 
     @GetMapping("/nodes")
@@ -50,18 +50,20 @@ public class ClusterController {
                 ? Arrays.asList(peers.split(","))
                 : List.of(nodeId + ":8080");
 
-        return ResponseEntity.ok(Map.of(
-                "currentNode", nodeId,
-                "allNodes", peerList,
-                "currentLeader", nodeRole.isLeader() ? nodeId : "unknown — query /health on each node",
-                "cqrs", "Reads from ANY node. Writes ONLY to leader."
-        ));
+        var body = new HashMap<String, Object>();
+        body.put("currentNode", nodeId);
+        body.put("allNodes", peerList);
+        body.put("currentLeader", nodeRole.isLeader() ? nodeId : "unknown — query /health on each node");
+        body.put("cqrs", "Reads from ANY node. Writes ONLY to leader.");
+        return ResponseEntity.ok(body);
     }
 
     @GetMapping("/raft-status")
     public ResponseEntity<?> raftStatus() {
         if (raftNodeManager == null || raftNodeManager.getNode() == null) {
-            return ResponseEntity.ok(Map.of("mode", "standalone"));
+            var body = new HashMap<String, Object>();
+            body.put("mode", "standalone");
+            return ResponseEntity.ok(body);
         }
 
         long appliedIndex = raftNodeManager.getStateMachine().getLastAppliedIndex();

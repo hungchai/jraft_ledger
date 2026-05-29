@@ -9,6 +9,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -30,7 +31,9 @@ public class ReconciliationController {
         String date = body.get("date");
         // In production, this would get all journals for the date
         // For now, we don't have date-based query — stub
-        return ResponseEntity.ok(Map.of("message", "L1 reconciliation endpoint ready"));
+        var resp = new HashMap<String, Object>();
+        resp.put("message", "L1 reconciliation endpoint ready");
+        return ResponseEntity.ok(resp);
     }
 
     @PostMapping("/l2")

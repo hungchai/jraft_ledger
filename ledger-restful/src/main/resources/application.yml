@@ -3,7 +3,7 @@ spring:
     name: ledger-platform
   threads:
     virtual:
-      enabled: false
+      enabled: true
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
     username: ${SPRING_DATASOURCE_USERNAME:ledger}

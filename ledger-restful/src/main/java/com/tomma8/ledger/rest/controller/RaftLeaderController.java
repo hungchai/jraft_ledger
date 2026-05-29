@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -24,11 +25,11 @@ public class RaftLeaderController {
     @GetMapping("/leader")
     public ResponseEntity<?> leader() {
         if (raftNodeManager == null || !raftNodeManager.isLeader()) {
-            return ResponseEntity.status(503).body(Map.of(
-                    "errorCode", LedgerErrorCode.NOT_LEADER.name(),
-                    "message", "not the leader",
-                    "leaderHint", raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown"
-            ));
+            var body = new HashMap<String, Object>();
+            body.put("errorCode", LedgerErrorCode.NOT_LEADER.name());
+            body.put("message", "not the leader");
+            body.put("leaderHint", raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown");
+            return ResponseEntity.status(503).body(body);
         }
         String advertiseUrl = System.getenv("LEDGER_ADVERTISE_URL");
         if (advertiseUrl == null || advertiseUrl.isBlank()) {
@@ -36,6 +37,8 @@ public class RaftLeaderController {
             int port = Integer.parseInt(System.getenv().getOrDefault("SERVER_PORT", "8080"));
             advertiseUrl = "http://" + host + ":" + port;
         }
-        return ResponseEntity.ok(Map.of("leader", advertiseUrl));
+        var body = new HashMap<String, Object>();
+        body.put("leader", advertiseUrl);
+        return ResponseEntity.ok(body);
     }
 }

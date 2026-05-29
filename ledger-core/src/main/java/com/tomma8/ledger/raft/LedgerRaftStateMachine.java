@@ -91,20 +91,39 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     bytes = new byte[len];
                     data.get(bytes);
                 }
+                long tApplyStart = System.nanoTime(); // Segment 3 start
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                    long tDeserEnd = System.nanoTime();
+
+                    // Segment 3: execute state machine
                     CommandResult result = executeCommand(cmd);
-                    // Propagate result back to submitter
+                    long tExecuteEnd = System.nanoTime();
+
+                    // Segment 3 end: complete future → unblocks HTTP thread
                     if (pendingCommands != null) {
                         var future = pendingCommands.remove(cmd.requestId());
                         if (future != null) future.complete(result);
                     }
+
+                    // done.run() signals commit acknowledgment to Raft
                     if (done != null) {
                         done.run(result.isCompleted() ? Status.OK() : new Status(RaftError.EBUSY, result.errorCodes().toString()));
                     }
+
+                    long tDone = System.nanoTime();
+                    long deserMs = (tDeserEnd - tApplyStart) / 1_000_000;
+                    long executeMs = (tExecuteEnd - tDeserEnd) / 1_000_000;
+                    long futureCompleteMs = (tDone - tExecuteEnd) / 1_000_000;
+                    long totalApplyMs = (tDone - tApplyStart) / 1_000_000;
+
+                    // Log detailed timing for Segment 3
+                    if (totalApplyMs > 5) {
+                        log.info("[APPLY_TIMING] cmd={} index={} deser={}ms exec={}ms future={}ms total={}ms",
+                                cmd.getClass().getSimpleName(), index, deserMs, executeMs, futureCompleteMs, totalApplyMs);
+                    }
                 } catch (Exception e) {
                     log.error("Failed to apply raft command", e);
-                    // Complete the pending future so the HTTP thread gets a response
                     if (pendingCommands != null) {
                         RaftCommand cmd = null;
                         try {

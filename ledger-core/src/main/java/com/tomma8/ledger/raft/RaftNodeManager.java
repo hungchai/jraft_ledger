@@ -44,10 +44,10 @@ public class RaftNodeManager implements AutoCloseable {
         stateMachine.setPendingCommands(pendingCommands);
 
         this.nodeOptions = new NodeOptions();
-        nodeOptions.setElectionTimeoutMs(1000);
+        nodeOptions.setElectionTimeoutMs(5000);
         nodeOptions.setInitialConf(conf);
         nodeOptions.setDisableCli(false);
-        nodeOptions.setSnapshotIntervalSecs(3600);
+        nodeOptions.setSnapshotIntervalSecs(600);
         nodeOptions.setLogUri(dataPath + File.separator + "log");
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
@@ -83,23 +83,44 @@ public class RaftNodeManager implements AutoCloseable {
     /**
      * Submit a command through the Raft log. Blocks until the command is committed
      * and applied on this node (and replicated to a quorum).
+     *
+     * 4-segment timeline:
+     * - S1 (submit → quorum committed): node.apply() → TaskClosure.onCommitted()
+     * - S2 (committed → apply ready): onCommitted() → onApply() start (FSM queue wait)
+     * - S3 (apply): onApply() start → future.complete() (deser + state machine + future)
+     * - S4 (return): future.complete() → future.get() returns (HTTP thread wake + response)
      */
     public CommandResult submit(RaftCommand command) {
+        long tSubmit = System.nanoTime();
         CompletableFuture<CommandResult> future = new CompletableFuture<>();
         pendingCommands.put(command.requestId(), future);
         byte[] data = CommandSerializer.serialize(command);
+
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {
                 future.completeExceptionally(new RuntimeException("Raft apply failed: " + status));
                 pendingCommands.remove(command.requestId());
             }
         });
+
         this.node.apply(task);
+        long tApplied = System.nanoTime(); // S1 end: task enqueued to Raft Disruptor
         try {
-            return future.get(30, TimeUnit.SECONDS);
+            CommandResult result = future.get(10, TimeUnit.SECONDS);
+            long tReturn = System.nanoTime();
+            long totalMs = (tReturn - tSubmit) / 1_000_000;
+            long raftInternalMs = (tApplied - tSubmit) / 1_000_000;
+            // S4 = total - S3 (S3 logged in LedgerRaftStateMachine.onApply)
+            if (totalMs > 50) {
+                log.info("[SUBMIT_TIMING] requestId={} total={}ms raftInternal={}ms",
+                        command.requestId(), totalMs, raftInternalMs);
+            }
+            return result;
         } catch (Exception e) {
+            long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
+            log.error("Raft command timeout: requestId={} elapsedMs={}", command.requestId(), elapsedMs);
             pendingCommands.remove(command.requestId());
-            throw new RuntimeException("Raft command timeout: " + command.requestId(), e);
+            throw new RuntimeException("Raft command timeout: " + command.requestId() + " after " + elapsedMs + "ms", e);
         }
     }
 

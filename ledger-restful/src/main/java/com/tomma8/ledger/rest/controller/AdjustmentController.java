@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -58,7 +59,9 @@ public class AdjustmentController {
                 return ResponseEntity.ok(draft);
             } catch (IllegalArgumentException e) {
                 outcome = "REJECTED";
-                return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+                var errBody = new HashMap<String, Object>();
+                errBody.put("error", e.getMessage());
+                return ResponseEntity.badRequest().body(errBody);
             }
         } catch (Exception e) {
             outcome = "ERROR";
@@ -79,11 +82,11 @@ public class AdjustmentController {
             if (!nodeRole.isLeader()) {
                 outcome = "REJECTED";
                 String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
-                return ResponseEntity.status(503).body(Map.of(
-                        "status", "REJECTED",
-                        "errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()),
-                        "leaderHint", leader
-                ));
+                var respBody = new HashMap<String, Object>();
+                respBody.put("status", "REJECTED");
+                respBody.put("errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()));
+                respBody.put("leaderHint", leader);
+                return ResponseEntity.status(503).body(respBody);
             }
 
             String checkerId = body.get("checkerId");
@@ -125,7 +128,9 @@ public class AdjustmentController {
     public ResponseEntity<?> reject(@PathVariable String draftId, @RequestBody Map<String, String> body) {
         adjustmentService.rejectDraft(draftId, body.get("checkerId"),
                 body.getOrDefault("reason", "Rejected"));
-        return ResponseEntity.ok(Map.of("status", "REJECTED"));
+        var respBody = new HashMap<String, Object>();
+        respBody.put("status", "REJECTED");
+        return ResponseEntity.ok(respBody);
     }
 
     private List<PostingCommand.Leg> parseLegs(List<Map<String, Object>> legMaps) {
@@ -150,10 +155,10 @@ public class AdjustmentController {
     }
 
     private Map<String, Object> toResponseMap(CommandResult result) {
-        return Map.of(
-                "status", result.status(),
-                "journalId", result.journalId() != null ? result.journalId() : "",
-                "errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList()
-        );
+        var map = new HashMap<String, Object>();
+        map.put("status", result.status());
+        map.put("journalId", result.journalId() != null ? result.journalId() : "");
+        map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        return map;
     }
 }

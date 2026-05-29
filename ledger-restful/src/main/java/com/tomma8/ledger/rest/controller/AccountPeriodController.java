@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -23,9 +24,10 @@ public class AccountPeriodController {
         LocalDate date = LocalDate.parse(body.get("date"));
         periodService.triggerEOD(date);
         AccountingPeriod period = periodService.getPeriod(date);
-        return ResponseEntity.ok(Map.of(
-                "date", date.toString(),
-                "status", period.status().name()));
+        var resp = new HashMap<String, Object>();
+        resp.put("date", date.toString());
+        resp.put("status", period.status().name());
+        return ResponseEntity.ok(resp);
     }
 
     @GetMapping

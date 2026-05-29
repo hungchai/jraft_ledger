@@ -24,6 +24,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -52,6 +55,11 @@ public class LedgerStateMachine {
     private RocksDBManager rocksDB;
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
+    private final ExecutorService persistExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "persist-writer");
+        t.setDaemon(true);
+        return t;
+    });
 
     public void setOutboxStore(com.tomma8.ledger.rocksdb.OutboxStore outboxStore) {
         this.outboxStore = outboxStore;
@@ -85,39 +93,59 @@ public class LedgerStateMachine {
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
         if (rocksDB == null) return;
+        // Serialize state for async write — collect all bytes on apply thread
+        byte[] journalBytes, idempotencyBytes;
+        List<byte[]> lineBytesList, balanceBytesList;
+        List<String> lineKeys, balanceKeys;
         try {
-            WriteBatch batch = new WriteBatch();
-            // Journal
-            batch.put(rocksDB.getHandle("journal"),
-                    journal.journalId().getBytes(StandardCharsets.UTF_8),
-                    objectMapper.writeValueAsBytes(journal));
-            // JournalLines
+            journalBytes = objectMapper.writeValueAsBytes(journal);
+            lineBytesList = new ArrayList<>(journal.lines().size());
+            lineKeys = new ArrayList<>(journal.lines().size());
             for (var line : journal.lines()) {
-                batch.put(rocksDB.getHandle("journal_line"),
-                        (line.journalId() + "#" + line.journalLineId()).getBytes(StandardCharsets.UTF_8),
-                        objectMapper.writeValueAsBytes(line));
+                lineBytesList.add(objectMapper.writeValueAsBytes(line));
+                lineKeys.add(line.journalId() + "#" + line.journalLineId());
             }
-            // Balances
+            balanceBytesList = new ArrayList<>(balanceUpdates.size());
+            balanceKeys = new ArrayList<>(balanceUpdates.size());
             for (var entry : balanceUpdates.entrySet()) {
                 AccountBalanceKey key = entry.getKey();
                 String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
-                batch.put(rocksDB.getHandle("balance"),
-                        keyStr.getBytes(StandardCharsets.UTF_8),
-                        objectMapper.writeValueAsBytes(entry.getValue()));
+                balanceBytesList.add(objectMapper.writeValueAsBytes(entry.getValue()));
+                balanceKeys.add(keyStr);
             }
-            // Idempotency
-            batch.put(rocksDB.getHandle("idempotency"),
-                    idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8),
-                    objectMapper.writeValueAsBytes(idempotencyEntry));
-            // Outbox
-            if (outboxStore != null) {
-                outboxStore.flush();
-            }
-            rocksDB.write(batch);
+            idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
         } catch (Exception e) {
-            log.error("RocksDB apply persistence failed", e);
-            throw new RuntimeException("RocksDB apply persistence failed", e);
+            log.error("RocksDB serialization failed", e);
+            return; // Best-effort — don't block apply path
         }
+        // Submit async write to background thread pool
+        final byte[] fb = journalBytes;
+        final byte[] ib = idempotencyBytes;
+        final List<byte[]> flb = lineBytesList;
+        final List<String> flk = lineKeys;
+        final List<byte[]> fbl = balanceBytesList;
+        final List<String> fbk = balanceKeys;
+        final String jid = journal.journalId();
+        persistExecutor.submit(() -> {
+            try {
+                WriteBatch batch = new WriteBatch();
+                batch.put(rocksDB.getHandle("journal"), jid.getBytes(StandardCharsets.UTF_8), fb);
+                for (int i = 0; i < flb.size(); i++) {
+                    batch.put(rocksDB.getHandle("journal_line"),
+                            flk.get(i).getBytes(StandardCharsets.UTF_8), flb.get(i));
+                }
+                for (int i = 0; i < fbl.size(); i++) {
+                    batch.put(rocksDB.getHandle("balance"),
+                            fbk.get(i).getBytes(StandardCharsets.UTF_8), fbl.get(i));
+                }
+                batch.put(rocksDB.getHandle("idempotency"),
+                        idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), ib);
+                rocksDB.write(batch);
+                if (outboxStore != null) outboxStore.flush();
+            } catch (Exception e) {
+                log.error("Async RocksDB write failed for journalId={}", jid, e);
+            }
+        });
     }
 
     private static final ObjectMapper objectMapper = new ObjectMapper()
@@ -254,6 +282,8 @@ public class LedgerStateMachine {
                                               String businessEventRef, LocalDate valueDate,
                                               List<PostingCommand.Leg> legs,
                                               JournalType journalType, String commandLabel) {
+        long t0 = System.nanoTime();
+        try {
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
         Map<AccountBalanceKey, BigDecimal> reusableAfterBalances = new HashMap<>(64);
@@ -271,7 +301,10 @@ public class LedgerStateMachine {
             reusableAccountSet.add(lwl.line().accountId());
         }
 
-        return withAccountLocks(reusableAccountSet, () -> {
+        // withAccountLocks returns CommandResult — measure full duration including lock wait
+        long[] tAfterLock = {0};
+        CommandResult cmdResult = withAccountLocks(reusableAccountSet, () -> {
+            tAfterLock[0] = System.nanoTime();
             // 1. Idempotency check
             var existing = idempotencyStore.get(requestId);
             if (existing.isPresent()) {
@@ -282,7 +315,8 @@ public class LedgerStateMachine {
                 return CommandResult.rejected(entry.errors());
             }
 
-            // 3. Account status check (before balance checks)
+            // 2. Account status check (before balance checks)
+            Map<String, Account> accountCache = new HashMap<>(reusableAccountSet.size() * 2);
             for (String accountId : reusableAccountSet) {
                 var account = accountMetaStore.get(accountId);
                 if (account.isEmpty()) {
@@ -291,6 +325,7 @@ public class LedgerStateMachine {
                             IdempotencyEntry.rejected(requestId, result.errorCodes(), Instant.now()));
                     return result;
                 }
+                accountCache.put(accountId, account.get());
                 if (account.get().status() == AccountStatus.FROZEN) {
                     var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN);
                     idempotencyStore.put(requestId,
@@ -298,6 +333,7 @@ public class LedgerStateMachine {
                     return result;
                 }
             }
+            long t3 = System.nanoTime();
 
             // 4. Check per-leg journal balance + seed account restriction
             for (var leg : legs) {
@@ -387,7 +423,10 @@ public class LedgerStateMachine {
                 }
             }
 
+            long tLegEnd = System.nanoTime();
+
             // 6. Balance validation (compute after values, check rules)
+            long tBalanceStart = System.nanoTime();
             for (var lwl : reusableLines) {
                 var line = lwl.line();
                 BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
@@ -429,6 +468,7 @@ public class LedgerStateMachine {
                 }
                 reusableAfterBalances.put(key, after);
             }
+            long tBalanceEnd = System.nanoTime();
 
             // 6. Generate journal
             long index = raftLogIndex.incrementAndGet();
@@ -458,6 +498,7 @@ public class LedgerStateMachine {
                     businessEventType, businessEventRef,
                     valueDate, JournalStatus.CONFIRMED,
                     List.copyOf(reusableJournalLines), false, now);
+            long tJournalEnd = System.nanoTime();
 
             journalStore.put(journalId, journal);
 
@@ -525,13 +566,43 @@ public class LedgerStateMachine {
             // 8. Idempotency
             IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(requestId, journalId, now);
             idempotencyStore.put(requestId, idempotencyEntry);
+            long tEventsEnd = System.nanoTime();
 
             // 9. Atomic RocksDB persistence
             persistApply(journal, balanceUpdates, idempotencyEntry);
 
             persistIfNeeded();
+            long tEnd = System.nanoTime();
+            long preLockMs = (tAfterLock[0] - t0) / 1_000_000;
+            long lockMs = (tEnd - tAfterLock[0]) / 1_000_000;
+            long idemMs = (t3 - tAfterLock[0]) / 1_000_000;
+            long acctMs = (tLegEnd - t3) / 1_000_000;
+            long legMs = (tBalanceStart - tLegEnd) / 1_000_000;
+            long balMs = (tBalanceEnd - tBalanceStart) / 1_000_000;
+            long jnlMs = (tJournalEnd - tBalanceEnd) / 1_000_000;
+            long evtMs = (tEventsEnd - tJournalEnd) / 1_000_000;
+            long totalMs = (tEnd - t0) / 1_000_000;
+            if (totalMs > 50) {
+                log.warn("[SLOW_APPLY] requestId={} cmd={} totalMs={} preLock={} lockHold={} idem={} acct={} leg={} bal={} jnl={} evt={} lines={}",
+                        requestId, commandLabel, totalMs, preLockMs, lockMs, idemMs, acctMs, legMs, balMs, jnlMs, evtMs, reusableLines.size());
+            }
             return CommandResult.completed(journalId);
         });
+        long tDone = System.nanoTime();
+        long totalMs = (tDone - t0) / 1_000_000;
+        long insideMs = (tDone - tAfterLock[0]) / 1_000_000;
+        long waitMs = totalMs - insideMs;
+        if (totalMs > 50) {
+            log.warn("[SLOW_LOCK] requestId={} total={} wait={} inside={} lines={}",
+                    requestId, totalMs, waitMs, insideMs, reusableLines.size());
+        }
+        return cmdResult;
+        } catch (Throwable th) {
+            long totalMs = (System.nanoTime() - t0) / 1_000_000;
+            log.error("[APPLY_ERROR] requestId={} cmd={} totalMs={} error={}",
+                    requestId, commandLabel, totalMs, th.getMessage());
+            throw th;
+        }
     }
 
     // ── Account Management ─────────────────────────────────────
