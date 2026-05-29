@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.6
-**日期**: 2026-05-25
+**版本**: v0.7
+**日期**: 2026-05-29
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.7 變更摘要**：修復 AccountQueueManager submitAsync 永遠不完成 future 的缺陷（P0 HOTFIX）。新增 TC-QUEUE-04（submitAsync success path）、TC-QUEUE-05（submitAsync exception path），補齊 async future 完成契約的測試覆蓋。
+>
 > **v0.6 變更摘要**：新增 Module 19（F-012 Projection MySQL View Layer v2），新增 TC-PROJ-01~08。涵蓋 projection_event_log idempotency、accountSeq guard 防止 stale overwrite、surrogate FK chain 一致性、Kafka 重播冪等。TDD 執行計劃補充 Phase 8。
 >
 > **v0.5 變更摘要**：新增 Module 18（F-014 Java Client SDK），新增 TC-F014-01~08。TDD 執行計劃補充 Phase 7。
@@ -817,6 +819,16 @@ TC-QUEUE-03  multipleAccounts_independentQueues
              Given: ACC_A 和 ACC_B 各有獨立 queue
              When:  同時提交 100 CREDIT 到兩個帳戶
              Then:  兩者獨立並行處理，無錯誤
+
+TC-QUEUE-04  submitAsync_completesFutureWithResult_onSuccess
+             Given: AccountQueueManager 配置正常 commandHandler（返回 CommandResult.completed）
+             When:  調用 submitAsync(accountId, cmd).get()
+             Then:  Future 正常完成，返回 COMPLETED CommandResult，journalId 正確
+
+TC-QUEUE-05  submitAsync_completesFutureExceptionally_onHandlerError
+             Given: commandHandler 拋出 RuntimeException
+             When:  調用 submitAsync(accountId, cmd).get()
+             Then:  Future 以 ExecutionException 完成，cause 為原始異常
 ```
 
 ---
