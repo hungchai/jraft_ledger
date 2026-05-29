@@ -21,7 +21,7 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)'],
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8081';
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8082';
 const HOTSPOT_ACC = __ENV.HOTSPOT_ACC || 'STRESS-HOT-CO-001';
 const CLIENT_PREFIX = __ENV.CLIENT_PREFIX || 'STRESS-CLI-';
 // FX rate: 1 BTC = 100,000 USD

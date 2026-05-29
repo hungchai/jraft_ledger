@@ -3,6 +3,7 @@ package com.tomma8.ledger.rest.controller;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.ReversalCommand;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
+import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.ReversalService;
@@ -22,15 +23,18 @@ public class ReversalController {
 
     private final ReversalService reversalService;
     private final RaftNodeManager raftNodeManager;
+    private final AccountQueueManager accountQueueManager;
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
 
     public ReversalController(ReversalService reversalService,
                                @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+                               @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                                NodeRole nodeRole,
                                MeterRegistry meterRegistry) {
         this.reversalService = reversalService;
         this.raftNodeManager = raftNodeManager;
+        this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
     }
@@ -57,7 +61,14 @@ public class ReversalController {
                     LocalDate.parse(body.get("valueDate")));
 
             CommandResult result;
-            if (raftNodeManager != null) {
+            if (accountQueueManager != null) {
+                // Use originalJournalId as queue anchor — reversals for same journal always touch same accounts
+                try {
+                    result = accountQueueManager.submitAsync(journalId, cmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("AccountQueue submit failed for journal " + journalId, e);
+                }
+            } else if (raftNodeManager != null) {
                 result = raftNodeManager.submit(cmd);
             } else {
                 result = reversalService.reverse(cmd);

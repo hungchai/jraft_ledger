@@ -1,5 +1,6 @@
 package com.tomma8.ledger.queue;
 
+import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +32,9 @@ public class AccountQueueManager implements AutoCloseable {
         });
     }
 
+    /**
+     * Non-blocking submit — returns true if queued, false if queue full.
+     */
     public boolean submit(String accountId, RaftCommand command) {
         BlockingQueue<QueueTask> queue = queues.computeIfAbsent(accountId, k -> {
             BlockingQueue<QueueTask> q = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
@@ -38,7 +42,7 @@ public class AccountQueueManager implements AutoCloseable {
             return q;
         });
 
-        QueueTask task = new QueueTask(accountId, command, null);
+        QueueTask task = new QueueTask(accountId, command, null, null);
         boolean offered = queue.offer(task);
         if (!offered) {
             log.warn("Queue full for account {} — backpressure triggered", accountId);
@@ -46,6 +50,29 @@ public class AccountQueueManager implements AutoCloseable {
         return offered;
     }
 
+    /**
+     * Async submit — returns CompletableFuture that completes when command is processed.
+     * The result future is completed by the worker thread after commandHandler returns.
+     */
+    public CompletableFuture<CommandResult> submitAsync(String accountId, RaftCommand command) {
+        CompletableFuture<CommandResult> resultFuture = new CompletableFuture<>();
+        BlockingQueue<QueueTask> queue = queues.computeIfAbsent(accountId, k -> {
+            BlockingQueue<QueueTask> q = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
+            startWorker(accountId, q);
+            return q;
+        });
+
+        QueueTask task = new QueueTask(accountId, command, null, resultFuture);
+        boolean offered = queue.offer(task);
+        if (!offered) {
+            resultFuture.completeExceptionally(new RuntimeException("Queue full for account: " + accountId));
+        }
+        return resultFuture;
+    }
+
+    /**
+     * Multi-account submit — submits to all accounts, returns true when all ready.
+     */
     public boolean submitMultiAccount(java.util.List<String> sortedAccountIds,
                                        RaftCommand command) {
         for (String accountId : sortedAccountIds) {
@@ -70,7 +97,7 @@ public class AccountQueueManager implements AutoCloseable {
                 if (readyCount.incrementAndGet() == total) {
                     ready.complete(null);
                 }
-            });
+            }, null);
             if (!queue.offer(task)) {
                 return false;
             }
@@ -99,8 +126,13 @@ public class AccountQueueManager implements AutoCloseable {
 
                     try {
                         commandHandler.accept(task.command);
+                        // If resultFuture is provided, it's completed by commandHandler (RaftNodeManager)
+                        // which uses onApply() → pendingCommands → future.complete()
                     } catch (Exception e) {
                         log.error("Error processing command for account {}", accountId, e);
+                        if (task.resultFuture != null) {
+                            task.resultFuture.completeExceptionally(e);
+                        }
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -116,6 +148,10 @@ public class AccountQueueManager implements AutoCloseable {
         return queue != null ? queue.size() : 0;
     }
 
+    public int getActiveAccountCount() {
+        return queues.size();
+    }
+
     @Override
     public void close() {
         running = false;
@@ -127,5 +163,5 @@ public class AccountQueueManager implements AutoCloseable {
         }
     }
 
-    record QueueTask(String accountId, RaftCommand command, Runnable readyCallback) {}
+    record QueueTask(String accountId, RaftCommand command, Runnable readyCallback, CompletableFuture<CommandResult> resultFuture) {}
 }

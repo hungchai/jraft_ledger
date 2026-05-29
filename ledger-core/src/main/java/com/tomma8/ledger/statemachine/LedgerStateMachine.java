@@ -55,6 +55,9 @@ public class LedgerStateMachine {
     private RocksDBManager rocksDB;
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
+    private volatile long lastSnapshotNanos = 0;
+    private static final long SNAPSHOT_INTERVAL_NS = 60_000_000_000L; // 60 seconds minimum between snapshots
+
     private final ExecutorService persistExecutor = Executors.newFixedThreadPool(2, r -> {
         Thread t = new Thread(r, "persist-writer");
         t.setDaemon(true);
@@ -67,12 +70,6 @@ public class LedgerStateMachine {
 
     public void setPersistAfterApply(boolean persist) {
         this.persistAfterApply = persist;
-    }
-
-    private void persistIfNeeded() {
-        if (persistAfterApply && rocksDB != null) {
-            try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
-        }
     }
 
     private CommandResult withAccountLocks(Set<String> accountIds, Supplier<CommandResult> action) {
@@ -90,6 +87,17 @@ public class LedgerStateMachine {
             }
         }
     }
+
+    private void persistIfNeeded() {
+        if (persistAfterApply && rocksDB != null) {
+            long now = System.nanoTime();
+            if (now - lastSnapshotNanos >= SNAPSHOT_INTERVAL_NS) {
+                lastSnapshotNanos = now;
+                try { takeSnapshot(); } catch (Exception e) { log.error("Snapshot failed", e); }
+            }
+        }
+    }
+
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
         if (rocksDB == null) return;
@@ -283,7 +291,6 @@ public class LedgerStateMachine {
                                               List<PostingCommand.Leg> legs,
                                               JournalType journalType, String commandLabel) {
         long t0 = System.nanoTime();
-        try {
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
         Map<AccountBalanceKey, BigDecimal> reusableAfterBalances = new HashMap<>(64);
@@ -301,10 +308,8 @@ public class LedgerStateMachine {
             reusableAccountSet.add(lwl.line().accountId());
         }
 
-        // withAccountLocks returns CommandResult — measure full duration including lock wait
-        long[] tAfterLock = {0};
-        CommandResult cmdResult = withAccountLocks(reusableAccountSet, () -> {
-            tAfterLock[0] = System.nanoTime();
+        // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
+        return withAccountLocks(reusableAccountSet, () -> {
             // 1. Idempotency check
             var existing = idempotencyStore.get(requestId);
             if (existing.isPresent()) {
@@ -573,36 +578,13 @@ public class LedgerStateMachine {
 
             persistIfNeeded();
             long tEnd = System.nanoTime();
-            long preLockMs = (tAfterLock[0] - t0) / 1_000_000;
-            long lockMs = (tEnd - tAfterLock[0]) / 1_000_000;
-            long idemMs = (t3 - tAfterLock[0]) / 1_000_000;
-            long acctMs = (tLegEnd - t3) / 1_000_000;
-            long legMs = (tBalanceStart - tLegEnd) / 1_000_000;
-            long balMs = (tBalanceEnd - tBalanceStart) / 1_000_000;
-            long jnlMs = (tJournalEnd - tBalanceEnd) / 1_000_000;
-            long evtMs = (tEventsEnd - tJournalEnd) / 1_000_000;
             long totalMs = (tEnd - t0) / 1_000_000;
             if (totalMs > 50) {
-                log.warn("[SLOW_APPLY] requestId={} cmd={} totalMs={} preLock={} lockHold={} idem={} acct={} leg={} bal={} jnl={} evt={} lines={}",
-                        requestId, commandLabel, totalMs, preLockMs, lockMs, idemMs, acctMs, legMs, balMs, jnlMs, evtMs, reusableLines.size());
+                log.warn("[SLOW_APPLY_NS] requestId={} total={}ms lines={}",
+                        requestId, totalMs, reusableLines.size());
             }
             return CommandResult.completed(journalId);
         });
-        long tDone = System.nanoTime();
-        long totalMs = (tDone - t0) / 1_000_000;
-        long insideMs = (tDone - tAfterLock[0]) / 1_000_000;
-        long waitMs = totalMs - insideMs;
-        if (totalMs > 50) {
-            log.warn("[SLOW_LOCK] requestId={} total={} wait={} inside={} lines={}",
-                    requestId, totalMs, waitMs, insideMs, reusableLines.size());
-        }
-        return cmdResult;
-        } catch (Throwable th) {
-            long totalMs = (System.nanoTime() - t0) / 1_000_000;
-            log.error("[APPLY_ERROR] requestId={} cmd={} totalMs={} error={}",
-                    requestId, commandLabel, totalMs, th.getMessage());
-            throw th;
-        }
     }
 
     // ── Account Management ─────────────────────────────────────
@@ -717,18 +699,19 @@ public class LedgerStateMachine {
             accountIds.add(origLine.accountId());
         }
 
+        // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
         return withAccountLocks(accountIds, () -> {
-            // Re-check idempotency inside lock
+            // Re-check idempotency
             var existing2 = idempotencyStore.get(cmd.requestId());
             if (existing2.isPresent()) {
                 var entry = existing2.get();
                 if (CommandResult.COMPLETED.equals(entry.status())) {
                     return CommandResult.completed(entry.journalId());
-                }
-                return CommandResult.rejected(entry.errors());
             }
+            return CommandResult.rejected(entry.errors());
+        }
 
-            // Re-fetch original journal inside lock
+        // Re-fetch original journal
             Journal orig = journalStore.get(cmd.originalJournalId());
             if (orig == null) {
                 var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND);

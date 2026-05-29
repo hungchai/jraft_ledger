@@ -13,6 +13,7 @@ import com.tomma8.ledger.rocksdb.RocksDBManager;
 import com.tomma8.ledger.service.*;
 import com.tomma8.ledger.rest.controller.ClusterController;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
+import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
@@ -22,6 +23,9 @@ import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import java.io.File;
 import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -234,6 +238,34 @@ public class LedgerConfig {
         mgr.init();
         log.info("Raft node started: {} peers={}", serverId, raftPeers);
         return mgr;
+    }
+
+    @Bean(destroyMethod = "close")
+    public AccountQueueManager accountQueueManager(RaftNodeManager raftNodeManager,
+                                                   MeterRegistry meterRegistry) {
+        if (raftNodeManager == null) {
+            log.info("AccountQueueManager not created — standalone mode");
+            return null;
+        }
+        AccountQueueManager aqm = new AccountQueueManager(raftNodeManager::submit);
+
+        // Register queue depth gauges for hot accounts
+        Set<String> hotAccounts = Set.of(
+                "STRESS-HOT-CO-001", "COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD");
+        AtomicInteger gaugeSeq = new AtomicInteger(0);
+        for (String acc : hotAccounts) {
+            int idx = gaugeSeq.getAndIncrement();
+            Gauge.builder("ledger.account.queue.depth", () -> aqm.getQueueDepth(acc))
+                    .description("Depth of pending command queue for account")
+                    .tag("accountId", acc)
+                    .register(meterRegistry);
+        }
+        Gauge.builder("ledger.account.queue.active", () -> aqm.getActiveAccountCount())
+                .description("Number of active account queues")
+                .register(meterRegistry);
+
+        log.info("AccountQueueManager wired — {} hot-account gauges registered", hotAccounts.size());
+        return aqm;
     }
 
     @Bean

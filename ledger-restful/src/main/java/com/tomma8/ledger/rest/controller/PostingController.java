@@ -4,6 +4,7 @@ import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.EntryType;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
+import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.PostingService;
@@ -24,15 +25,18 @@ public class PostingController {
 
     private final PostingService postingService;
     private final RaftNodeManager raftNodeManager;
+    private final AccountQueueManager accountQueueManager;
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
 
     public PostingController(PostingService postingService,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+                              @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                               NodeRole nodeRole,
                               MeterRegistry meterRegistry) {
         this.postingService = postingService;
         this.raftNodeManager = raftNodeManager;
+        this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
     }
@@ -80,7 +84,20 @@ public class PostingController {
             PostingCommand cmd = new PostingCommand(requestId, businessEventType, businessEventRef, valueDate, legs);
 
             CommandResult result;
-            if (raftNodeManager != null) {
+            if (accountQueueManager != null) {
+                // Extract all accountIds from posting, sort to get deterministic queue anchor (deadlock prevention)
+                String anchorAccount = cmd.legs().stream()
+                        .flatMap(leg -> leg.lines().stream())
+                        .map(PostingCommand.Line::accountId)
+                        .sorted()
+                        .findFirst()
+                        .orElseThrow();
+                try {
+                    result = accountQueueManager.submitAsync(anchorAccount, cmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("AccountQueue submit failed for " + anchorAccount, e);
+                }
+            } else if (raftNodeManager != null) {
                 result = raftNodeManager.submit(cmd);
             } else {
                 result = postingService.post(cmd);

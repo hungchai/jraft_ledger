@@ -6,6 +6,7 @@ import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.AdjustmentDraft;
 import com.tomma8.ledger.domain.model.EntryType;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
+import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
 import com.tomma8.ledger.service.AdjustmentService;
@@ -26,15 +27,18 @@ public class AdjustmentController {
 
     private final AdjustmentService adjustmentService;
     private final RaftNodeManager raftNodeManager;
+    private final AccountQueueManager accountQueueManager;
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
 
     public AdjustmentController(AdjustmentService adjustmentService,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                                  NodeRole nodeRole,
                                  MeterRegistry meterRegistry) {
         this.adjustmentService = adjustmentService;
         this.raftNodeManager = raftNodeManager;
+        this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
     }
@@ -98,7 +102,20 @@ public class AdjustmentController {
                     postingCmd.valueDate(), postingCmd.legs(), "MANUAL_ADJUSTMENT", draftId);
 
             CommandResult result;
-            if (raftNodeManager != null) {
+            if (accountQueueManager != null) {
+                // Extract account anchor from adjustment legs (same structure as PostingCommand)
+                String anchorAccount = adjCmd.legs().stream()
+                        .flatMap(leg -> leg.lines().stream())
+                        .map(PostingCommand.Line::accountId)
+                        .sorted()
+                        .findFirst()
+                        .orElseThrow();
+                try {
+                    result = accountQueueManager.submitAsync(anchorAccount, adjCmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("AccountQueue submit failed for " + anchorAccount, e);
+                }
+            } else if (raftNodeManager != null) {
                 result = raftNodeManager.submit(adjCmd);
             } else {
                 result = adjustmentService.approveDraft(draftId, checkerId, approveRequestId);
