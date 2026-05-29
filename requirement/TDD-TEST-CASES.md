@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.6
-**日期**: 2026-05-25
+**版本**: v0.7
+**日期**: 2026-05-29
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.7 變更摘要**：F-008 快照策略修正——移除 apply path 逐筆全量 takeSnapshot()。新增 TC-F008-31~33（per-apply snapshot 預設關閉、LEDGER_PER_APPLY_SNAPSHOT=1 重啟逐筆快照、叢集重啟經 Raft Log replay 恢復）。
+>
 > **v0.6 變更摘要**：新增 Module 19（F-012 Projection MySQL View Layer v2），新增 TC-PROJ-01~08。涵蓋 projection_event_log idempotency、accountSeq guard 防止 stale overwrite、surrogate FK chain 一致性、Kafka 重播冪等。TDD 執行計劃補充 Phase 8。
 >
 > **v0.5 變更摘要**：新增 Module 18（F-014 Java Client SDK），新增 TC-F014-01~08。TDD 執行計劃補充 Phase 7。
@@ -251,6 +253,25 @@ TC-F008-18  inactiveAccount_evictedFromMemory_reloadedFromRocksDB
             Given: 帳戶 24 小時無交易，被 evict
             When:  apply PostingCommand 到該帳戶
             Then:  從 RocksDB warm-up，balance 正確，繼續執行
+
+TC-F008-31  applyPosting_perApplySnapshotDisabledByDefault_noFullSnapshotPerApply  【v0.9 新增】
+            Given: persistAfterApply=false（LEDGER_PER_APPLY_SNAPSHOT 未設/=0，預設）
+            When:  apply N 筆 PostingCommand
+            Then:  apply path 不呼叫 takeSnapshot()（不寫 sm_snapshot:latest）；
+                   persistApply() 仍逐筆增量寫入 journal/journal_line/balance/idempotency；
+                   in-memory balance 正確（增量持久化不影響正確性）
+
+TC-F008-32  applyPosting_perApplySnapshotEnabled_fullSnapshotWritten  【v0.9 新增】
+            Given: persistAfterApply=true（LEDGER_PER_APPLY_SNAPSHOT=1，standalone 模式）
+            When:  apply 1 筆 PostingCommand
+            Then:  apply 後寫入 sm_snapshot:latest（restoreFromSnapshot 可還原最新狀態）
+
+TC-F008-33  clusterRestart_withoutPerApplySnapshot_postingsRecoveredViaLogReplay  【v0.9 新增・整合】
+            Given: 3-node Raft 叢集，per-apply snapshot 關閉；寫入若干 Posting，
+                   且尚未達 jRaft snapshotIntervalSecs（資料僅存在於 Raft Log）
+            When:  重啟全部節點 → 選出新 Leader
+            Then:  所有帳戶餘額與重啟前完全一致；journal 仍可查得
+                   （恢復路徑 = 最近定期快照 + Raft Log replay，非逐筆快照）
 ```
 
 ### 3.4 LedgerStateMachine — accountSeq【v0.2 新增】

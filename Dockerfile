@@ -8,6 +8,9 @@ COPY ledger-dao/pom.xml ledger-dao/pom.xml
 COPY ledger-service/pom.xml ledger-service/pom.xml
 COPY ledger-restful/pom.xml ledger-restful/pom.xml
 COPY ledger-feign/pom.xml ledger-feign/pom.xml
+COPY ledger-projection/pom.xml ledger-projection/pom.xml
+COPY ledger-client-sdk/pom.xml ledger-client-sdk/pom.xml
+COPY ledger-perf-tests/pom.xml ledger-perf-tests/pom.xml
 
 RUN mvn dependency:go-offline -pl ledger-restful -am -q || true
 

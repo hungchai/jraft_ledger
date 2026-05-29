@@ -507,4 +507,60 @@ class RocksDBIntegrationTest {
 
         assertThat(bs2.getOrThrow(key).accountSeq()).isEqualTo(100);
     }
+
+    // Builds a state machine wired to RocksDB with one funded COMPANY account + suspense.
+    private LedgerStateMachine wiredSm() {
+        BalanceStore bs = new BalanceStore();
+        AccountMetaStore ams = new AccountMetaStore();
+        BalanceTypeConfigStore cs = new BalanceTypeConfigStore();
+        LedgerStateMachine sm = new LedgerStateMachine(bs, ams, cs);
+        sm.setRocksDB(rocksDBManager);
+        cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
+                "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+        ams.put("CLIENT_ACC_001", new Account("CLIENT_ACC_001", AccountType.COMPANY, "Client",
+                "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
+        ams.put("SUSPENSE_ACC", new Account("SUSPENSE_ACC", AccountType.SUSPENSE, "Suspense",
+                "INTERNAL", AccountStatus.ACTIVE, null, Instant.now()));
+        bs.put(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"),
+                new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "JNL-INIT", Instant.now()));
+        return sm;
+    }
+
+    private PostingCommand onePosting(String reqId) {
+        return new PostingCommand(reqId, "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "d"),
+                        new PostingCommand.Line("SUSPENSE_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "c")
+                ))));
+    }
+
+    private static final byte[] SNAPSHOT_KEY = "snapshot:latest".getBytes(StandardCharsets.UTF_8);
+
+    @Test
+    @DisplayName("TC-F008-31 per-apply snapshot disabled by default — no full snapshot written per apply")
+    void applyPosting_perApplySnapshotDisabledByDefault_noFullSnapshotPerApply() throws Exception {
+        LedgerStateMachine sm = wiredSm();
+        sm.setPersistAfterApply(false); // default
+
+        CommandResult result = sm.applyPosting(onePosting("req-noSnap"));
+
+        assertThat(result.isCompleted()).isTrue();
+        // apply path must NOT have written the full-state snapshot
+        assertThat(rocksDBManager.get(ColumnFamilyRegistry.CF_SM_SNAPSHOT, SNAPSHOT_KEY)).isNull();
+        // balance still correct (incremental persistence path unaffected)
+        assertThat(sm.getBalanceStore()
+                .getOrThrow(new AccountBalanceKey("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD"))
+                .amount()).isEqualByComparingTo(new BigDecimal("900.00"));
+    }
+
+    @Test
+    @DisplayName("TC-F008-32 per-apply snapshot enabled — full snapshot written after apply")
+    void applyPosting_perApplySnapshotEnabled_fullSnapshotWritten() throws Exception {
+        LedgerStateMachine sm = wiredSm();
+        sm.setPersistAfterApply(true); // standalone / opt-in mode
+
+        sm.applyPosting(onePosting("req-snap"));
+
+        assertThat(rocksDBManager.get(ColumnFamilyRegistry.CF_SM_SNAPSHOT, SNAPSHOT_KEY)).isNotNull();
+    }
 }

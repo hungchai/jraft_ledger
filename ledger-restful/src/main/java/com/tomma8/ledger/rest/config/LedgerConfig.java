@@ -156,7 +156,17 @@ public class LedgerConfig {
         if (rocksDBManager != null && rocksDBManager.isOpen()) {
             sm.setRocksDB(rocksDBManager);
             sm.setOutboxStore(outboxStore);
-            sm.setPersistAfterApply(true);
+            // Per-apply full-state snapshot is O(total-state) on every posting and is the
+            // dominant write-path cost. It is REDUNDANT with: (a) incremental WriteBatch
+            // persistence in persistApply(), and (b) jRaft's periodic snapshot
+            // (RaftNodeManager snapshotIntervalSecs => onSnapshotSave => takeSnapshot +
+            // Raft log truncation), which is the authoritative compaction/recovery path.
+            // Default OFF; opt back in with LEDGER_PER_APPLY_SNAPSHOT=1 (e.g. standalone,
+            // non-Raft mode where no periodic snapshot scheduler exists).
+            boolean perApplySnapshot = "1".equals(System.getenv("LEDGER_PER_APPLY_SNAPSHOT"));
+            sm.setPersistAfterApply(perApplySnapshot);
+            log.info("Per-apply snapshot: {} (periodic snapshot via jRaft snapshotIntervalSecs)",
+                    perApplySnapshot ? "ENABLED" : "disabled");
             try {
                 sm.restoreFromSnapshot();
                 log.info("StateMachine restored from RocksDB snapshot");

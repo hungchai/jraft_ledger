@@ -32,6 +32,7 @@
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
+| v0.9 | 2026-05-29 | F-008 State Machine 快照策略修正：移除 apply path 上的逐筆全量 `takeSnapshot()`（每筆 Posting O(全量狀態)，為寫入路徑主要瓶頸——實測 P95 2190ms → 11ms、吞吐 ~6.7 → 731 ops/s）。持久化改為：(a) `persistApply()` 逐筆增量 WriteBatch；(b) jRaft 定期快照（`snapshotIntervalSecs`，觸發 `onSnapshotSave` → `takeSnapshot()` + Raft Log 截斷），符合本文件原定「定期快照 + log replay」設計。新增環境變數 `LEDGER_PER_APPLY_SNAPSHOT`（預設 0/關閉；=1 可在 standalone 非 Raft 模式恢復逐筆快照）。重啟恢復經 Raft Log replay 驗證（未進快照之 Posting 仍完整恢復）。修正 Dockerfile：補齊 ledger-projection/ledger-client-sdk/ledger-perf-tests 之 pom COPY（reactor 解析）。 | Ledger Platform Team |
 
 ---
 
@@ -496,6 +497,13 @@ Leader 宕機 → Raft 自動選舉新 Leader
 - 儲存 Raft Log + State Machine Snapshot
 - 每筆 journal_line 以 WAL 形式寫入，確保宕機可 replay
 - 定期做 State Machine Snapshot，防止 Raft Log 無限增長
+
+> **快照策略（v0.9）**：apply path **不做**逐筆全量 `takeSnapshot()`（O(全量狀態)/筆，為寫入路徑主要瓶頸）。持久化分兩層：
+> 1. **逐筆增量**：`persistApply()` 將 journal / journal_line / balance / idempotency 以單一 `WriteBatch` 增量寫入 RocksDB（背景執行緒，原子）。
+> 2. **定期全量快照**：由 jRaft `snapshotIntervalSecs` 觸發 `onSnapshotSave → takeSnapshot()`，同時截斷 Raft Log，控制 replay 時間。
+>
+> 恢復路徑：載入最近一次定期快照 → Raft Log replay 補回快照後的 Posting（已實測重啟後餘額完整恢復）。
+> 環境變數 `LEDGER_PER_APPLY_SNAPSHOT`（預設 `0`）：設為 `1` 可恢復逐筆快照，僅用於 standalone 非 Raft 模式（無定期快照排程者）。
 
 ### 6.2 MySQL（View Layer）
 
