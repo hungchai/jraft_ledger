@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * RocksDB-backed outbox for at-least-once event delivery to Kafka.
@@ -24,7 +25,7 @@ public class OutboxStore {
     private static final byte[] OUTBOX_PREFIX = "outbox:".getBytes(StandardCharsets.UTF_8);
 
     private final RocksDBManager rocksDBManager;
-    private final List<BalanceChangeEvent> pending = new ArrayList<>();
+    private final ConcurrentLinkedQueue<BalanceChangeEvent> pending = new ConcurrentLinkedQueue<>();
 
     public OutboxStore(RocksDBManager rocksDBManager) {
         this.rocksDBManager = rocksDBManager;
@@ -34,7 +35,7 @@ public class OutboxStore {
      * Queue an event for writing in the next WriteBatch.
      */
     public void enqueue(BalanceChangeEvent event) {
-        pending.add(event);
+        pending.offer(event);
     }
 
     /**
@@ -42,13 +43,13 @@ public class OutboxStore {
      */
     public void flush() {
         if (pending.isEmpty() || rocksDBManager == null) return;
+        BalanceChangeEvent event;
         try {
-            for (var event : pending) {
+            while ((event = pending.poll()) != null) {
                 byte[] key = outboxKey(event.eventId());
                 byte[] value = mapper.writeValueAsBytes(event);
                 rocksDBManager.put("outbox", key, value);
             }
-            pending.clear();
         } catch (Exception e) {
             log.error("Failed to flush outbox", e);
         }
