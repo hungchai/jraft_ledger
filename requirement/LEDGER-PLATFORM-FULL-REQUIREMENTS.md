@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.8  
-**日期**: 2026-05-25  
+**版本**: v0.9  
+**日期**: 2026-05-30  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -31,6 +31,7 @@
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
+| v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
 
 ---
@@ -1238,18 +1239,38 @@ COMPANY_ACC 是 hotspot，但因為所有請求都在同一個 Account Queue 裡
 {
   "requestId": "req-550e8400-e29b-41d4-a716-446655440001",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "INSUFFICIENT_BALANCE",
-      "accountId": "CLIENT_ACC_001",
-      "balanceType": "AVAILABLE_BALANCE",
-      "currency": "USD",
-      "required": 800000.00,
-      "available": 500000.00
-    }
-  ]
+  "journalId": "",
+  "errorCodes": ["INSUFFICIENT_BALANCE"],
+  "errorDetails": {
+    "accountId": "CLIENT_ACC_001",
+    "balanceType": "AVAILABLE_BALANCE",
+    "currency": "USD",
+    "required": "800000.00",
+    "available": "500000.00"
+  }
 }
 ```
+
+**欄位說明：**
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| `status` | `string` | `REJECTED` |
+| `journalId` | `string` | 失敗時為空字串 `""` |
+| `errorCodes` | `list<string>` | 錯誤碼清單（保留向後相容） |
+| `errorDetails` | `map<string,string>` | 觸發錯誤的實體上下文；欄位視錯誤碼而定，可包含 `accountId`、`journalId`、`balanceType`、`currency`、`position`、`required`、`available` 等 |
+
+**常見 `errorDetails` 對照表：**
+
+| 錯誤碼 | `errorDetails` 預期欄位 |
+|---|---|
+| `ACCOUNT_NOT_FOUND` | `accountId` |
+| `ACCOUNT_FROZEN` | `accountId` |
+| `INSUFFICIENT_BALANCE` | `accountId`, `balanceType`, `currency`, `position` |
+| `JOURNAL_NOT_FOUND` | `journalId` |
+| `JOURNAL_ALREADY_REVERSED` | `journalId` |
+| `BALANCE_TYPE_NOT_FOUND` | `balanceType` |
+| `JOURNAL_UNBALANCED` | `currency`, `debitTotal`, `creditTotal` |
 
 ---
 

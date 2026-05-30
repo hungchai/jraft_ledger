@@ -174,6 +174,30 @@ echo "[10] Balance unchanged after idempotent retry"
 R=$(curl -s "$BASE/ledger/balances?accountId=$CLIENT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD")
 check "balance still 700.00" "700.00" "$R"
 
+# 11. Error details — unknown account
+echo "[11] Post to unknown account returns errorDetails with accountId"
+R=$(curl -s -X POST "$BASE/ledger/postings" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"requestId\": \"smoke-${SUFFIX}-011\",
+    \"businessEventType\": \"TEST\",
+    \"businessEventRef\": \"GHOST-${SUFFIX}\",
+    \"valueDate\": \"2026-05-18\",
+    \"legs\": [
+      {
+        \"legId\": \"leg-1\",
+        \"postingType\": \"TEST\",
+        \"amount\": \"100.00\",
+        \"currency\": \"USD\",
+        \"lines\": [
+          {\"accountId\": \"GHOST_ACC_${SUFFIX}\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Ghost\"}
+        ]
+      }
+    ]
+  }")
+check "errorCode ACCOUNT_NOT_FOUND" "ACCOUNT_NOT_FOUND" "$R"
+check "errorDetails contains accountId" '"accountId":"GHOST_ACC_'"$SUFFIX"'"' "$R"
+
 echo ""
 echo "=== Raft Cluster Consistency Checks ==="
 

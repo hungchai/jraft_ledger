@@ -56,3 +56,7 @@ Primary source of truth: `requirement/TDD-TEST-CASES.md`. Each test case has:
 ## Verification
 
 After writing tests, run `mvn test` and fix failures before concluding.
+
+## Stress test
+
+scripts/k6-posting-stress.js

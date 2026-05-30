@@ -28,7 +28,12 @@
       "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-)",
       "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-1.3.14-sources.jar com/alipay/sofa/jraft/option/RaftOptions.java)",
       "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-1.3.14-sources.jar com/alipay/sofa/jraft/core/NodeImpl.java)",
-      "Bash(mysql *)"
+      "Bash(mysql *)",
+      "Bash(bash *)",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\"; cat \"{}\"')",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"=== Raft Status — All Nodes ===\")",
+      "Bash(echo -n 'Port __TRACKED_VAR__: ')"
     ],
     "defaultMode": "acceptEdits"
   },

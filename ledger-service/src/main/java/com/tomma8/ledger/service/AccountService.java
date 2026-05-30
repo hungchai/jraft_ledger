@@ -7,9 +7,11 @@ import com.tomma8.ledger.domain.exception.*;
 import com.tomma8.ledger.domain.model.AccountStatus;
 import com.tomma8.ledger.domain.model.AccountType;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
+import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 
 import java.math.BigDecimal;
+import java.util.Optional;
 
 /**
  * F-010 Account Management.
@@ -19,10 +21,16 @@ public class AccountService {
 
     private final LedgerStateMachine stateMachine;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
+    private final AccountMetaStore accountMetaStore;
 
     public AccountService(LedgerStateMachine stateMachine, BalanceTypeConfigStore balanceTypeConfigStore) {
         this.stateMachine = stateMachine;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
+        this.accountMetaStore = stateMachine.getAccountMetaStore();
+    }
+
+    public Optional<com.tomma8.ledger.domain.model.Account> getAccount(String accountId) {
+        return accountMetaStore.get(accountId);
     }
 
     public CommandResult createAccount(AccountCreateCommand cmd) {

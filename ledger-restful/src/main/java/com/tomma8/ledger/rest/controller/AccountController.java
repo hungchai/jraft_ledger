@@ -41,6 +41,27 @@ public class AccountController {
         return ResponseEntity.status(503).body(body);
     }
 
+    @GetMapping("/{accountId}")
+    public ResponseEntity<?> getAccount(@PathVariable String accountId) {
+        var account = accountService.getAccount(accountId);
+        if (account.isEmpty()) {
+            var body = new HashMap<String, Object>();
+            body.put("error", "ACCOUNT_NOT_FOUND");
+            body.put("accountId", accountId);
+            return ResponseEntity.status(404).body(body);
+        }
+        Account acc = account.get();
+        var body = new HashMap<String, Object>();
+        body.put("accountId", acc.accountId());
+        body.put("accountType", acc.accountType().name());
+        body.put("displayName", acc.displayName());
+        body.put("ownerId", acc.ownerId());
+        body.put("status", acc.status().name());
+        body.put("allowedBalanceTypes", acc.allowedBalanceTypes());
+        body.put("createdAt", acc.createdAt());
+        return ResponseEntity.ok(body);
+    }
+
     @PostMapping
     public ResponseEntity<?> createAccount(@RequestBody Map<String, Object> body) {
         if (!nodeRole.isLeader()) {
@@ -139,6 +160,7 @@ public class AccountController {
         map.put("status", result.status());
         map.put("journalId", result.journalId() != null ? result.journalId() : "");
         map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        map.put("errorDetails", result.errorDetails());
         return map;
     }
 }

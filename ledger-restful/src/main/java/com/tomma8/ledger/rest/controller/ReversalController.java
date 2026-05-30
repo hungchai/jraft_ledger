@@ -93,6 +93,7 @@ public class ReversalController {
         map.put("status", result.status());
         map.put("journalId", result.journalId() != null ? result.journalId() : "");
         map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        map.put("errorDetails", result.errorDetails());
         return map;
     }
 }

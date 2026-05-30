@@ -30,6 +30,7 @@ and gate. All execution is delegated to specialist subagents.
 | `smoke-tester` | After `docker-compose up` confirms healthy stack |
 | `software-architect` | For cross-cutting design decisions or new ADR |
 | `state-machine-expert` | Any change touching StateMachine.apply(), RocksDB, AccountQueue, Snapshot, Outbox |
+| `observability-expert` | Metrics instrumentation, Prometheus config, Grafana dashboards, alert rules |
 
 ## Standard Feature Pipeline
 
@@ -38,8 +39,9 @@ and gate. All execution is delegated to specialist subagents.
          ↓ (gate: requirements + TDD updated — STOP here before ANY code)
 2. [software-architect]    → ADR if cross-cutting; skip if local change only
          ↓ (parallel where safe)
-3a. [state-machine-expert] → implement if StateMachine / RocksDB / AccountQueue touched
-3b. [ops-sre]              → update Dockerfile / docker-compose if deps changed
+3a. [state-machine-expert]   → implement if StateMachine / RocksDB / AccountQueue touched
+3b. [ops-sre]                → update Dockerfile / docker-compose if deps changed
+3c. [observability-expert]   → add Micrometer metrics, Grafana panels, alert rules if new code paths
          ↓ (gate: mvn clean compile passes)
 4. [ledger-reviewer]       → review diff; STOP pipeline if any 🔴 found
          ↓ (gate: 0 🔴 findings)
@@ -105,7 +107,7 @@ Every agent MUST read the latest entry before starting work.
 ## Parallelism Rules
 
 Steps that MAY run in parallel (dispatch simultaneously):
-- Step 3a (`state-machine-expert`) + Step 3b (`ops-sre`) — only if no shared file conflict
+- Step 3a (`state-machine-expert`) + Step 3b (`ops-sre`) + Step 3c (`observability-expert`) — only if no shared file conflict
 - Step 10 (`qa-engineer`) + Step 11 (final summary write)
 
 Steps that MUST be sequential (hard dependency):
@@ -142,3 +144,6 @@ Steps that MUST be sequential (hard dependency):
 | `review the latest diff only` | Dispatch `ledger-reviewer` alone |
 | `re-run smoke tests` | Dispatch `smoke-tester` alone; read last status first |
 | `architecture review for Raft Leader election change` | Dispatch `software-architect` → then resume pipeline |
+| `add metrics for new reversal endpoint` | Dispatch `observability-expert` alone |
+| `create Grafana dashboard for reconciliation` | Dispatch `observability-expert` alone |
+| `setup alert for queue depth > 500` | Dispatch `observability-expert` alone |

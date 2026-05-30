@@ -1,182 +1,860 @@
 {
-  "dashboard": {
-    "title": "Ledger Platform Overview",
-    "uid": "ledger-overview",
-    "tags": ["ledger", "raft", "observability"],
-    "timezone": "browser",
-    "schemaVersion": 16,
-    "version": 0,
-    "refresh": "30s",
-    "panels": [
+  "annotations": {
+    "list": [
       {
-        "id": 1,
-        "title": "Posting P95 Latency",
-        "type": "gauge",
-        "gridPos": {"x": 0, "y": 0, "w": 8, "h": 4},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[5m])) * 1000",
-            "legendFormat": "P95 (ms)",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 3, "color": "yellow"},
-                {"value": 10, "color": "red"}
-              ]
-            },
-            "unit": "ms"
-          }
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
         },
-        "description": "NFR target: ≤ 3ms P95"
-      },
-      {
-        "id": 2,
-        "title": "Balance Query P95 Latency (Live)",
-        "type": "gauge",
-        "gridPos": {"x": 8, "y": 0, "w": 8, "h": 4},
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"live\"}[5m])) * 1000",
-            "legendFormat": "P95 Live (ms)",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 2, "color": "yellow"},
-                {"value": 5, "color": "red"}
-              ]
-            },
-            "unit": "ms"
-          }
-        },
-        "description": "NFR target: ≤ 2ms P95 (live)"
-      },
-      {
-        "id": 3,
-        "title": "Raft Leader Status",
-        "type": "stat",
-        "gridPos": {"x": 16, "y": 0, "w": 8, "h": 4},
-        "targets": [
-          {
-            "expr": "ledger_raft_is_leader",
-            "legendFormat": "{{node_id}}",
-            "refId": "A"
-          }
-        ],
-        "description": "1 = Leader, 0 = Follower"
-      },
-      {
-        "id": 4,
-        "title": "Account Queue Depth (Top 5)",
-        "type": "bargauge",
-        "gridPos": {"x": 0, "y": 4, "w": 12, "h": 4},
-        "targets": [
-          {
-            "expr": "topk(5, ledger_account_queue_depth)",
-            "legendFormat": "{{accountId}}",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 500, "color": "yellow"},
-                {"value": 1000, "color": "red"}
-              ]
-            },
-            "max": 1000
-          }
-        },
-        "description": "NFR: queue < 500 normal, > 1000 backpressure"
-      },
-      {
-        "id": 5,
-        "title": "GC Pause Max",
-        "type": "gauge",
-        "gridPos": {"x": 12, "y": 4, "w": 12, "h": 4},
-        "targets": [
-          {
-            "expr": "max(jvm_gc_pause_seconds_max) * 1000",
-            "legendFormat": "Max GC Pause (ms)",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 1, "color": "yellow"},
-                {"value": 5, "color": "red"}
-              ]
-            },
-            "unit": "ms"
-          }
-        },
-        "description": "NFR: ZGC pause < 1ms normal, > 5ms alert"
-      },
-      {
-        "id": 6,
-        "title": "Posting Throughput (TPS)",
-        "type": "timeseries",
-        "gridPos": {"x": 0, "y": 8, "w": 24, "h": 6},
-        "targets": [
-          {
-            "expr": "rate(ledger_posting_duration_seconds_count[1m])",
-            "legendFormat": "{{node_id}}",
-            "refId": "A"
-          }
-        ],
-        "description": "NFR target: ≥ 10,000 TPS peak"
-      },
-      {
-        "id": 7,
-        "title": "Raft Last Applied Index",
-        "type": "timeseries",
-        "gridPos": {"x": 0, "y": 14, "w": 24, "h": 6},
-        "targets": [
-          {
-            "expr": "ledger_raft_last_applied_index",
-            "legendFormat": "{{node_id}}",
-            "refId": "A"
-          }
-        ],
-        "description": "Lag = max - node value. Alert if > 100 sustained"
-      },
-      {
-        "id": 8,
-        "title": "JVM Heap Usage",
-        "type": "timeseries",
-        "gridPos": {"x": 0, "y": 20, "w": 24, "h": 6},
-        "targets": [
-          {
-            "expr": "jvm_memory_used_bytes{area=\"heap\"}",
-            "legendFormat": "{{node_id}} - Used",
-            "refId": "A"
-          },
-          {
-            "expr": "jvm_memory_max_bytes{area=\"heap\"}",
-            "legendFormat": "{{node_id}} - Max",
-            "refId": "B"
-          }
-        ],
-        "description": "Heap configured: 2GB per node"
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
       }
     ]
-  }
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 8,
+  "links": [],
+  "panels": [
+    {
+      "description": "Posting API P95 latency in milliseconds. NFR target: ≤ 3ms. Yellow: 3-10ms. Red: > 10ms. Uses histogram_quantile over 5m window.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 50,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket{balanceType=~\"$balanceType\"}[5m])) * 1000",
+          "legendFormat": "P95 (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Posting P95 Latency",
+      "type": "gauge"
+    },
+    {
+      "description": "Posting API P50 (median) latency in milliseconds. Typical values: < 1ms under normal load.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 6, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(ledger_posting_duration_seconds_bucket{balanceType=~\"$balanceType\"}[5m])) * 1000",
+          "legendFormat": "P50 (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Posting P50 Latency",
+      "type": "stat"
+    },
+    {
+      "description": "Number of accounts with active command queues. Indicates how many distinct accounts have pending operations.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "ledger_account_queue_active",
+          "legendFormat": "Active",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Accounts",
+      "type": "stat"
+    },
+    {
+      "description": "Raft leader status per node. 1 = leader (green), 0 = follower (red). Exactly one node should be 1 at any time.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red" },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 14, "y": 0 },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "ledger_raft_is_leader{node_id=~\"$node\"}",
+          "legendFormat": "{{node_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Raft Leader Status",
+      "type": "stat"
+    },
+    {
+      "description": "Posting rejection rate per 5-minute window. Green: 0 rejections. Yellow: 1-10/min. Red: > 10/min. Investigate if sustained red.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_posting_rejected_count[5m]))",
+          "legendFormat": "Rejections/min",
+          "refId": "A"
+        }
+      ],
+      "title": "Posting Rejection Rate",
+      "type": "stat"
+    },
+    {
+      "description": "Live balance query P95 latency. NFR target: ≤ 2ms. Covers current balance reads from in-memory state.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 20,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "id": 6,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"live\"}[5m])) * 1000",
+          "legendFormat": "P95 Live (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Balance Query P95 Latency (Live)",
+      "type": "gauge"
+    },
+    {
+      "description": "As-of balance query P95 latency. NFR target: ≤ 30ms. Typically higher as it replays journal entries since snapshot. Yellow: 30-60ms. Red: > 60ms.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 200,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
+      "id": 7,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"asof\"}[5m])) * 1000",
+          "legendFormat": "P95 As-of (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Balance Query P95 Latency (As-of)",
+      "type": "gauge"
+    },
+    {
+      "description": "Maximum JVM GC pause time across all nodes. ZGC target: < 1ms normal. Yellow: 1-5ms. Red: > 5ms. Sustained red indicates GC pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 50,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
+      "id": 8,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "max(jvm_gc_pause_seconds_max) * 1000",
+          "legendFormat": "Max GC Pause (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "GC Pause Max",
+      "type": "gauge"
+    },
+    {
+      "description": "Top 5 accounts by command queue depth. Green: < 100. Yellow: 100-500. Red: > 500 (backpressure threshold). Max queue size before rejection is 1000.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 1000,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 },
+      "id": 9,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "topk(5, ledger_account_queue_depth)",
+          "legendFormat": "{{accountId}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Account Queue Depth (Top 5)",
+      "type": "bargauge"
+    },
+    {
+      "description": "Journal reversal P95 latency. Typically higher than posting due to Raft + cross-period validation. Yellow: 5-15ms. Red: > 15ms.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 50,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "id": 10,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(ledger_reversal_duration_seconds_bucket[5m])) * 1000",
+          "legendFormat": "P95 (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Reversal Duration P95",
+      "type": "gauge"
+    },
+    {
+      "description": "Manual adjustment (draft+approve) P95 latency. Includes maker-checker validation step. Yellow: 5-15ms. Red: > 15ms.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 50,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 15 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "id": 11,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(ledger_adjustment_duration_seconds_bucket[5m])) * 1000",
+          "legendFormat": "P95 (ms)",
+          "refId": "A"
+        }
+      ],
+      "title": "Adjustment Duration P95",
+      "type": "gauge"
+    },
+    {
+      "description": "Outbox events pending in CF_OUTBOX (RocksDB). Events not yet flushed to Kafka. Green: < 1000. Yellow: 1000-10000. Red: > 10000 (Kafka consumer falling behind).",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 1000 },
+              { "color": "red", "value": 10000 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "id": 12,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "ledger_outbox_pending",
+          "legendFormat": "Pending",
+          "refId": "A"
+        }
+      ],
+      "title": "Outbox Pending Events",
+      "type": "gauge"
+    },
+    {
+      "description": "Posting throughput in transactions per second. Derived from rate of posting duration metric (1m window). NFR target: ≥ 10,000 TPS peak.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow" },
+              { "color": "red" }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_posting_duration_seconds_count{balanceType=~\"$balanceType\"}[1m]))",
+          "legendFormat": "Total TPS",
+          "refId": "A"
+        }
+      ],
+      "title": "Posting Throughput (TPS)",
+      "type": "timeseries"
+    },
+    {
+      "description": "Posting rejection rate broken down by error code. Spikes indicate systemic issues (e.g. NOT_LEADER, INSUFFICIENT_BALANCE, PERIOD_CLOSED).",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow" },
+              { "color": "red" }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_posting_rejected_count[1m])) by (errorCode)",
+          "legendFormat": "{{errorCode}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Posting Rejection Rate by Error",
+      "type": "timeseries"
+    },
+    {
+      "description": "Outbox pending count (gauge) and publish rate (events/min). Rising pending with flat publish rate indicates Kafka producer or network issue.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow" },
+              { "color": "red" }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "ledger_outbox_pending",
+          "legendFormat": "Pending",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(ledger_outbox_published[1m])",
+          "legendFormat": "Publish rate",
+          "refId": "B"
+        }
+      ],
+      "title": "Outbox Events Over Time",
+      "type": "timeseries"
+    },
+    {
+      "description": "Raft last applied index per node. Lag between nodes indicates replication delay. Alert if any follower lags > 100 behind leader.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow" },
+              { "color": "red" }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "ledger_raft_last_applied_index{node_id=~\"$node\"}",
+          "legendFormat": "{{node_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Raft Last Applied Index",
+      "type": "timeseries"
+    },
+    {
+      "description": "JVM heap usage (used vs max) per node. Configured: 2GB per node. Rising heap > 80% indicates memory leak or insufficient heap.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow" },
+              { "color": "red" }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Max"
+            },
+            "properties": [
+              { "id": "custom.fillOpacity", "value": 10 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 24 },
+      "id": 17,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "targets": [
+        {
+          "expr": "jvm_memory_used_bytes{area=\"heap\",node_id=~\"$node\"}",
+          "legendFormat": "{{node_id}} - Used",
+          "refId": "A"
+        },
+        {
+          "expr": "jvm_memory_max_bytes{area=\"heap\",node_id=~\"$node\"}",
+          "legendFormat": "{{node_id}} - Max",
+          "refId": "B"
+        }
+      ],
+      "title": "JVM Heap Usage",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["ledger", "raft", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "All",
+          "value": ["$__all"]
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(ledger_raft_is_leader, node_id)",
+        "includeAll": true,
+        "multi": true,
+        "name": "node",
+        "options": [],
+        "query": "label_values(ledger_raft_is_leader, node_id)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(ledger_posting_duration_seconds_count, balanceType)",
+        "includeAll": true,
+        "multi": true,
+        "name": "balanceType",
+        "options": [],
+        "query": "label_values(ledger_posting_duration_seconds_count, balanceType)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ledger Platform Overview",
+  "uid": "ledger-overview",
+  "version": 1
 }

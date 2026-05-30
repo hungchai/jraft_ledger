@@ -94,11 +94,18 @@ public class ProjectionConsumer {
             int configVersion      = event.has("configVersion") ? event.get("configVersion").asInt() : 1;
             BigDecimal preBalance  = event.has("preBalance") ? toBigDecimal(event.get("preBalance")) : BigDecimal.ZERO;
 
-            // --- Step 1: Ensure account exists ---
-            accountMapper.upsertAccount(accountId, "CLIENT", "", null, "ACTIVE", LocalDateTime.now());
+            // --- Step 1: Ensure account exists (do NOT overwrite accountType) ---
+            // Only upsert if account doesn't exist. The onAccountCreated listener
+            // sets the correct accountType; we shouldn't overwrite it with "CLIENT".
             Long accountPk = accountMapper.findIdByAccountId(accountId);
             if (accountPk == null) {
-                log.error("Failed to get account surrogate id for {}", accountId);
+                // Account not yet projected from ledger.account.v1 — insert placeholder
+                // This is a fallback; correct type will be set by onAccountCreated listener
+                accountMapper.upsertAccount(accountId, "CLIENT", "", null, "ACTIVE", LocalDateTime.now());
+                accountPk = accountMapper.findIdByAccountId(accountId);
+            }
+            if (accountPk == null) {
+                log.error("Failed to get account surrogate id for {} after upsert attempt", accountId);
                 return;
             }
 

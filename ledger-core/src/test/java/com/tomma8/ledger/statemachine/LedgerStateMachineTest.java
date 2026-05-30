@@ -536,4 +536,82 @@ class LedgerStateMachineTest {
 
         assertThat(balanceStore.getOrThrow(key).accountSeq()).isEqualTo(12);
     }
+
+    @Test
+    @DisplayName("TC-F008-31 applyPosting account not found error details contain accountId")
+    void applyPosting_accountNotFound_errorDetailsContainAccountId() {
+        PostingCommand cmd = new PostingCommand(
+                "req-031", "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("GHOST_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Ghost")
+                )))
+        );
+
+        CommandResult result = stateMachine.applyPosting(cmd);
+
+        assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_NOT_FOUND);
+        assertThat(result.errorDetails()).containsEntry("accountId", "GHOST_ACC");
+    }
+
+    @Test
+    @DisplayName("TC-F008-32 applyPosting insufficient balance error details contain key fields")
+    void applyPosting_insufficientBalance_errorDetailsContainKeyFields() {
+        String clientId = "REAL_CLIENT";
+        accountMetaStore.put(clientId, new Account(
+                clientId, AccountType.CLIENT, "Real Client",
+                "CUST-001", AccountStatus.ACTIVE, null, Instant.now()));
+        AccountBalanceKey clientKey = new AccountBalanceKey(clientId, "AVAILABLE_BALANCE", "CURRENT", "USD");
+        balanceStore.put(clientKey, new BalanceEntry(new BigDecimal("100.00"), 0, 1, "", Instant.now()));
+        setBalance("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "USD", new BigDecimal("10000.00"));
+
+        PostingCommand cmd = new PostingCommand(
+                "req-032", "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line(clientId, "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Test"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Counter")
+                )))
+        );
+
+        CommandResult result = stateMachine.applyPosting(cmd);
+
+        assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.INSUFFICIENT_BALANCE);
+        assertThat(result.errorDetails())
+                .containsEntry("accountId", clientId)
+                .containsEntry("balanceType", "AVAILABLE_BALANCE")
+                .containsEntry("currency", "USD")
+                .containsEntry("position", "CURRENT")
+                .containsEntry("required", "200.00")
+                .containsEntry("available", "100.00");
+    }
+
+    @Test
+    @DisplayName("TC-F008-33 applyReversal journal not found error details contain journalId")
+    void applyReversal_journalNotFound_errorDetailsContainJournalId() {
+        CommandResult result = stateMachine.applyReversal(new ReversalCommand(
+                "rev-033", "JNL-9999", "Test", "CANCEL", LocalDate.now()));
+
+        assertThat(result.status()).isEqualTo(CommandResult.REJECTED);
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.JOURNAL_NOT_FOUND);
+        assertThat(result.errorDetails()).containsEntry("journalId", "JNL-9999");
+    }
+
+    @Test
+    @DisplayName("TC-F008-34 applyPosting idempotency rejected request returns same error details")
+    void applyPosting_idempotency_rejectedRequestReturnsSameErrorDetails() {
+        PostingCommand cmd = new PostingCommand(
+                "req-034", "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST_TYPE", new BigDecimal("100.00"), "USD", List.of(
+                        new PostingCommand.Line("GHOST_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Ghost")
+                )))
+        );
+
+        CommandResult first = stateMachine.applyPosting(cmd);
+        CommandResult second = stateMachine.applyPosting(cmd);
+
+        assertThat(first.status()).isEqualTo(CommandResult.REJECTED);
+        assertThat(second).isEqualTo(first);
+        assertThat(second.errorDetails()).isEqualTo(first.errorDetails());
+    }
 }

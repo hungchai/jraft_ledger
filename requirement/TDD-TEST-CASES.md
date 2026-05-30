@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.7
-**日期**: 2026-05-29
+**版本**: v0.8
+**日期**: 2026-05-30
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.8 變更摘要**：新增 enriched error detail 測試案例（TC-F002-16~20、TC-F004-08~09、TC-F008-31~35、TC-F013-11~12）。CommandResult 與 IdempotencyEntry 新增 `errorDetails` Map，用於在 REJECTED 回應中攜帶觸發錯誤的實體上下文（accountId、journalId、balanceType、currency、position 等）。
+>
 > **v0.7 變更摘要**：修復 AccountQueueManager submitAsync 永遠不完成 future 的缺陷（P0 HOTFIX）。新增 TC-QUEUE-04（submitAsync success path）、TC-QUEUE-05（submitAsync exception path），補齊 async future 完成契約的測試覆蓋。
 >
 > **v0.6 變更摘要**：新增 Module 19（F-012 Projection MySQL View Layer v2），新增 TC-PROJ-01~08。涵蓋 projection_event_log idempotency、accountSeq guard 防止 stale overwrite、surrogate FK chain 一致性、Kafka 重播冪等。TDD 執行計劃補充 Phase 8。
@@ -336,6 +338,34 @@ TC-F008-30  applyPosting_positionInJournalLine_correctlyRecorded
             Then:  JournalLine.position=LOCKED
                    AccountBalanceKey = (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
                    balance 更新正確
+
+TC-F008-31  applyPosting_accountNotFound_errorDetailsContainAccountId
+            Given: accountId="GHOST_ACC" 不存在於 accountMetaStore
+            When:  apply PostingCommand{ GHOST_ACC DEBIT 100 }
+            Then:  CommandResult.status=REJECTED，errorCode=ACCOUNT_NOT_FOUND
+                   CommandResult.errorDetails={"accountId":"GHOST_ACC"}
+
+TC-F008-32  applyPosting_insufficientBalance_errorDetailsContainKeyFields
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT = 100.00，allowNegative=false
+            When:  apply PostingCommand{ CLIENT_ACC_001 DEBIT 200 }
+            Then:  CommandResult.status=REJECTED，errorCode=INSUFFICIENT_BALANCE
+                   CommandResult.errorDetails 包含 accountId、balanceType、currency、position
+
+TC-F008-33  applyReversal_journalNotFound_errorDetailsContainJournalId
+            Given: originalJournalId="JNL-9999" 不存在
+            When:  apply ReversalCommand{ originalJournalId=JNL-9999 }
+            Then:  CommandResult.status=REJECTED，errorCode=JOURNAL_NOT_FOUND
+                   CommandResult.errorDetails={"journalId":"JNL-9999"}
+
+TC-F008-34  applyPosting_idempotency_rejectedRequestReturnsSameErrorDetails
+            Given: req-001 第一次被拒絕（ACCOUNT_NOT_FOUND，accountId=GHOST_ACC）
+            When:  第二次以相同 req-001 apply
+            Then:  返回相同 CommandResult（含相同 errorDetails），不重新執行帳務邏輯
+
+TC-F008-35  applyPosting_idempotency_afterRestart_replayedRejectedRequestReturnsSameErrorDetails
+            Given: req-002 被拒絕並已寫入 RocksDB idempotency CF
+            When:  重啟 State Machine（restoreFromSnapshot）後以相同 req-002 apply
+            Then:  從 RocksDB 恢復的 idempotencyStore 命中，返回原 errorDetails
 ```
 
 ---
@@ -422,6 +452,36 @@ TC-F002-15  post_multiPositionSameAccount_independentBalances
                    AVAILABLE_BALANCE/USD/LOCKED=200，AVAILABLE_BALANCE/USD/FROZEN=50
             When:  post(同時 DEBIT CURRENT 100 + CREDIT LOCKED 50)
             Then:  CURRENT=900，LOCKED=250，FROZEN=50（三者獨立）
+
+TC-F002-16  post_unknownAccount_errorDetailsContainAccountId
+            Given: accountId="GHOST_ACC" 不存在
+            When:  post(request to GHOST_ACC)
+            Then:  HTTP 400，errorCode=ACCOUNT_NOT_FOUND
+                   回應 body.errorDetails.accountId="GHOST_ACC"
+
+TC-F002-17  post_frozenAccount_errorDetailsContainAccountId
+            Given: CLIENT_ACC_001 status=FROZEN
+            When:  post(request to CLIENT_ACC_001)
+            Then:  HTTP 400，errorCode=ACCOUNT_FROZEN
+                   回應 body.errorDetails.accountId="CLIENT_ACC_001"
+
+TC-F002-18  post_insufficientBalance_errorDetailsContainAccountIdBalanceTypeCurrencyPosition
+            Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT=100，allowNegative=false
+            When:  post(DEBIT 200)
+            Then:  HTTP 400，errorCode=INSUFFICIENT_BALANCE
+                   回應 body.errorDetails 包含 accountId、balanceType、currency、position
+
+TC-F002-19  post_journalUnbalanced_errorDetailsContainCurrencyAndMismatchAmounts
+            Given: DEBIT 100 USD + CREDIT 99 USD
+            When:  post(request)
+            Then:  HTTP 400，errorCode=JOURNAL_UNBALANCED
+                   回應 body.errorDetails 包含 currency、debitTotal、creditTotal
+
+TC-F002-20  post_seedNotAllowedForClient_errorDetailsContainAccountId
+            Given: CLIENT_ACC_001，單行 leg（seed posting）
+            When:  post(single-line leg to CLIENT_ACC_001)
+            Then:  HTTP 400，errorCode=SEED_NOT_ALLOWED_FOR_CLIENT
+                   回應 body.errorDetails.accountId="CLIENT_ACC_001"
 ```
 
 ---
@@ -465,6 +525,18 @@ TC-F004-07  reverse_insufficientBalance_stillExecutes
             Given: 原 Journal CREDIT 1000（CLIENT 收到錢），但 CLIENT 已轉走，balance=0
             When:  reverse（CLIENT DEBIT 1000 回去，balance 會跌負）
             Then:  ReversalResult.status=COMPLETED，balance=-1000（不做餘額校驗）
+
+TC-F004-08  reverse_journalNotFound_errorDetailsContainOriginalJournalId
+            Given: originalJournalId="JNL-9999" 不存在
+            When:  reverse(originalJournalId=JNL-9999)
+            Then:  ReversalResult.status=REJECTED，errorCode=JOURNAL_NOT_FOUND
+                   回應 body.errorDetails.journalId="JNL-9999"
+
+TC-F004-09  reverse_journalAlreadyReversed_errorDetailsContainOriginalJournalId
+            Given: 原 Journal status=REVERSED
+            When:  reverse(已 reversed journal)
+            Then:  ReversalResult.status=REJECTED，errorCode=JOURNAL_ALREADY_REVERSED
+                   回應 body.errorDetails.journalId=原 journalId
 ```
 
 ---
@@ -939,6 +1011,16 @@ TC-F013-10  virtualThreadWorkerCrash_queueRecoversAndResumesConsumption
             Given: Account Queue Worker-3（COMPANY_FX_ACC）運行中
             When:  模擬 Worker thread 中斷/崩潰
             Then:  系統自動重建 Worker-3，queue 中 pending 請求繼續被消費
+
+TC-F013-11  duplicateRejectedRequest_returnsSameErrorDetails
+            Given: Posting req-001 rejected（ACCOUNT_NOT_FOUND，accountId=GHOST_ACC）
+            When:  重複發送 req-001
+            Then:  返回原錯誤碼與相同 errorDetails，不做餘額校驗
+
+TC-F013-12  idempotencySurvivesRestart_errorDetailsPreserved
+            Given: req-002 rejected 並已寫入 RocksDB idempotency CF（含 errorDetails）
+            When:  重啟後重送 req-002
+            Then:  從 RocksDB 恢復的 idempotencyStore 命中 → 返回相同 errorDetails
 ```
 
 

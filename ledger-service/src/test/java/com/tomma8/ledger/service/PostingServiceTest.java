@@ -197,4 +197,70 @@ class PostingServiceTest {
         assertThat(result.isRejected()).isTrue();
         assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_FROZEN);
     }
+
+    @Test
+    @DisplayName("TC-F002-16 post unknown account error details contain accountId")
+    void post_unknownAccount_errorDetailsContainAccountId() {
+        PostingCommand cmd = new PostingCommand(
+                "req-016", "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("GHOST_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Ghost"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Company")
+                )))
+        );
+
+        CommandResult result = postingService.post(cmd);
+
+        assertThat(result.isRejected()).isTrue();
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_NOT_FOUND);
+        assertThat(result.errorDetails()).containsEntry("accountId", "GHOST_ACC");
+    }
+
+    @Test
+    @DisplayName("TC-F002-17 post frozen account error details contain accountId")
+    void post_frozenAccount_errorDetailsContainAccountId() {
+        accountMetaStore.put("CLIENT_ACC_001",
+                accountMetaStore.getOrThrow("CLIENT_ACC_001").withStatus(AccountStatus.FROZEN));
+        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+
+        PostingCommand cmd = new PostingCommand(
+                "req-017", "TEST", "test-ref", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "TEST", BigDecimal.ONE, "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Debit"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Credit")
+                )))
+        );
+
+        CommandResult result = postingService.post(cmd);
+
+        assertThat(result.isRejected()).isTrue();
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.ACCOUNT_FROZEN);
+        assertThat(result.errorDetails()).containsEntry("accountId", "CLIENT_ACC_001");
+    }
+
+    @Test
+    @DisplayName("TC-F002-18 post insufficient balance error details contain accountId balanceType currency position")
+    void post_insufficientBalance_errorDetailsContainAccountIdBalanceTypeCurrencyPosition() {
+        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("100.00"));
+
+        PostingCommand cmd = new PostingCommand(
+                "req-018", "WITHDRAWAL", "WD-001", LocalDate.now(),
+                List.of(new PostingCommand.Leg("leg-1", "WITHDRAWAL", new BigDecimal("200.00"), "USD", List.of(
+                        new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "Withdraw"),
+                        new PostingCommand.Line("COMPANY_FX_ACC", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "Settle")
+                )))
+        );
+
+        CommandResult result = postingService.post(cmd);
+
+        assertThat(result.isRejected()).isTrue();
+        assertThat(result.errorCodes()).contains(LedgerErrorCode.INSUFFICIENT_BALANCE);
+        assertThat(result.errorDetails())
+                .containsEntry("accountId", "CLIENT_ACC_001")
+                .containsEntry("balanceType", "AVAILABLE_BALANCE")
+                .containsEntry("currency", "USD")
+                .containsEntry("position", "CURRENT")
+                .containsEntry("required", "200.00")
+                .containsEntry("available", "100.00");
+    }
 }
