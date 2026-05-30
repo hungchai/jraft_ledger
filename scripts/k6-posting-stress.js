@@ -2,9 +2,9 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 
 // Stress Test: RFQ Hotspot — maps to docs/STRESS-TEST-PLAN.md Phase 2
-// RFQ BUY/SELL scenarios with BTC/USD pair
-// BUY: Client buys USD, sells BTC
-// SELL: Client sells USD, buys BTC
+// RFQ BUY/SELL scenarios with BTC/USDT pair (BTC 8dp, USDT 16dp)
+// BUY: Client buys USDT, sells BTC
+// SELL: Client sells USDT, buys BTC
 // Usage: k6 run --vus 1000 --duration 120s scripts/k6-posting-stress.js
 
 export const options = {
@@ -23,15 +23,19 @@ export const options = {
 
 const HOTSPOT_ACC = __ENV.HOTSPOT_ACC || 'STRESS-HOT-CO-001';
 const CLIENT_PREFIX = __ENV.CLIENT_PREFIX || 'STRESS-CLI-';
-const BTC_USD_RATE = 100000;
+const BTC_USDT_RATE = 100000; // 1 BTC = 100,000 USDT
+
+// Precision: BTC = 8dp, USDT = 16dp
+const BTC_DP = 8;
+
 const LEADER_PORTS = [8081, 8082, 8083];
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF_MS = [100, 200, 400];
 
-// Shared mutable leader URL — refreshed on connection failure or leader change
+// Shared mutable leader URL — refreshed on connection failure or TTL expiry
 let leaderUrl = __ENV.BASE_URL || null;
 let leaderUrlTimestamp = 0;
-const LEADER_TTL_MS = 10_000; // re-probe leader every 10s
+const LEADER_TTL_MS = 10_000;
 
 function findLeader() {
   for (const port of LEADER_PORTS) {
@@ -71,7 +75,7 @@ function refreshLeader() {
 }
 
 // ============================================================
-// Setup helpers — #6: check every setup POST, abort on failure
+// Setup helpers — check every POST, abort on critical failure
 // ============================================================
 
 let setupFailures = 0;
@@ -102,9 +106,9 @@ function setupCheckDie(ok) {
 }
 
 export function setup() {
-  console.log('=== SETUP: Initializing accounts ===');
+  console.log('=== SETUP: Initializing accounts (BTC 8dp, USDT 16dp) ===');
 
-  // 1. Create hotspot account
+  // 1. Create hotspot account (USDT + BTC)
   const ok1 = setupPost('/ledger/accounts', JSON.stringify({
     requestId: `init-hotspot-${Date.now()}`,
     accountId: HOTSPOT_ACC,
@@ -112,12 +116,12 @@ export function setup() {
     displayName: 'Hotspot Co',
     ownerId: 'CO-HOTSPOT',
     balanceInitializations: [
-      {balanceType: 'AVAILABLE_BALANCE', currency: 'USD'},
+      {balanceType: 'AVAILABLE_BALANCE', currency: 'USDT'},
       {balanceType: 'AVAILABLE_BALANCE', currency: 'BTC'},
     ],
   }), 'create-hotspot');
 
-  // 2. Seed hotspot 100 BTC (via SYSTEM_SEED)
+  // 2. Seed hotspot 100 BTC from SYSTEM_SEED (8dp)
   const ok2 = setupPost('/ledger/postings', JSON.stringify({
     requestId: `seed-btc-${Date.now()}`,
     businessEventType: 'DEPOSIT',
@@ -135,25 +139,25 @@ export function setup() {
     }],
   }), 'seed-hotspot-BTC');
 
-  // 3. Seed hotspot 20M USD
+  // 3. Seed hotspot 20M USDT from SYSTEM_SEED (16dp)
   const ok3 = setupPost('/ledger/postings', JSON.stringify({
-    requestId: `seed-usd-${Date.now()}`,
+    requestId: `seed-usdt-${Date.now()}`,
     businessEventType: 'DEPOSIT',
-    businessEventRef: 'SEED-USD',
+    businessEventRef: 'SEED-USDT',
     valueDate: '2026-05-27',
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '20000000.00',
-      currency: 'USD',
+      amount: '20000000.0000000000000000',
+      currency: 'USDT',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
         {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT'},
       ],
     }],
-  }), 'seed-hotspot-USD');
+  }), 'seed-hotspot-USDT');
 
-  // Abort if hotspot seeding failed — remaining steps depend on it
+  // Abort if hotspot seeding failed
   setupCheckDie(ok1 && ok2 && ok3);
 
   // 4. Create + seed 100 client accounts
@@ -167,7 +171,7 @@ export function setup() {
       displayName: `Client ${i}`,
       ownerId: `CUST-${i}`,
       balanceInitializations: [
-        {balanceType: 'AVAILABLE_BALANCE', currency: 'USD'},
+        {balanceType: 'AVAILABLE_BALANCE', currency: 'USDT'},
         {balanceType: 'AVAILABLE_BALANCE', currency: 'BTC'},
       ],
     }), `create-client-${i}`) && clientOk;
@@ -181,8 +185,8 @@ export function setup() {
         {
           legId: 'leg-1',
           postingType: 'DEPOSIT',
-          amount: '10000.00',
-          currency: 'USD',
+          amount: '10000.0000000000000000',
+          currency: 'USDT',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
             {accountId: clientAcc, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT'},
@@ -217,7 +221,8 @@ export function setup() {
 }
 
 // ============================================================
-// Main test — #7: leader refresh, #8: retry/backpressure
+// Main test — RFQ BUY/SELL with BTC/USDT pair
+// USDT: 16dp precision, BTC: 8dp precision
 // ============================================================
 
 export default function () {
@@ -228,11 +233,15 @@ export default function () {
   const reqId = `k6-${vu}-${iter}-${Date.now()}`;
 
   const isBuy = (vu % 2) === 0;
-  const amountUsd = '100.00';
-  const amountBtc = (parseFloat(amountUsd) / BTC_USD_RATE).toFixed(8);
+  // Trade: 100 USDT (16dp) for equivalent BTC (8dp)
+  const amountUsdt = '100.0000000000000000';
+  const amountBtc = (100.0 / BTC_USDT_RATE).toFixed(BTC_DP); // "0.00100000"
 
   let payload;
   if (isBuy) {
+    // RFQ BUY: Client buys USDT, sells BTC
+    // Leg 1 (USDT): Client DEBIT USDT → Company CREDIT USDT
+    // Leg 2 (BTC):  Company DEBIT BTC  → Client CREDIT BTC
     payload = JSON.stringify({
       requestId: reqId,
       businessEventType: 'RFQ_SETTLEMENT',
@@ -242,11 +251,11 @@ export default function () {
         {
           legId: 'leg-1',
           postingType: 'TRADE_SETTLEMENT',
-          amount: amountUsd,
-          currency: 'USD',
+          amount: amountUsdt,
+          currency: 'USDT',
           lines: [
-            {accountId: clientAcc, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT', description: 'RFQ Client USD sell'},
-            {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT', description: 'RFQ Company USD receive'},
+            {accountId: clientAcc, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT', description: 'RFQ Client USDT sell'},
+            {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT', description: 'RFQ Company USDT receive'},
           ],
         },
         {
@@ -262,6 +271,9 @@ export default function () {
       ],
     });
   } else {
+    // RFQ SELL: Client sells USDT, buys BTC
+    // Leg 1 (BTC):  Client DEBIT BTC  → Company CREDIT BTC
+    // Leg 2 (USDT): Company DEBIT USDT → Client CREDIT USDT
     payload = JSON.stringify({
       requestId: reqId,
       businessEventType: 'RFQ_SETTLEMENT',
@@ -281,18 +293,18 @@ export default function () {
         {
           legId: 'leg-2',
           postingType: 'TRADE_SETTLEMENT',
-          amount: amountUsd,
-          currency: 'USD',
+          amount: amountUsdt,
+          currency: 'USDT',
           lines: [
-            {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT', description: 'RFQ Company USD pay'},
-            {accountId: clientAcc, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT', description: 'RFQ Client USD receive'},
+            {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT', description: 'RFQ Company USDT pay'},
+            {accountId: clientAcc, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'CREDIT', description: 'RFQ Client USDT receive'},
           ],
         },
       ],
     });
   }
 
-  // #8: Retry with backoff for transient errors (QUEUE_FULL, leader unavailable)
+  // Retry with backoff for transient errors
   let res = null;
   let lastStatus = 0;
 
@@ -300,7 +312,7 @@ export default function () {
     if (attempt > 0) {
       sleep(RETRY_BACKOFF_MS[attempt - 1] / 1000);
       if (lastStatus === 0 || lastStatus === 504) {
-        refreshLeader(); // #7: re-probe leader on connection failure
+        refreshLeader();
       }
     }
 
@@ -311,12 +323,12 @@ export default function () {
 
     lastStatus = res.status;
 
-    // Success or non-retriable application error — stop retrying
+    // Success or non-retriable application error
     if (res.status === 200 || res.status === 400 || res.status === 404 || res.status === 409) {
       break;
     }
 
-    // Only retry on QUEUE_FULL (429), SERVICE_UNAVAILABLE (503), GATEWAY_TIMEOUT (504), connection refused (0)
+    // Retry on QUEUE_FULL / SERVICE_UNAVAILABLE / GATEWAY_TIMEOUT / connection refused
     if (res.status !== 429 && res.status !== 503 && res.status !== 504 && res.status !== 0) {
       break;
     }

@@ -316,11 +316,13 @@ public class LedgerConfig {
                     new BootstrapAccount("SYSTEM_SEED", com.tomma8.ledger.domain.model.AccountType.COMPANY,
                             java.util.List.of(
                                     new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"),
-                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"))),
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"),
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USDT"))),
                     new BootstrapAccount("BANK_SETTLEMENT", com.tomma8.ledger.domain.model.AccountType.BANK,
                             java.util.List.of(
                                     new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"),
-                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"))));
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"),
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USDT"))));
             for (var ba : bootstrapAccounts) {
                 if (!accountMetaStore.contains(ba.id())) {
                     ledgerStateMachine.applyAccountCreate(new com.tomma8.ledger.domain.command.AccountCreateCommand(
