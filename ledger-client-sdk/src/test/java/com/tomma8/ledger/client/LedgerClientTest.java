@@ -197,7 +197,7 @@ class LedgerClientTest {
         leader.balanceResponseBody =
                 "{\"accountId\":\"CLIENT_ACC_001\",\"balanceType\":\"AVAILABLE_BALANCE\"," +
                 "\"currency\":\"USD\",\"amount\":700.00,\"positions\":{\"DEFAULT\":700.00}," +
-                "\"allowNegative\":false,\"dataSource\":\"STATE_MACHINE\"}";
+                "\"allowNegative\":false,\"dataSource\":\"STATE_MACHINE\",\"accountType\":\"CLIENT\"}";
 
         nodes.add(leader);
 

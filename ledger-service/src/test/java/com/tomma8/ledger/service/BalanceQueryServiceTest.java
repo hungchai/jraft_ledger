@@ -61,6 +61,7 @@ class BalanceQueryServiceTest {
 
         assertThat(result.amount()).isEqualByComparingTo(new BigDecimal("700.00"));
         assertThat(result.dataSource()).isEqualTo("STATE_MACHINE");
+        assertThat(result.accountType()).isEqualTo("CLIENT");
     }
 
     @Test
@@ -86,6 +87,7 @@ class BalanceQueryServiceTest {
         // Immediately query — should reflect new balance
         BalanceQueryResult result = queryService.getBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD");
         assertThat(result.amount()).isEqualByComparingTo(new BigDecimal("700.00"));
+        assertThat(result.accountType()).isEqualTo("CLIENT");
     }
 
     @Test
@@ -97,6 +99,7 @@ class BalanceQueryServiceTest {
 
         assertThat(result.amount()).isEqualByComparingTo(new BigDecimal("-45000.00"));
         assertThat(result.allowNegative()).isTrue();
+        assertThat(result.accountType()).isEqualTo("CLIENT");
     }
 
     @Test
@@ -131,6 +134,7 @@ class BalanceQueryServiceTest {
         assertThat(results.get(1).amount()).isEqualByComparingTo(new BigDecimal("200.00"));
         assertThat(results.get(2).amount()).isEqualByComparingTo(new BigDecimal("300.00"));
         assertThat(results).allMatch(r -> "STATE_MACHINE".equals(r.dataSource()));
+        assertThat(results).allMatch(r -> "CLIENT".equals(r.accountType()));
     }
 
     @Test
@@ -146,5 +150,6 @@ class BalanceQueryServiceTest {
         assertThat(result).isNotNull();
         // Snapshot not implemented yet — returns current dataSource as STATE_MACHINE
         assertThat(result.dataSource()).isIn("STATE_MACHINE", "EOD_SNAPSHOT");
+        assertThat(result.accountType()).isEqualTo("CLIENT");
     }
 }

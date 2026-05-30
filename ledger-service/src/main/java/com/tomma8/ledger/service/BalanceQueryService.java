@@ -35,9 +35,8 @@ public class BalanceQueryService {
     }
 
     public BalanceQueryResult getBalance(String accountId, String balanceType, String currency) {
-        if (!accountMetaStore.contains(accountId)) {
-            throw new AccountNotFoundException(accountId);
-        }
+        Account account = accountMetaStore.get(accountId)
+                .orElseThrow(() -> new AccountNotFoundException(accountId));
 
         boolean allowNegative = balanceTypeConfigStore.get(balanceType)
                 .map(BalanceTypeConfig::allowNegative)
@@ -56,14 +55,14 @@ public class BalanceQueryService {
             positions.put("CURRENT", BigDecimal.ZERO);
         }
 
-        return BalanceQueryResult.aggregated(accountId, balanceType, currency, positions, allowNegative);
+        return BalanceQueryResult.aggregated(accountId, balanceType, currency, positions,
+                allowNegative, account.accountType().name());
     }
 
     public BalanceQueryResult getBalanceByPosition(String accountId, String balanceType,
                                                     String position, String currency) {
-        if (!accountMetaStore.contains(accountId)) {
-            throw new AccountNotFoundException(accountId);
-        }
+        Account account = accountMetaStore.get(accountId)
+                .orElseThrow(() -> new AccountNotFoundException(accountId));
 
         boolean allowNegative = balanceTypeConfigStore.get(balanceType)
                 .map(BalanceTypeConfig::allowNegative)
@@ -72,19 +71,22 @@ public class BalanceQueryService {
         AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, position, currency);
         BalanceEntry entry = balanceStore.get(key).orElse(BalanceEntry.zero());
 
-        return BalanceQueryResult.single(accountId, balanceType, position, currency, entry.amount(), allowNegative);
+        return BalanceQueryResult.single(accountId, balanceType, position, currency,
+                entry.amount(), allowNegative, account.accountType().name());
     }
 
     public List<BalanceQueryResult> getBatchBalances(List<AccountBalanceKey> keys) {
         List<BalanceQueryResult> results = new ArrayList<>();
         for (var key : keys) {
+            Account account = accountMetaStore.get(key.accountId())
+                    .orElseThrow(() -> new AccountNotFoundException(key.accountId()));
             boolean allowNegative = balanceTypeConfigStore.get(key.balanceType())
                     .map(BalanceTypeConfig::allowNegative)
                     .orElse(false);
             BalanceEntry entry = balanceStore.get(key).orElse(BalanceEntry.zero());
             results.add(BalanceQueryResult.single(
                     key.accountId(), key.balanceType(), key.position(), key.currency(),
-                    entry.amount(), allowNegative));
+                    entry.amount(), allowNegative, account.accountType().name()));
         }
         return results;
     }

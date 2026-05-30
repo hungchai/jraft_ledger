@@ -56,6 +56,27 @@
           }
         },
         {
+          "name": "Get Account",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "pm.test('Has accountId', () => pm.expect(pm.response.json().accountId).to.eql(pm.collectionVariables.get('account_id')));",
+                  "pm.test('Has accountType', () => pm.expect(pm.response.json().accountType).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
           "name": "Create Company Account",
           "request": {
             "method": "POST",
@@ -204,6 +225,33 @@
             },
             "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
           }
+        },
+        {
+          "name": "Account Not Found — errorDetails",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status REJECTED', () => pm.expect(json.status).to.eql('REJECTED'));",
+                  "pm.test('errorCode ACCOUNT_NOT_FOUND', () => pm.expect(json.errorCodes).to.include('ACCOUNT_NOT_FOUND'));",
+                  "pm.test('errorDetails.accountId present', () => pm.expect(json.errorDetails).to.have.property('accountId'));",
+                  "pm.test('errorDetails.accountId equals GHOST_ACC', () => pm.expect(json.errorDetails.accountId).to.eql('GHOST_ACC'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"GHOST-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"amount\": \"100.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"GHOST_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Ghost\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
         }
       ]
     },
@@ -212,6 +260,25 @@
       "item": [
         {
           "name": "Get Balance (aggregated positions)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has accountId', () => pm.expect(json.accountId).to.eql(pm.collectionVariables.get('account_id')));",
+                  "pm.test('Has balanceType', () => pm.expect(json.balanceType).to.eql('AVAILABLE_BALANCE'));",
+                  "pm.test('Has currency', () => pm.expect(json.currency).to.eql('USD'));",
+                  "pm.test('Has amount', () => pm.expect(json.amount).to.be.a('number'));",
+                  "pm.test('Has accountType', () => pm.expect(json.accountType).to.be.a('string').and.not.empty);",
+                  "pm.test('Has dataSource', () => pm.expect(json.dataSource).to.eql('STATE_MACHINE'));",
+                  "pm.test('Has positions', () => pm.expect(json.positions).to.be.an('object'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "header": [],
@@ -245,6 +312,21 @@
         },
         {
           "name": "Get Company Balance (COMPANY_FX_ACC)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has accountId', () => pm.expect(json.accountId).to.eql(pm.collectionVariables.get('company_id')));",
+                  "pm.test('Has accountType COMPANY', () => pm.expect(json.accountType).to.eql('COMPANY'));",
+                  "pm.test('Has dataSource', () => pm.expect(json.dataSource).to.eql('STATE_MACHINE'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "header": [],
@@ -302,6 +384,33 @@
               "raw": "[\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" },\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"LOCKED\", \"currency\": \"USD\" },\n  { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" }\n]"
             },
             "url": { "raw": "{{base_url}}/ledger/balances/batch", "host": ["{{base_url}}"], "path": ["ledger", "balances", "batch"] }
+          }
+        },
+        {
+          "name": "Negative: Missing balanceType (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.expect(pm.response.code).to.eql(400));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has error message', () => pm.expect(json.message).to.include('balanceType'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" }
+              ]
+            }
           }
         }
       ]
