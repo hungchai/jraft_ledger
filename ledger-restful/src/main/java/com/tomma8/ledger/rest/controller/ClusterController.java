@@ -67,12 +67,16 @@ public class ClusterController {
         }
 
         long appliedIndex = raftNodeManager.getStateMachine().getLastAppliedIndex();
+        long smRaftLogIndex = raftNodeManager.getStateMachine().getLedgerStateMachine().getRaftLogIndex();
+        long smJournalSeq = raftNodeManager.getStateMachine().getLedgerStateMachine().getJournalSequence();
 
         Map<String, Object> status = new HashMap<>();
         status.put("nodeId", nodeId);
         status.put("isLeader", raftNodeManager.isLeader());
         status.put("term", nodeRole.getTerm());
         status.put("lastAppliedIndex", appliedIndex);
+        status.put("smRaftLogIndex", smRaftLogIndex);
+        status.put("smJournalSeq", smJournalSeq);
 
         String peersEnv = System.getenv("PEER_NODES");
         List<String> peers = peersEnv != null

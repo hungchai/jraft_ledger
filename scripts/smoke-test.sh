@@ -153,6 +153,65 @@ R=$(curl -s "$BASE/ledger/balances?accountId=$CLIENT_ACC&balanceType=AVAILABLE_B
 check "balance still 700.00" "700.00" "$R"
 
 echo ""
+echo "=== Raft Cluster Consistency Checks ==="
+
+# Helper: extract JSON field value
+jsonval() {
+  echo "$1" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$2',''))" 2>/dev/null
+}
+
+# Determine peer node URLs from BASE
+NODE1="${BASE}"
+NODE2="${BASE/8081/8082}"
+NODE3="${BASE/8081/8083}"
+
+# A. Multi-node balance consistency
+echo "[A] Cross-node balance consistency for $CLIENT_ACC"
+B1=$(curl -s "$NODE1/ledger/balances?accountId=$CLIENT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD")
+B2=$(curl -s "$NODE2/ledger/balances?accountId=$CLIENT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD")
+B3=$(curl -s "$NODE3/ledger/balances?accountId=$CLIENT_ACC&balanceType=AVAILABLE_BALANCE&currency=USD")
+AMT1=$(jsonval "$B1" amount)
+AMT2=$(jsonval "$B2" amount)
+AMT3=$(jsonval "$B3" amount)
+check "balance identical node1 vs node2" "$AMT1" "$AMT2"
+check "balance identical node1 vs node3" "$AMT1" "$AMT3"
+check "balance identical node2 vs node3" "$AMT2" "$AMT3"
+
+# B. Raft index consistency
+echo "[B] Raft index consistency"
+R1=$(curl -s "$NODE1/ledger/cluster/raft-status")
+R2=$(curl -s "$NODE2/ledger/cluster/raft-status")
+R3=$(curl -s "$NODE3/ledger/cluster/raft-status")
+LAI1=$(jsonval "$R1" lastAppliedIndex)
+LAI2=$(jsonval "$R2" lastAppliedIndex)
+LAI3=$(jsonval "$R3" lastAppliedIndex)
+SMR1=$(jsonval "$R1" smRaftLogIndex)
+SMR2=$(jsonval "$R2" smRaftLogIndex)
+SMR3=$(jsonval "$R3" smRaftLogIndex)
+JRS1=$(jsonval "$R1" smJournalSeq)
+JRS2=$(jsonval "$R2" smJournalSeq)
+JRS3=$(jsonval "$R3" smJournalSeq)
+# lastAppliedIndex may differ by 1 (leader applies before followers).
+# smRaftLogIndex and smJournalSeq must be exact — they track journal-creating ops only.
+LAI_DIFF=$((LAI1 - LAI2))
+LAI_DIFF="${LAI_DIFF#-}"  # absolute value
+check "lastAppliedIndex within 1 across nodes" "1" "$( [ "$LAI_DIFF" -le 1 ] && echo 1 || echo 0 )"
+check "smRaftLogIndex identical across nodes" "$SMR1" "$SMR2"
+check "smJournalSeq identical across nodes" "$JRS1" "$JRS2"
+
+# C. MySQL projection consistency
+echo "[C] MySQL projection consistency"
+MYSQL_AMT=$(docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN \
+  -e "SELECT amount FROM account_balance WHERE account_account_id = '$CLIENT_ACC' AND balance_type = 'AVAILABLE_BALANCE' AND currency = 'USD'" 2>/dev/null || echo "")
+if [ -n "$MYSQL_AMT" ]; then
+  # MySQL returns DECIMAL with trailing zeros (e.g. 700.00000000), strip for comparison
+  MYSQL_AMT_TRIMMED=$(echo "$MYSQL_AMT" | sed 's/\.0*$//')
+  check "MySQL balance matches SM" "$MYSQL_AMT_TRIMMED" "$AMT1"
+else
+  echo "  SKIP: MySQL not reachable"
+fi
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] && echo "SMOKE TESTS PASSED" || echo "SMOKE TESTS FAILED"
 exit $FAIL

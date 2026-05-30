@@ -24,9 +24,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -56,12 +53,6 @@ public class LedgerStateMachine {
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
 
-    private final ExecutorService persistExecutor = Executors.newFixedThreadPool(2, r -> {
-        Thread t = new Thread(r, "persist-writer");
-        t.setDaemon(true);
-        return t;
-    });
-
     public void setOutboxStore(com.tomma8.ledger.rocksdb.OutboxStore outboxStore) {
         this.outboxStore = outboxStore;
     }
@@ -88,59 +79,36 @@ public class LedgerStateMachine {
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
         if (rocksDB == null) return;
-        // Serialize state for async write — collect all bytes on apply thread
-        byte[] journalBytes, idempotencyBytes;
-        List<byte[]> lineBytesList, balanceBytesList;
-        List<String> lineKeys, balanceKeys;
+        // Synchronous RocksDB write — ensures snapshot consistency on restart.
+        // Previously async (persistExecutor) which caused RocksDB to lag behind
+        // in-memory state. On restart, restoreFromSnapshot() loaded stale data,
+        // causing Raft log replay to double-apply or skip entries.
         try {
-            journalBytes = objectMapper.writeValueAsBytes(journal);
-            lineBytesList = new ArrayList<>(journal.lines().size());
-            lineKeys = new ArrayList<>(journal.lines().size());
+            WriteBatch batch = new WriteBatch();
+            byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
+            batch.put(rocksDB.getHandle("journal"),
+                    journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
             for (var line : journal.lines()) {
-                lineBytesList.add(objectMapper.writeValueAsBytes(line));
-                lineKeys.add(line.journalId() + "#" + line.journalLineId());
+                byte[] lineBytes = objectMapper.writeValueAsBytes(line);
+                String lineKey = line.journalId() + "#" + line.journalLineId();
+                batch.put(rocksDB.getHandle("journal_line"),
+                        lineKey.getBytes(StandardCharsets.UTF_8), lineBytes);
             }
-            balanceBytesList = new ArrayList<>(balanceUpdates.size());
-            balanceKeys = new ArrayList<>(balanceUpdates.size());
             for (var entry : balanceUpdates.entrySet()) {
                 AccountBalanceKey key = entry.getKey();
                 String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
-                balanceBytesList.add(objectMapper.writeValueAsBytes(entry.getValue()));
-                balanceKeys.add(keyStr);
+                byte[] balanceBytes = objectMapper.writeValueAsBytes(entry.getValue());
+                batch.put(rocksDB.getHandle("balance"),
+                        keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
-            idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
+            byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
+            batch.put(rocksDB.getHandle("idempotency"),
+                    idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), idempotencyBytes);
+            rocksDB.write(batch);
+            if (outboxStore != null) outboxStore.flush();
         } catch (Exception e) {
-            log.error("RocksDB serialization failed", e);
-            return; // Best-effort — don't block apply path
+            log.error("RocksDB write failed for journalId={}", journal.journalId(), e);
         }
-        // Submit async write to background thread pool
-        final byte[] fb = journalBytes;
-        final byte[] ib = idempotencyBytes;
-        final List<byte[]> flb = lineBytesList;
-        final List<String> flk = lineKeys;
-        final List<byte[]> fbl = balanceBytesList;
-        final List<String> fbk = balanceKeys;
-        final String jid = journal.journalId();
-        persistExecutor.submit(() -> {
-            try {
-                WriteBatch batch = new WriteBatch();
-                batch.put(rocksDB.getHandle("journal"), jid.getBytes(StandardCharsets.UTF_8), fb);
-                for (int i = 0; i < flb.size(); i++) {
-                    batch.put(rocksDB.getHandle("journal_line"),
-                            flk.get(i).getBytes(StandardCharsets.UTF_8), flb.get(i));
-                }
-                for (int i = 0; i < fbl.size(); i++) {
-                    batch.put(rocksDB.getHandle("balance"),
-                            fbk.get(i).getBytes(StandardCharsets.UTF_8), fbl.get(i));
-                }
-                batch.put(rocksDB.getHandle("idempotency"),
-                        idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), ib);
-                rocksDB.write(batch);
-                if (outboxStore != null) outboxStore.flush();
-            } catch (Exception e) {
-                log.error("Async RocksDB write failed for journalId={}", jid, e);
-            }
-        });
     }
 
     private static final ObjectMapper objectMapper = new ObjectMapper()

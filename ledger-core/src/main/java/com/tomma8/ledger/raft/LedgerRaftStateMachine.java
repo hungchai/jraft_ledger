@@ -194,14 +194,16 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     @Override
     public boolean onSnapshotLoad(SnapshotReader reader) {
         try {
-            // Prefer the SnapshotReader (from leader transfer), fall back to local RocksDB
             if (reader.listFiles() != null && !reader.listFiles().isEmpty()) {
                 String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
                 byte[] data = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath));
                 ledgerStateMachine.restoreFromBytes(data);
                 log.info("Snapshot loaded from leader transfer");
             } else {
-                ledgerStateMachine.restoreFromSnapshot();
+                // No fallback to local RocksDB — stale local snapshot caused
+                // balance divergence across nodes (non-deterministic replay).
+                // Let SOFAJRaft replay from its log instead.
+                log.info("No snapshot files from leader — will replay from Raft log");
             }
             return true;
         } catch (Exception e) {

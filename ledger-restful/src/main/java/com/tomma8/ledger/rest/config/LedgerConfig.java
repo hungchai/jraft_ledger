@@ -161,12 +161,10 @@ public class LedgerConfig {
             sm.setRocksDB(rocksDBManager);
             sm.setOutboxStore(outboxStore);
             sm.setPersistAfterApply(true);
-            try {
-                sm.restoreFromSnapshot();
-                log.info("StateMachine restored from RocksDB snapshot");
-            } catch (Exception e) {
-                log.info("No snapshot found — starting fresh");
-            }
+            // Snapshot restore happens via onSnapshotLoad() from leader transfer
+            // during Raft startup. Local RocksDB restore removed — stale local
+            // snapshots caused non-deterministic replay and balance divergence.
+            log.info("StateMachine wired — snapshot will load via Raft leader transfer");
         } else {
             log.info("RocksDB not available — running in-memory only");
         }
@@ -199,6 +197,7 @@ public class LedgerConfig {
 
     @Bean
     public ClusterController clusterController(NodeRole nodeRole,
+            MeterRegistry meterRegistry,
             @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager) {
         return new ClusterController(nodeRole, raftNodeManager);
     }
@@ -207,6 +206,7 @@ public class LedgerConfig {
     public RaftNodeManager raftNodeManager(
             LedgerStateMachine ledgerStateMachine,
             NodeRole nodeRole,
+            MeterRegistry meterRegistry,
             @org.springframework.beans.factory.annotation.Value("${ledger.raft.group-id:ledger-group-1}") String groupId) {
         String nodeId   = System.getenv("NODE_ID");
         String peers    = System.getenv("PEER_NODES");
@@ -221,6 +221,16 @@ public class LedgerConfig {
         LedgerRaftStateMachine fsm = new LedgerRaftStateMachine(ledgerStateMachine)
                 .withNodeRole(nodeRole);
         fsm.setNodeId(nodeId);
+
+        // Register Raft gauges for Prometheus
+        Gauge.builder("ledger.raft.is_leader", () -> fsm.isLeader() ? 1.0 : 0.0)
+                .description("Raft leader status: 1 = leader, 0 = follower")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
+        Gauge.builder("ledger.raft.last_applied_index", fsm::getLastAppliedIndex)
+                .description("Raft last applied index (monotonic, per node)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
 
         String[] peerArr = peers.split(",");
         StringBuilder raftPeers = new StringBuilder();
