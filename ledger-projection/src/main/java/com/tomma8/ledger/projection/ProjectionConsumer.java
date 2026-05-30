@@ -10,6 +10,9 @@ import com.tomma8.ledger.dao.mapper.ProjectionEventLogMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.apache.ibatis.session.ExecutorType;
+import org.apache.ibatis.session.SqlSession;
+import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -17,10 +20,12 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 @Service
 public class ProjectionConsumer {
@@ -29,39 +34,81 @@ public class ProjectionConsumer {
     private static final ObjectMapper mapper = new ObjectMapper()
             .registerModule(new JavaTimeModule());
 
-    private final JournalMapper journalMapper;
-    private final AccountMapper accountMapper;
-    private final AccountBalanceMapper accountBalanceMapper;
-    private final ProjectionEventLogMapper eventLogMapper;
+    private final SqlSessionFactory sqlSessionFactory;
     private final SnowflakeIdGenerator idGenerator;
 
-    // Projection lag tracking: last event timestamp (epoch millis)
+    // In-memory cache: accountId → surrogate PK
+    private final ConcurrentHashMap<String, Long> accountIdCache = new ConcurrentHashMap<>();
+    // Journal PK cache: journalId → surrogate PK (dedup journal inserts)
+    private final ConcurrentHashMap<String, Long> journalPkCache = new ConcurrentHashMap<>();
+
+    // Async balance processing
+    private final ConflationQueue balanceQueue = new ConflationQueue();
+    private final Thread balanceWorker;
+
+    // Metrics
     private final AtomicLong lastEventTimestamp = new AtomicLong(System.currentTimeMillis());
-    // Counter: total events processed
-    private final AtomicLong eventsProcessed = new AtomicLong(0);
+    private final LongAdder eventsProcessed = new LongAdder();
+    private final LongAdder balanceWrites = new LongAdder();
 
-    public ProjectionConsumer(JournalMapper journalMapper,
-                              AccountMapper accountMapper,
-                              AccountBalanceMapper accountBalanceMapper,
-                              ProjectionEventLogMapper eventLogMapper,
+    public ProjectionConsumer(SqlSessionFactory sqlSessionFactory,
                               MeterRegistry meterRegistry) {
-        this.journalMapper = journalMapper;
-        this.accountMapper = accountMapper;
-        this.accountBalanceMapper = accountBalanceMapper;
-        this.eventLogMapper = eventLogMapper;
+        this.sqlSessionFactory = sqlSessionFactory;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
+        this.balanceWorker = Thread.ofPlatform().daemon()
+                .name("projection-balance-worker")
+                .start(this::balanceWorkerLoop);
 
-        // Expose projection lag: seconds since last processed event
         Gauge.builder("ledger.projection.seconds.since.last.event", this,
                 pc -> (System.currentTimeMillis() - pc.lastEventTimestamp.get()) / 1000.0)
-                .description("Seconds since last projection event was processed. High values indicate consumer lag or stall.")
-                .baseUnit("seconds")
-                .register(meterRegistry);
+                .description("Seconds since last projection event was processed.")
+                .baseUnit("seconds").register(meterRegistry);
 
-        // Expose total events processed
-        Gauge.builder("ledger.projection.events.processed", eventsProcessed, AtomicLong::doubleValue)
-                .description("Total number of projection events processed since startup.")
-                .register(meterRegistry);
+        Gauge.builder("ledger.projection.events.processed", eventsProcessed, LongAdder::doubleValue)
+                .description("Total projection events processed.").register(meterRegistry);
+
+        Gauge.builder("ledger.projection.balance.queue.depth", balanceQueue, ConflationQueue::size)
+                .description("Pending conflated balance updates.").register(meterRegistry);
+
+        Gauge.builder("ledger.projection.balance.writes", balanceWrites, LongAdder::doubleValue)
+                .description("Total balance SQL writes after conflation.").register(meterRegistry);
+    }
+
+    // ============================================================
+    // Balance worker — drains conflation queue, batch upserts MySQL
+    // ============================================================
+
+    private void balanceWorkerLoop() {
+        log.info("Balance worker started");
+        var batch = new ArrayList<BalanceUpdate>(200);
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                if (balanceQueue.isEmpty()) {
+                    Thread.sleep(5);
+                    continue;
+                }
+                batch.clear();
+                int drained = balanceQueue.drainTo(batch, 200);
+                if (drained == 0) continue;
+
+                try (SqlSession session = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
+                    AccountBalanceMapper bm = session.getMapper(AccountBalanceMapper.class);
+                    for (var bu : batch) {
+                        bm.upsertBalance(bu.accountPk(), bu.accountId(), bu.balanceType(), bu.currency(),
+                                bu.amount(), bu.position(), bu.accountSeq(), bu.lastJournalId());
+                    }
+                    session.flushStatements();
+                    session.commit();
+                }
+                balanceWrites.add(drained);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                log.error("Balance worker error", e);
+            }
+        }
+        log.info("Balance worker stopped");
     }
 
     // ============================================================
@@ -72,7 +119,6 @@ public class ProjectionConsumer {
     public void onAccountCreated(String message) {
         try {
             JsonNode event = mapper.readTree(message);
-
             String accountId   = event.get("accountId").asText();
             String accountType = event.get("accountType").asText();
             String displayName = event.has("displayName") ? event.get("displayName").asText() : "";
@@ -80,13 +126,18 @@ public class ProjectionConsumer {
             String status      = event.get("status").asText();
             LocalDateTime createdAt = toLocalDateTime(event.get("createdAt"));
 
-            accountMapper.upsertAccount(accountId, accountType, displayName, ownerId, status, createdAt);
+            try (SqlSession session = sqlSessionFactory.openSession()) {
+                AccountMapper am = session.getMapper(AccountMapper.class);
+                am.upsertAccount(accountId, accountType, displayName, ownerId, status, createdAt);
+                session.commit();
+                Long pk = am.findIdByAccountId(accountId);
+                if (pk != null) accountIdCache.put(accountId, pk);
+            }
             lastEventTimestamp.set(System.currentTimeMillis());
-            eventsProcessed.incrementAndGet();
-            log.info("Projected account: {} type={} status={}", accountId, accountType, status);
+            eventsProcessed.increment();
 
         } catch (Exception e) {
-            log.error("Failed to project account event: {}", message, e);
+            log.error("Failed to project account event", e);
         }
     }
 
@@ -96,10 +147,13 @@ public class ProjectionConsumer {
 
     @KafkaListener(topics = "ledger.balance.change.v1", groupId = "ledger-projection")
     public void onBalanceChange(String message) {
+        processBalanceEvent(message);
+    }
+
+    private void processBalanceEvent(String message) {
         try {
             JsonNode event = mapper.readTree(message);
 
-            // --- Parse event fields ---
             String eventId         = event.has("eventId") ? event.get("eventId").asText() : "";
             String journalId       = event.get("journalId").asText();
             String journalLineId   = event.get("journalLineId").asText();
@@ -118,107 +172,79 @@ public class ProjectionConsumer {
             int configVersion      = event.has("configVersion") ? event.get("configVersion").asInt() : 1;
             BigDecimal preBalance  = event.has("preBalance") ? toBigDecimal(event.get("preBalance")) : BigDecimal.ZERO;
 
-            // --- Step 1: Ensure account exists (do NOT overwrite accountType) ---
-            // Only upsert if account doesn't exist. The onAccountCreated listener
-            // sets the correct accountType; we shouldn't overwrite it with "CLIENT".
-            Long accountPk = accountMapper.findIdByAccountId(accountId);
+            // Resolve account PK (cache-first)
+            Long accountPk = accountIdCache.get(accountId);
             if (accountPk == null) {
-                // Account not yet projected from ledger.account.v1 — insert placeholder
-                // This is a fallback; correct type will be set by onAccountCreated listener
-                accountMapper.upsertAccount(accountId, "CLIENT", "", null, "ACTIVE", LocalDateTime.now());
-                accountPk = accountMapper.findIdByAccountId(accountId);
-            }
-            if (accountPk == null) {
-                log.error("Failed to get account surrogate id for {} after upsert attempt", accountId);
-                return;
-            }
-
-            // --- Step 2: Insert journal header (idempotent by journal_id UNIQUE) ---
-            long journalPk = idGenerator.nextId();
-            boolean journalInserted = false;
-            try {
-                journalMapper.insertJournal(
-                        journalPk,
-                        journalId,
-                        "REVERSAL".equals(commandType) ? "REVERSAL" : "NORMAL",
-                        requestId, commandType, businessRef,
-                        valueDate, "CONFIRMED", false, LocalDateTime.now());
-                journalInserted = true;
-            } catch (DuplicateKeyException e) {
-                // Journal already exists from a previous event replay
-                Long existingPk = journalMapper.findIdByJournalId(journalId);
-                if (existingPk != null) {
-                    journalPk = existingPk;
+                try (SqlSession session = sqlSessionFactory.openSession()) {
+                    AccountMapper am = session.getMapper(AccountMapper.class);
+                    accountPk = am.findIdByAccountId(accountId);
+                    if (accountPk == null) {
+                        am.upsertAccount(accountId, "CLIENT", "", null, "ACTIVE", LocalDateTime.now());
+                        session.commit();
+                        accountPk = am.findIdByAccountId(accountId);
+                    }
+                    if (accountPk == null) {
+                        log.error("Failed to get account PK for {}", accountId);
+                        return;
+                    }
+                    accountIdCache.put(accountId, accountPk);
                 }
-                log.debug("Journal {} already exists, using id={}", journalId, journalPk);
             }
 
-            // --- Step 3: Upsert account_balance with accountSeq guard ---
-            accountBalanceMapper.upsertBalance(
-                    accountPk, accountId, balanceType, currency,
-                    postBalance, position, accountSeq, journalId);
-
-            Long balancePk = accountBalanceMapper.findIdByKey(accountId, balanceType, currency);
-            if (balancePk == null) {
-                log.error("Failed to get account_balance id for {} {} {}", accountId, balanceType, currency);
-                return;
-            }
-
-            // --- Step 4: Verify balance change was applied (seq guard) ---
-            Long storedSeq = accountBalanceMapper.getAccountSeq(balancePk);
-            if (storedSeq != null && storedSeq > accountSeq) {
-                // Stale event — seq guard rejected the update. Log and skip journal_line.
-                log.debug("Stale event: incoming seq={} < stored seq={} for {} {} {}",
-                        accountSeq, storedSeq, accountId, balanceType, currency);
-                try {
-                    eventLogMapper.insertEvent(accountId, balanceType, currency, accountSeq,
-                            journalLineId, journalId, eventId, "SKIPPED_STALE");
-                } catch (DuplicateKeyException ignored) {
-                    // already logged
+            // Journal PK cache: dedup journal inserts (4 events share same journal).
+            // Insert journal in non-batch session so DuplicateKeyException is caught immediately.
+            long journalPk;
+            Long cachedJournalPk = journalPkCache.get(journalId);
+            if (cachedJournalPk != null) {
+                journalPk = cachedJournalPk;
+            } else {
+                journalPk = idGenerator.nextId();
+                try (SqlSession session = sqlSessionFactory.openSession()) {
+                    JournalMapper jm = session.getMapper(JournalMapper.class);
+                    try {
+                        jm.insertJournal(journalPk, journalId,
+                                "REVERSAL".equals(commandType) ? "REVERSAL" : "NORMAL",
+                                requestId, commandType, businessRef,
+                                valueDate, "CONFIRMED", false, LocalDateTime.now());
+                        session.commit();
+                    } catch (DuplicateKeyException e) {
+                        Long pk = jm.findIdByJournalId(journalId);
+                        if (pk != null) journalPk = pk;
+                    }
                 }
-                return;
+                journalPkCache.put(journalId, journalPk);
             }
 
-            // --- Step 5: Insert journal_line (idempotent by journal_line_id UNIQUE) ---
-            // Only insert if journal was newly created (avoid re-insert on replay)
+            // Insert journal_line + event_log (non-batch: DuplicateKeyException caught at call site)
             long linePk = idGenerator.nextId();
-            try {
-                journalMapper.insertJournalLine(
-                        linePk,
-                        journalPk,             // journal_id (surrogate → journal.id)
-                        accountPk,             // account_id (surrogate → account.id)
-                        balancePk,             // account_balance_id (surrogate → account_balance.id)
-                        journalLineId,         // journal_line_id (business key)
-                        journalId,             // journal_journal_id (denormalized business key)
-                        accountId,             // account_account_id (denormalized business key)
-                        "",                    // leg_id (not available per-event; set empty)
-                        balanceType,
-                        position,
-                        currency,
-                        entryType,
-                        amount,
-                        preBalance,
-                        postBalance,
-                        configVersion,
-                        LocalDateTime.now());
-            } catch (DuplicateKeyException e) {
-                log.debug("JournalLine {} already exists", journalLineId);
+            try (SqlSession session = sqlSessionFactory.openSession()) {
+                JournalMapper jm = session.getMapper(JournalMapper.class);
+                ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
+
+                try {
+                    jm.insertJournalLine(linePk, journalPk, accountPk, 0L,
+                            journalLineId, journalId, accountId, "",
+                            balanceType, position, currency, entryType,
+                            amount, preBalance, postBalance, configVersion, LocalDateTime.now());
+                } catch (DuplicateKeyException ignored) {}
+
+                try {
+                    em.insertEvent(accountId, balanceType, currency, accountSeq,
+                            journalLineId, journalId, eventId, "APPLIED");
+                } catch (DuplicateKeyException ignored) {}
+
+                session.commit();
             }
 
-            // --- Step 6: Record in projection_event_log (last, after all mutations) ---
-            try {
-                eventLogMapper.insertEvent(accountId, balanceType, currency, accountSeq,
-                        journalLineId, journalId, eventId, "APPLIED");
-            } catch (DuplicateKeyException e) {
-                log.debug("Event already logged: {} seq={}", journalLineId, accountSeq);
-            }
+            // Async balance via conflation queue
+            balanceQueue.offer(new BalanceUpdate(accountPk, accountId, balanceType, currency,
+                    postBalance, position, accountSeq, journalId));
 
             lastEventTimestamp.set(System.currentTimeMillis());
-            eventsProcessed.incrementAndGet();
-            log.info("Projected: {} {} {} {} seq={} balance={}", journalId, accountId, entryType, amount, accountSeq, postBalance);
+            eventsProcessed.increment();
 
         } catch (Exception e) {
-            log.error("Failed to project event: {}", message, e);
+            log.error("Failed to project event", e);
         }
     }
 

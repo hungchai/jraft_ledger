@@ -9,6 +9,12 @@ spring:
     consumer:
       group-id: ledger-projection
       auto-offset-reset: earliest
+      max-poll-records: 500
+      fetch-min-size: 1048576
+      fetch-max-wait: 500ms
+    listener:
+      type: single
+      concurrency: 1
 
 mybatis:
   configuration:
