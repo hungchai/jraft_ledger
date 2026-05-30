@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS journal (
 CREATE TABLE IF NOT EXISTS account (
     id               BIGINT AUTO_INCREMENT PRIMARY KEY  COMMENT 'Surrogate primary key. account_id in child tables references this.',
     account_id       VARCHAR(64) NOT NULL UNIQUE        COMMENT 'Business-facing account identifier',
-    account_type     VARCHAR(16) NOT NULL               COMMENT 'Account type: CLIENT | COMPANY | NOSTRO | SUSPENSE',
+    account_type     VARCHAR(16) NOT NULL               COMMENT 'Account type: CLIENT | COMPANY | NOSTRO | SUSPENSE | CONTROL | BANK',
     display_name     VARCHAR(128)                       COMMENT 'Human-readable display name for the account',
     owner_id         VARCHAR(64)                        COMMENT 'Owning entity / legal person identifier',
     status           VARCHAR(16) NOT NULL               COMMENT 'Account lifecycle status: ACTIVE | FROZEN | CLOSED',

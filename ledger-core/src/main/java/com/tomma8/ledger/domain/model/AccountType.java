@@ -5,5 +5,6 @@ public enum AccountType {
     COMPANY,
     SUSPENSE,
     NOSTRO,
-    CONTROL
+    CONTROL,
+    BANK
 }

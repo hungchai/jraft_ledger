@@ -302,16 +302,31 @@ public class LedgerConfig {
                     "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
 
             // Bootstrap institutional accounts — routed through state machine so events are emitted
-            String[] bootstrapAccounts = {"COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD"};
-            for (String id : bootstrapAccounts) {
-                if (!accountMetaStore.contains(id)) {
+            // SYSTEM_SEED needs USD + BTC (used as counterparty for k6/stress seed postings)
+            // BANK_SETTLEMENT is the counterparty for deposits/withdrawals (allow negative)
+            record BootstrapAccount(String id, com.tomma8.ledger.domain.model.AccountType type,
+                                    java.util.List<com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization> balances) {}
+            java.util.List<BootstrapAccount> bootstrapAccounts = java.util.List.of(
+                    new BootstrapAccount("COMPANY_FX_ACC", com.tomma8.ledger.domain.model.AccountType.COMPANY,
+                            java.util.List.of(new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))),
+                    new BootstrapAccount("NOSTRO_USD", com.tomma8.ledger.domain.model.AccountType.COMPANY,
+                            java.util.List.of(new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))),
+                    new BootstrapAccount("SUSPENSE_USD", com.tomma8.ledger.domain.model.AccountType.SUSPENSE,
+                            java.util.List.of(new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"))),
+                    new BootstrapAccount("SYSTEM_SEED", com.tomma8.ledger.domain.model.AccountType.COMPANY,
+                            java.util.List.of(
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"),
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"))),
+                    new BootstrapAccount("BANK_SETTLEMENT", com.tomma8.ledger.domain.model.AccountType.BANK,
+                            java.util.List.of(
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "USD"),
+                                    new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization("AVAILABLE_BALANCE", "BTC"))));
+            for (var ba : bootstrapAccounts) {
+                if (!accountMetaStore.contains(ba.id())) {
                     ledgerStateMachine.applyAccountCreate(new com.tomma8.ledger.domain.command.AccountCreateCommand(
-                            "bootstrap-" + id, id,
-                            com.tomma8.ledger.domain.model.AccountType.COMPANY,
-                            "Bootstrap " + id, null,
-                            java.util.List.of(new com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitialization(
-                                    "AVAILABLE_BALANCE", "USD"))));
-                    log.info("Bootstrap account created: {}", id);
+                            "bootstrap-" + ba.id(), ba.id(), ba.type(),
+                            "Bootstrap " + ba.id(), null, ba.balances()));
+                    log.info("Bootstrap account created: {} (type={})", ba.id(), ba.type());
                 }
             }
         };

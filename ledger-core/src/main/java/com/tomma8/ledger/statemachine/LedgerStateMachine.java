@@ -352,7 +352,8 @@ public class LedgerStateMachine {
                     boolean isInstitutional = account.isPresent() && (
                             account.get().accountType() == AccountType.COMPANY ||
                             account.get().accountType() == AccountType.NOSTRO ||
-                            account.get().accountType() == AccountType.SUSPENSE);
+                            account.get().accountType() == AccountType.SUSPENSE ||
+                            account.get().accountType() == AccountType.BANK);
                     if (!isInstitutional) {
                         allSingleLineInstitutional = false;
                         break;
@@ -420,13 +421,14 @@ public class LedgerStateMachine {
                 }
 
                 if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
-                    // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE)
+                    // Auto top-up for institutional accounts (COMPANY/NOSTRO/SUSPENSE/BANK)
                     // Only CLIENT/CONTROL accounts have strict balance enforcement
                     var account = accountMetaStore.get(line.accountId());
                     boolean isInstitutional = account.isPresent() && (
                             account.get().accountType() == AccountType.COMPANY ||
                             account.get().accountType() == AccountType.NOSTRO ||
-                            account.get().accountType() == AccountType.SUSPENSE);
+                            account.get().accountType() == AccountType.SUSPENSE ||
+                            account.get().accountType() == AccountType.BANK);
                     if (!isInstitutional) {
                         var result = CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE,
                                 Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),

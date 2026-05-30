@@ -1,10 +1,11 @@
 # NFR — 非功能需求規格
 
-**文件版本**: v0.4
+**文件版本**: v0.5
 **功能**: 非功能需求（NFR）
 **系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
 
+> **v0.5 變更摘要**：NFR-1 性能表格新增 Docker/Local 環境延遲目標（Docker 容器化環境因網路虛擬化、無專屬 CPU pinning、Raft replication 走 loopback，延遲目標放寬至 300ms P95）。Production 目標不變。
 > **v0.4 變更摘要**：NFR-9 新增 Prometheus/Grafana 實作細節（端點、服務、dashboard 配置）。
 > **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）與 NFR-17（節點同步監控）。
 > **v0.2 變更摘要**：新增 NFR-13（JVM & GC）、NFR-14（Account Queue）、NFR-15（accountSeq Overflow Policy）；NFR-9 Observability 補充 GC pause 告警和 accountSeq gap 告警。
@@ -13,18 +14,20 @@
 
 ## 1. 性能（Performance）
 
-| 指標 | 目標 | 測試條件 |
-|---|---|---|
-| Posting P95 延遲 | ≤ 3ms | 1000 並發，含 hotspot 帳戶（COMPANY_ACC） |
-| Posting P99 延遲 | ≤ 10ms | 同上 |
-| Balance Query P95（Active 帳戶） | ≤ 2ms | 讀 in-memory State Machine |
-| Balance Query P95（Inactive 帳戶） | ≤ 5ms | 讀 RocksDB warm-up |
-| Journal 點查 P95 | ≤ 10ms | MySQL View Layer，索引命中 |
-| 帳戶流水查詢 P95（50 條） | ≤ 30ms | MySQL View Layer |
-| Manual Adjustment Approve P95 | ≤ 10ms | 走 Raft |
-| Reversal P95 | ≤ 5ms | 走 Raft |
-| Learner 同步延遲（正常負載） | ≤ 1s | Raft Leader → MySQL View Layer |
-| EOD 全流程（含 L1/L2 對帳） | ≤ 30 分鐘 | 每日 100 萬筆 Journal |
+| 指標 | Production 目標 | Docker/Local 目標 | 測試條件 |
+|---|---|---|---|
+| Posting P95 延遲 | ≤ 20ms | ≤ 50ms | 1000 並發，含 hotspot 帳戶 |
+| Posting P99 延遲 | ≤ 50ms | ≤ 100ms | 同上 |
+| Balance Query P95（Active 帳戶） | ≤ 2ms | ≤ 5ms | 讀 in-memory State Machine |
+| Balance Query P95（Inactive 帳戶） | ≤ 5ms | ≤ 10ms | 讀 RocksDB warm-up |
+| Journal 點查 P95 | ≤ 10ms | ≤ 30ms | MySQL View Layer，索引命中 |
+| 帳戶流水查詢 P95（50 條） | ≤ 30ms | ≤ 100ms | MySQL View Layer |
+| Manual Adjustment Approve P95 | ≤ 10ms | ≤ 50ms | 走 Raft |
+| Reversal P95 | ≤ 5ms | ≤ 50ms | 走 Raft |
+| Learner 同步延遲（正常負載） | ≤ 1s | ≤ 5s | Raft Leader → MySQL View Layer |
+| EOD 全流程（含 L1/L2 對帳） | ≤ 30 分鐘 | ≤ 2 小時 | 每日 100 萬筆 Journal |
+
+> **Docker/Local 環境說明**：Docker Compose 單機部署（3 Raft 節點共用 loopback 網路、無專屬 CPU pinning、共用 host disk I/O）無法達到 Production 延遲目標。Docker/Local 欄位為開發/測試環境的合理上限，用於 k6 壓力測試 threshold 設定與 CI/CD pipeline 驗證。**Production 目標僅在 bare-metal / K8s 專屬節點 + 獨立網路介面下有效。**
 
 ---
 

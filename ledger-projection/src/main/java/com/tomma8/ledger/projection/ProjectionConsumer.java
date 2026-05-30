@@ -8,6 +8,8 @@ import com.tomma8.ledger.dao.mapper.AccountMapper;
 import com.tomma8.ledger.dao.mapper.JournalMapper;
 import com.tomma8.ledger.dao.mapper.ProjectionEventLogMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -15,8 +17,10 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class ProjectionConsumer {
@@ -31,15 +35,33 @@ public class ProjectionConsumer {
     private final ProjectionEventLogMapper eventLogMapper;
     private final SnowflakeIdGenerator idGenerator;
 
+    // Projection lag tracking: last event timestamp (epoch millis)
+    private final AtomicLong lastEventTimestamp = new AtomicLong(System.currentTimeMillis());
+    // Counter: total events processed
+    private final AtomicLong eventsProcessed = new AtomicLong(0);
+
     public ProjectionConsumer(JournalMapper journalMapper,
                               AccountMapper accountMapper,
                               AccountBalanceMapper accountBalanceMapper,
-                              ProjectionEventLogMapper eventLogMapper) {
+                              ProjectionEventLogMapper eventLogMapper,
+                              MeterRegistry meterRegistry) {
         this.journalMapper = journalMapper;
         this.accountMapper = accountMapper;
         this.accountBalanceMapper = accountBalanceMapper;
         this.eventLogMapper = eventLogMapper;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
+
+        // Expose projection lag: seconds since last processed event
+        Gauge.builder("ledger.projection.seconds.since.last.event", this,
+                pc -> (System.currentTimeMillis() - pc.lastEventTimestamp.get()) / 1000.0)
+                .description("Seconds since last projection event was processed. High values indicate consumer lag or stall.")
+                .baseUnit("seconds")
+                .register(meterRegistry);
+
+        // Expose total events processed
+        Gauge.builder("ledger.projection.events.processed", eventsProcessed, AtomicLong::doubleValue)
+                .description("Total number of projection events processed since startup.")
+                .register(meterRegistry);
     }
 
     // ============================================================
@@ -59,6 +81,8 @@ public class ProjectionConsumer {
             LocalDateTime createdAt = toLocalDateTime(event.get("createdAt"));
 
             accountMapper.upsertAccount(accountId, accountType, displayName, ownerId, status, createdAt);
+            lastEventTimestamp.set(System.currentTimeMillis());
+            eventsProcessed.incrementAndGet();
             log.info("Projected account: {} type={} status={}", accountId, accountType, status);
 
         } catch (Exception e) {
@@ -189,6 +213,8 @@ public class ProjectionConsumer {
                 log.debug("Event already logged: {} seq={}", journalLineId, accountSeq);
             }
 
+            lastEventTimestamp.set(System.currentTimeMillis());
+            eventsProcessed.incrementAndGet();
             log.info("Projected: {} {} {} {} seq={} balance={}", journalId, accountId, entryType, amount, accountSeq, postBalance);
 
         } catch (Exception e) {

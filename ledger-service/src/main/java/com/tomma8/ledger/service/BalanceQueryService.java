@@ -34,13 +34,30 @@ public class BalanceQueryService {
         this.balanceTypeConfigStore = balanceTypeConfigStore;
     }
 
+    private static boolean isInstitutional(Account account) {
+        return account.accountType() == AccountType.COMPANY
+                || account.accountType() == AccountType.NOSTRO
+                || account.accountType() == AccountType.SUSPENSE
+                || account.accountType() == AccountType.BANK;
+    }
+
+    /**
+     * Effective allowNegative: config value OR institutional bypass.
+     * Matches LedgerStateMachine enforcement — institutional accounts
+     * always allow negative regardless of config.
+     */
+    private boolean effectiveAllowNegative(Account account, String balanceType) {
+        if (isInstitutional(account)) return true;
+        return balanceTypeConfigStore.get(balanceType)
+                .map(BalanceTypeConfig::allowNegative)
+                .orElse(false);
+    }
+
     public BalanceQueryResult getBalance(String accountId, String balanceType, String currency) {
         Account account = accountMetaStore.get(accountId)
                 .orElseThrow(() -> new AccountNotFoundException(accountId));
 
-        boolean allowNegative = balanceTypeConfigStore.get(balanceType)
-                .map(BalanceTypeConfig::allowNegative)
-                .orElse(false);
+        boolean allowNegative = effectiveAllowNegative(account, balanceType);
 
         // Aggregate all positions
         Map<String, BigDecimal> positions = new HashMap<>();
@@ -64,9 +81,7 @@ public class BalanceQueryService {
         Account account = accountMetaStore.get(accountId)
                 .orElseThrow(() -> new AccountNotFoundException(accountId));
 
-        boolean allowNegative = balanceTypeConfigStore.get(balanceType)
-                .map(BalanceTypeConfig::allowNegative)
-                .orElse(false);
+        boolean allowNegative = effectiveAllowNegative(account, balanceType);
 
         AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, position, currency);
         BalanceEntry entry = balanceStore.get(key).orElse(BalanceEntry.zero());
@@ -80,9 +95,7 @@ public class BalanceQueryService {
         for (var key : keys) {
             Account account = accountMetaStore.get(key.accountId())
                     .orElseThrow(() -> new AccountNotFoundException(key.accountId()));
-            boolean allowNegative = balanceTypeConfigStore.get(key.balanceType())
-                    .map(BalanceTypeConfig::allowNegative)
-                    .orElse(false);
+            boolean allowNegative = effectiveAllowNegative(account, key.balanceType());
             BalanceEntry entry = balanceStore.get(key).orElse(BalanceEntry.zero());
             results.add(BalanceQueryResult.single(
                     key.accountId(), key.balanceType(), key.position(), key.currency(),
