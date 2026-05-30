@@ -10,7 +10,26 @@
 #
 set -e
 
-BASE="${1:-http://localhost:8081}"
+# Probe cluster nodes (8081, 8082, 8083) and return the leader URL.
+# If $1 is explicitly provided, use it directly (skip auto-detect).
+find_leader() {
+  if [ -n "${1:-}" ] && [ "$1" != "auto" ]; then
+    echo "$1"
+    return
+  fi
+  for port in 8081 8082 8083; do
+    local url="http://localhost:$port"
+    local role
+    role=$(curl -s --max-time 2 "$url/health" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('role',''))" 2>/dev/null || echo "")
+    if [ "$role" = "LEADER" ]; then
+      echo "$url"
+      return
+    fi
+  done
+  echo "http://localhost:8081"
+}
+
+BASE=$(find_leader "${1:-auto}")
 RESET_ENV="${2:-false}"
 
 # Tunables

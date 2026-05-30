@@ -21,11 +21,34 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)'],
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8082';
+const BASE_URL = __ENV.BASE_URL || findLeader();
 const HOTSPOT_ACC = __ENV.HOTSPOT_ACC || 'STRESS-HOT-CO-001';
 const CLIENT_PREFIX = __ENV.CLIENT_PREFIX || 'STRESS-CLI-';
 // FX rate: 1 BTC = 100,000 USD
 const BTC_USD_RATE = 100000;
+
+// Probe cluster nodes and return the leader URL.
+// Override with BASE_URL env var to skip auto-detect.
+function findLeader() {
+  const ports = [8081, 8082, 8083];
+  for (const port of ports) {
+    const url = `http://localhost:${port}`;
+    try {
+      const res = http.get(`${url}/health`, { timeout: '2s' });
+      if (res.status === 200) {
+        const body = JSON.parse(res.body);
+        if (body.role === 'LEADER') {
+          console.log(`Leader found: ${url} (term ${body.term})`);
+          return url;
+        }
+      }
+    } catch (e) {
+      // node not reachable, try next
+    }
+  }
+  console.log('No leader found, falling back to http://localhost:8083');
+  return 'http://localhost:8083';
+}
 
 let initialized = false;
 
