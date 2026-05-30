@@ -23,7 +23,7 @@ export const options = {
 
 const HOTSPOT_ACC = __ENV.HOTSPOT_ACC || 'STRESS-HOT-CO-001';
 const CLIENT_PREFIX = __ENV.CLIENT_PREFIX || 'STRESS-CLI-';
-const BTC_USDT_RATE = 100000; // 1 BTC = 100,000 USDT
+const BTC_USDT_RATE = 73091.09; // 1 BTC = 73091.09 USDT
 
 // Precision: BTC = 8dp, USDT = 16dp
 const BTC_DP = 8;
