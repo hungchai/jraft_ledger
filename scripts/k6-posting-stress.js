@@ -121,7 +121,7 @@ export function setup() {
     ],
   }), 'create-hotspot');
 
-  // 2. Seed hotspot 100 BTC from SYSTEM_SEED (8dp)
+  // 2. Seed hotspot 1000 BTC from SYSTEM_SEED (8dp)
   const ok2 = setupPost('/ledger/postings', JSON.stringify({
     requestId: `seed-btc-${Date.now()}`,
     businessEventType: 'DEPOSIT',
@@ -130,7 +130,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '100.00000000',
+      amount: '5000.00000000',
       currency: 'BTC',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -139,7 +139,7 @@ export function setup() {
     }],
   }), 'seed-hotspot-BTC');
 
-  // 3. Seed hotspot 20M USDT from SYSTEM_SEED (16dp)
+  // 3. Seed hotspot 200M USDT from SYSTEM_SEED (16dp)
   const ok3 = setupPost('/ledger/postings', JSON.stringify({
     requestId: `seed-usdt-${Date.now()}`,
     businessEventType: 'DEPOSIT',
@@ -148,7 +148,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '20000000.0000000000000000',
+      amount: '200000000.0000000000000000',
       currency: 'USDT',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -185,7 +185,7 @@ export function setup() {
         {
           legId: 'leg-1',
           postingType: 'DEPOSIT',
-          amount: '10000.0000000000000000',
+          amount: '1000000.0000000000000000',
           currency: 'USDT',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -195,7 +195,7 @@ export function setup() {
         {
           legId: 'leg-2',
           postingType: 'DEPOSIT',
-          amount: '0.10000000',
+          amount: '10.00000000',
           currency: 'BTC',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
