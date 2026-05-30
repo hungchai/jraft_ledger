@@ -16,7 +16,7 @@ public interface JournalMapper {
     // ============================================================
 
     @Insert("<script>" +
-            "INSERT INTO journal (id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at) " +
+            "INSERT IGNORE INTO journal (id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at) " +
             "VALUES (#{id}, #{journalId}, #{journalType}, #{requestId}, #{businessEventType}, #{businessEventRef}, #{valueDate}, #{status}, #{crossPeriod}, #{createdAt})" +
             "</script>")
     int insertJournal(@Param("id") long id,
@@ -50,7 +50,7 @@ public interface JournalMapper {
     // ============================================================
 
     @Insert("<script>" +
-            "INSERT INTO journal_line (" +
+            "INSERT IGNORE INTO journal_line (" +
             "  id, journal_id, account_id, account_balance_id, " +
             "  journal_line_id, journal_journal_id, account_account_id, " +
             "  leg_id, balance_type, position, currency, entry_type, " +

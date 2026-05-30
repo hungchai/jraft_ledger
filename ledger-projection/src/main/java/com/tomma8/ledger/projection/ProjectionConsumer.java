@@ -15,7 +15,6 @@ import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
@@ -39,7 +38,7 @@ public class ProjectionConsumer {
 
     // In-memory cache: accountId → surrogate PK
     private final ConcurrentHashMap<String, Long> accountIdCache = new ConcurrentHashMap<>();
-    // Journal PK cache: journalId → surrogate PK (dedup journal inserts)
+    // Journal PK cache: journalId → surrogate PK (INSERT IGNORE makes this optional but saves SELECT)
     private final ConcurrentHashMap<String, Long> journalPkCache = new ConcurrentHashMap<>();
 
     // Async balance processing
@@ -207,7 +206,7 @@ public class ProjectionConsumer {
                                 requestId, commandType, businessRef,
                                 valueDate, "CONFIRMED", false, LocalDateTime.now());
                         session.commit();
-                    } catch (DuplicateKeyException e) {
+                    } catch (org.springframework.dao.DuplicateKeyException e) {
                         Long pk = jm.findIdByJournalId(journalId);
                         if (pk != null) journalPk = pk;
                     }
@@ -215,24 +214,17 @@ public class ProjectionConsumer {
                 journalPkCache.put(journalId, journalPk);
             }
 
-            // Insert journal_line + event_log (non-batch: DuplicateKeyException caught at call site)
+            // Insert journal_line + event_log (INSERT IGNORE handles duplicates silently)
             long linePk = idGenerator.nextId();
             try (SqlSession session = sqlSessionFactory.openSession()) {
                 JournalMapper jm = session.getMapper(JournalMapper.class);
                 ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
-
-                try {
-                    jm.insertJournalLine(linePk, journalPk, accountPk, 0L,
-                            journalLineId, journalId, accountId, "",
-                            balanceType, position, currency, entryType,
-                            amount, preBalance, postBalance, configVersion, LocalDateTime.now());
-                } catch (DuplicateKeyException ignored) {}
-
-                try {
-                    em.insertEvent(accountId, balanceType, currency, accountSeq,
-                            journalLineId, journalId, eventId, "APPLIED");
-                } catch (DuplicateKeyException ignored) {}
-
+                jm.insertJournalLine(linePk, journalPk, accountPk, 0L,
+                        journalLineId, journalId, accountId, "",
+                        balanceType, position, currency, entryType,
+                        amount, preBalance, postBalance, configVersion, LocalDateTime.now());
+                em.insertEvent(accountId, balanceType, currency, accountSeq,
+                        journalLineId, journalId, eventId, "APPLIED");
                 session.commit();
             }
 

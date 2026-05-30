@@ -10,7 +10,7 @@ public interface ProjectionEventLogMapper {
      * rejects exact Kafka duplicates. Stale events (lower account_seq) are caught by
      * the account_balance seq guard, not here.
      */
-    @Insert("INSERT INTO projection_event_log (account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status) " +
+    @Insert("INSERT IGNORE INTO projection_event_log (account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status) " +
             "VALUES (#{accountAccountId}, #{balanceType}, #{currency}, #{accountSeq}, #{journalLineId}, #{journalJournalId}, #{eventId}, #{status})")
     int insertEvent(@Param("accountAccountId") String accountAccountId,
                     @Param("balanceType") String balanceType,
