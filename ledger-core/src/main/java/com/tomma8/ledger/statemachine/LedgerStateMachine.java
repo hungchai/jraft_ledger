@@ -77,12 +77,9 @@ public class LedgerStateMachine {
         }
     }
 
-    private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates, IdempotencyEntry idempotencyEntry) {
+    private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
+                              IdempotencyEntry idempotencyEntry, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
-        // Synchronous RocksDB write — ensures snapshot consistency on restart.
-        // Previously async (persistExecutor) which caused RocksDB to lag behind
-        // in-memory state. On restart, restoreFromSnapshot() loaded stale data,
-        // causing Raft log replay to double-apply or skip entries.
         try {
             WriteBatch batch = new WriteBatch();
             byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
@@ -104,8 +101,13 @@ public class LedgerStateMachine {
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
                     idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), idempotencyBytes);
+            // Write outbox events inside same WriteBatch for atomicity
+            for (BalanceChangeEvent event : outboxEvents) {
+                byte[] key = ("outbox:" + event.eventId()).getBytes(StandardCharsets.UTF_8);
+                byte[] value = objectMapper.writeValueAsBytes(event);
+                batch.put(rocksDB.getHandle("outbox"), key, value);
+            }
             rocksDB.write(batch);
-            if (outboxStore != null) outboxStore.flush();
         } catch (Exception e) {
             log.error("RocksDB write failed for journalId={}", journal.journalId(), e);
         }
@@ -484,8 +486,9 @@ public class LedgerStateMachine {
 
             journalStore.put(journalId, journal);
 
-            // 7. Atomic balance update with accountSeq increment + event publishing
+            // 7. Atomic balance update with accountSeq increment + collect events
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
+            List<BalanceChangeEvent> eventsToPublish = new ArrayList<>(reusableLines.size());
             for (int i = 0; i < reusableLines.size(); i++) {
                 var lwl = reusableLines.get(i);
                 var line = lwl.line();
@@ -506,7 +509,7 @@ public class LedgerStateMachine {
                 balanceStore.put(key, updated);
                 balanceUpdates.put(key, updated);
 
-                // Publish BalanceChangeEvent (F-011)
+                // Collect BalanceChangeEvent for atomic outbox + post-commit publish
                 if (eventListener != null) {
                     BigDecimal delta = line.entryType() == EntryType.DEBIT
                             ? lwl.amount().negate()
@@ -540,18 +543,23 @@ public class LedgerStateMachine {
                             valueDate,
                             valueDate,
                             Map.of("sourceSystem", "LEDGER"));
-                    eventListener.onEvent(event);
-                    if (outboxStore != null) outboxStore.enqueue(event);
+                    eventsToPublish.add(event);
                 }
             }
 
             // 8. Idempotency
             IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(requestId, journalId, now);
             idempotencyStore.put(requestId, idempotencyEntry);
-            long tEventsEnd = System.nanoTime();
 
-            // 9. Atomic RocksDB persistence
-            persistApply(journal, balanceUpdates, idempotencyEntry);
+            // 9. Atomic RocksDB persistence (journal + balance + idempotency + outbox in one WriteBatch)
+            persistApply(journal, balanceUpdates, idempotencyEntry, eventsToPublish);
+
+            // 10. Publish to Kafka ONLY after outbox is committed to RocksDB
+            // Callback-driven deletion: KafkaEventPublisher callback calls markSent()
+            // after broker ack. Because outbox is already in RocksDB, the delete is safe.
+            for (BalanceChangeEvent event : eventsToPublish) {
+                eventListener.onEvent(event);
+            }
             long tEnd = System.nanoTime();
             long totalMs = (tEnd - t0) / 1_000_000;
             if (totalMs > 50) {
@@ -802,7 +810,7 @@ public class LedgerStateMachine {
             idempotencyStore.put(cmd.requestId(), idempotencyEntry);
 
             // Atomic RocksDB persistence
-            persistApply(reversalJournal, balanceUpdates, idempotencyEntry);
+            persistApply(reversalJournal, balanceUpdates, idempotencyEntry, List.of());
             // Also persist updated original journal
             if (rocksDB != null) {
                 try {
