@@ -31,6 +31,10 @@ ledger:
       balance-change: ledger.balance.change.v1
       posting-completion: ledger.posting.completion.v1
 
+outbox:
+  poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}
+  batch-size: ${OUTBOX_BATCH_SIZE:100}
+
 server:
   port: ${SERVER_PORT:8080}
 

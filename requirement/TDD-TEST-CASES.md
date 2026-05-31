@@ -1,10 +1,14 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.9
+**版本**: v0.11
 **日期**: 2026-05-31
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.11 變更摘要**：新增 TC-F011-10~12（Outbox callback-driven deletion）。驗證 KafkaEventPublisher send callback 刪除 outbox、AsyncOutboxPublisher 不再直接調用 markSent、熱路徑 callback 即時清理 outbox。
+>
+> **v0.10 變更摘要**：新增 Module 20（F-015 Config Abstraction），新增 TC-F015-01~05。ConfigService 介面 + SpringConfigService 實作，移除 LedgerConfig 中所有 `System.getenv().getOrDefault()`。
+>
 > **v0.9 變更摘要**：修正 AccountBalanceKey 描述為 v0.7 三維鍵 (accountId, balanceType, currency)，移除 position 作為物理鍵組件。TC-F008-30、TC-F002-11 調整 AccountBalanceKey 斷言以匹配 v0.7 修正。
 >
 > **v0.8 變更摘要**：新增 enriched error detail 測試案例（TC-F002-16~20、TC-F004-08~09、TC-F008-31~35、TC-F013-11~12）。CommandResult 與 IdempotencyEntry 新增 `errorDetails` Map，用於在 REJECTED 回應中攜帶觸發錯誤的實體上下文（accountId、journalId、balanceType、currency、position 等）。
@@ -842,6 +846,21 @@ TC-F011-09  multiPosition_sameAccount_independentSeqPerPosition【v0.3 新增】
             Then:  CURRENT event.accountSeq == 11
                    LOCKED event.accountSeq == 6
                    （不同 position 的 seq 各自遞增，互不影響）
+
+TC-F011-10  kafkaPublisher_callback_deletesOutbox_onSuccess【v0.11 新增】
+            Given: CF_OUTBOX 中有一筆殘留事件（模擬 crash 後重啟）
+            When:  KafkaEventPublisher.onEvent(event) 發送成功，flush() 等待 callback
+            Then:  outboxStore.readPending() 返回空（callback 已調用 markSent）
+
+TC-F011-11  asyncOutboxPublisher_doesNotCallMarkSentDirectly【v0.11 新增】
+            Given: CF_OUTBOX 中有一筆事件，使用 FakePublisher（不觸發 callback）
+            When:  AsyncOutboxPublisher 掃描並調用 kafkaPublisher.onEvent(event)
+            Then:  事件仍保留在 CF_OUTBOX（AsyncOutboxPublisher 未直接調用 markSent）
+
+TC-F011-12  hotPath_callback_deletesOutboxImmediately【v0.11 新增】
+            Given: StateMachine 熱路徑發送，KafkaEventPublisher 已設置 outboxStore
+            When:  applyPosting → onEvent(event) → enqueue → flush → publisher.flush()
+            Then:  outboxStore.readPending() 返回空（熱路徑 callback 即時清理）
 ```
 
 ---
@@ -1200,6 +1219,24 @@ TC-PROJ-10  journalLine_missingSurrogateLogicallyAllowed
 
 ---
 
+## Module 20：Config Abstraction（F-015）
+
+### 20.1 ConfigService 介面與 SpringConfigService 實作
+
+**前置條件**：ledger-restful 模組 clean compile 成功
+
+**測試內容**：驗證 ConfigService 介面完整、SpringConfigService 正確讀取 @Value、LedgerConfig 所有 System.getenv() 替換為 ConfigService 注入
+
+| ID | 測試內容 | Given | When | Then |
+|----|---------|-------|------|------|
+| TC-F015-01 | ConfigService 介面四個方法簽名正確 | — | 讀取 ConfigService.class | 介面包含 get(String,String)、getInt(String,int)、getLong(String,long)、getBool(String,boolean) |
+| TC-F015-02 | SpringConfigService 正確讀取 @Value 含 yml 預設值 | application.yml 含 `ledger.rocksdb.path: /custom/path` | new SpringConfigService() → get("ledger.rocksdb.path", "default") | 返回 "/custom/path" |
+| TC-F015-03 | SpringConfigService fallback 到 @Value 預設值 | application.yml 不含 `kafka.bootstrap.servers` | get("kafka.bootstrap.servers", "fallback") | 返回 "fallback" |
+| TC-F015-04 | LedgerConfig 所有 System.getenv().getOrDefault() 已替換 | LedgerConfig.java | 全文 grep "System.getenv()" | 0 結果 |
+| TC-F015-05 | LedgerConfig 注入 ConfigService | LedgerConfig 類 | @Autowired(required=false) ConfigService | Spring 容器成功啟動，ConfigService 不為 null |
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
@@ -1223,7 +1260,7 @@ Phase 3 — 讀路徑
 
 Phase 3.5 — accountSeq【v0.2 新增】
   TC-F008-19~26（State Machine accountSeq）
-  TC-F011-01~09（BalanceChangeEvent accountSeq + position）
+  TC-F011-01~12（BalanceChangeEvent accountSeq + position + outbox callback deletion）
 
 Phase 4 — 對帳與帳期
   TC-F007-*（Reconciliation）
@@ -1248,4 +1285,7 @@ Phase 8 — Projection MySQL View Layer v2【v0.6 新增】
   TC-PROJ-03~05（account_balance accountSeq guard）
   TC-PROJ-06~08（ProjectionConsumer full idempotent flow）
   TC-PROJ-09~10（surrogate FK chain — consistency + no-FK tolerance）
+
+Phase 9 — Config Abstraction【v0.10 新增】
+  TC-F015-01~05（ConfigService + SpringConfigService + LedgerConfig refactor）
 ```

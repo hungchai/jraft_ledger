@@ -95,3 +95,15 @@ Status: ✅ PASS
 Summary: Completed live data recon against running Docker stack. 204 balances verified cross-node, journal counts match smJournalSeq (69,023), balance sums = 0, zero orphan records. Dispatched ops-sre to formalize `scripts/data-recon.sh`.
 Findings: 4 accounts have no account_balance rows (lazy projection, API returns 0 — expected). journal_line sharded across _0.._3; business key cross-ref clean.
 Next: ops-sre
+
+## [2026-05-31 16:05] Step 1 — ledger-orchestrator (F-015 Config Abstraction)
+Status: ✅ PASS
+Summary: Wrote F-015 spec + TC-F015-01~05 (LEDGER-PLATFORM-FULL-REQUIREMENTS.md v0.10→v0.12, TDD-TEST-CASES.md v0.9→v0.10). Implemented: ConfigService interface (ledger-core), SpringConfigService (ledger-restful, reads @Value + yml + env vars). LedgerConfig refactored: zero System.getenv() calls remaining. application.yml extended with outbox.* keys.
+Findings: none
+Next: docker-compose up → smoke-test.sh → qa-engineer traceability
+
+## [2026-05-31 17:54] Step 2 — ledger-orchestrator (F-015 impl + fix)
+Status: ✅ PASS
+Summary: Fixed ledger-restful tests (ApplicationContext load). Fixed: (1) @Value key mismatch — raft.server.port → ledger.raft.server-port. (2) RaftNodeManager null in standalone → added @Autowired(required=false) to accountQueueManager parameter. ledger-restful tests: 10/10 PASS.
+Findings: none
+Next: docker build → smoke tests → commit

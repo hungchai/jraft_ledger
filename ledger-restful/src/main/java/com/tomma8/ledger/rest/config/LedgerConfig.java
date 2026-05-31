@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.config;
 
+import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.model.BalanceTypeConfig;
 import com.tomma8.ledger.domain.model.NegativeSemantics;
 import com.tomma8.ledger.domain.model.SignConvention;
@@ -59,12 +60,12 @@ public class LedgerConfig {
     }
 
     @Bean
-    public NodeRole nodeRole(org.springframework.core.env.Environment env) {
+    public NodeRole nodeRole(ConfigService cs, org.springframework.core.env.Environment env) {
         NodeRole nr = new NodeRole();
-        String envNodeId = System.getenv("NODE_ID");
-        String nodeName = envNodeId != null ? envNodeId : "standalone";
+        String nodeId = cs.get("NODE_ID", null);
+        String nodeName = nodeId != null ? nodeId : "standalone";
         if (env.acceptsProfiles(org.springframework.core.env.Profiles.of("test"))
-                || System.getenv("PEER_NODES") == null) {
+                || cs.get("PEER_NODES", null) == null) {
             nr.setLeader(nodeName, 0);
         } else {
             nr.setFollower(nodeName);
@@ -83,8 +84,8 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public RocksDBManager rocksDBManager() {
-        String dbPath = System.getenv().getOrDefault("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
+    public RocksDBManager rocksDBManager(ConfigService cs) {
+        String dbPath = cs.get("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
         RocksDBManager mgr = new RocksDBManager(dbPath);
         try {
             mgr.open();
@@ -103,20 +104,21 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public KafkaEventPublisher kafkaEventPublisher() {
-        String brokers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
-        return new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs) {
+        String brokers = cs.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
+        KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+        publisher.setOutboxStore(outboxStore);
+        return publisher;
     }
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
     public AsyncOutboxPublisher asyncOutboxPublisher(OutboxStore outboxStore,
                                                       KafkaEventPublisher kafkaPublisher,
-                                                      MeterRegistry meterRegistry) {
-        Duration pollInterval = Duration.ofSeconds(
-                Long.parseLong(System.getenv().getOrDefault("OUTBOX_POLL_INTERVAL_SECS", "10")));
-        int batchSize = Integer.parseInt(
-                System.getenv().getOrDefault("OUTBOX_BATCH_SIZE", "100"));
+                                                      MeterRegistry meterRegistry,
+                                                      ConfigService cs) {
+        Duration pollInterval = Duration.ofSeconds(cs.getInt("OUTBOX_POLL_INTERVAL_SECS", 10));
+        int batchSize = cs.getInt("OUTBOX_BATCH_SIZE", 100);
         AsyncOutboxPublisher publisher = new AsyncOutboxPublisher(
                 outboxStore, kafkaPublisher, pollInterval, batchSize);
 
@@ -207,11 +209,12 @@ public class LedgerConfig {
             LedgerStateMachine ledgerStateMachine,
             NodeRole nodeRole,
             MeterRegistry meterRegistry,
+            ConfigService cs,
             @org.springframework.beans.factory.annotation.Value("${ledger.raft.group-id:ledger-group-1}") String groupId) {
-        String nodeId   = System.getenv("NODE_ID");
-        String peers    = System.getenv("PEER_NODES");
-        String raftPath = System.getenv().getOrDefault("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
-        String raftPort = System.getenv().getOrDefault("RAFT_SERVER_PORT", "28080");
+        String nodeId   = cs.get("NODE_ID", null);
+        String peers    = cs.get("PEER_NODES", null);
+        String raftPath = cs.get("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
+        int raftPort    = cs.getInt("RAFT_SERVER_PORT", 28080);
 
         if (nodeId == null || peers == null) {
             log.info("Raft cluster not configured — running standalone");
@@ -251,7 +254,8 @@ public class LedgerConfig {
     }
 
     @Bean(destroyMethod = "close")
-    public AccountQueueManager accountQueueManager(RaftNodeManager raftNodeManager,
+    public AccountQueueManager accountQueueManager(
+            @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
                                                    MeterRegistry meterRegistry) {
         if (raftNodeManager == null) {
             log.info("AccountQueueManager not created — standalone mode");

@@ -1,7 +1,7 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.10  
+**版本**: v0.12  
 **日期**: 2026-05-31  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
@@ -31,8 +31,9 @@
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
+| v0.13 | 2026-05-31 | F-011：修正 Outbox Pattern 為 callback-driven deletion，消除重複發布；KafkaEventPublisher send callback 負責刪除 outbox，AsyncOutboxPublisher 不再直接調用 markSent | Ledger Platform Team |
+| v0.12 | 2026-05-31 | 新增 F-015 Config Abstraction：ConfigService 介面 + SpringConfigService 實作，移除 LedgerConfig 中所有 `System.getenv().getOrDefault()`，支援 Apollo / Nacos 等配置中心熱更新 | Ledger Platform Team |
 | v0.11 | 2026-05-31 | 文件一致性修復：統一錯誤碼（INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH）、AccountBalanceKey 三維鍵 v0.7 修正、F-002/F-004 失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails`、F-010 補充 freeze/unfreeze/close 冪等鍵、NFR-1 Posting P95 修正為 ≤3ms、docs 更新 snapshot/WriteBatch/balance query 一致性說明 | Ledger Platform Team |
-| v0.10 | 2026-05-31 | §6.2 MySQL View Layer：完整 5 表 schema（account, journal, account_balance, journal_line, projection_event_log）含 DECIMAL(34,16)、ShardingSphere 分片、accountSeq guard、INSERT IGNORE 冪等。§6.4 Kafka Message Format：`ledger.account.v1` / `ledger.balance.change.v1` 訊息結構定義 | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
 
@@ -57,6 +58,7 @@
 | F-011 | Balance Change Event / Kafka Outbox | Kafka 餘額變動事件發布 (accountSeq, Outbox Pattern) |
 | F-013 | Idempotency & Hotspot Concurrency | 冪等性 (requestId) 與熱點帳戶 Account Queue 併發處理 |
 | F-014 | Java Client SDK | Java 客戶端 SDK：Leader 發現、自動重試、同步/非同步 API |
+| F-015 | Config Abstraction | 配置抽象層：Spring `@Value` 注入，支援 Apollo / Nacos 等配置中心熱更新 |
 | OPS-001 | SRE 運維指南 | RocksDB 壓實備份、Raft 復原、MySQL 同步修復、DR 演練 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
 | Appendix A | Module Dependency & Docker Compose | 模組依賴圖與部署架構 |
@@ -3456,7 +3458,7 @@ POST /ledger/accounts/{accountId}/balance-types
 
 # F-011 Balance Change Event / Kafka Outbox — 功能需求規格
 
-**文件版本**: v0.1  
+**文件版本**: v0.2  
 **功能**: F-011 Balance Change Event & Kafka Outbox（餘額變動事件發布）  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
@@ -3589,16 +3591,20 @@ State Machine apply()
         ├─ 2. 生成 Journal + JournalLine
         ├─ 3. 構建 BalanceChangeEvent（含 accountSeq）
         ├─ 4. 寫入 RocksDB CF_OUTBOX（與帳務數據在同一 WriteBatch）
-        └─ 5. 更新 idempotencyStore
+        ├─ 5. 調用 KafkaEventPublisher.onEvent(event) — 熱路徑發送
+        │       └─ producer.send(record, callback)
+        │               ├─ 發送成功 → callback 調用 outboxStore.markSent(eventId)
+        │               └─ 發送失敗 → 保留在 CF_OUTBOX
+        └─ 6. 更新 idempotencyStore
                 │
                 │  （異步，非阻塞）
                 ▼
-        AsyncKafkaPublisher
+        AsyncOutboxPublisher（輪詢殘留事件）
                 │
-                ├─ 輪詢 CF_OUTBOX（每 100ms 或累積 500 條）
-                ├─ 批量發送至 Kafka Topic: ledger.balance.change.v1
-                ├─ 發送成功 → 刪除 CF_OUTBOX 記錄
-                └─ 發送失敗 → 保留記錄，下次重試
+                ├─ 輪詢 CF_OUTBOX（每 10s，batch=100）
+                ├─ 對每個殘留事件調用 KafkaEventPublisher.onEvent(event)
+                │   （復用同一 callback 路徑）
+                └─ 不直接調用 markSent — 由 callback 處理
 ```
 
 ### 4.2 Kafka Topic 配置
@@ -3623,10 +3629,11 @@ CF_OUTBOX:
   
 特性：
   - 與帳務數據在同一 WriteBatch，原子寫入
-  - AsyncKafkaPublisher 定時掃描並發送
-  - 發送成功後異步刪除（不阻塞 apply）
+  - KafkaEventPublisher 發送 callback 負責刪除 outbox（callback-driven deletion）
+  - AsyncOutboxPublisher 僅掃描「殘留事件」（callback 未觸發的場景：進程崩潰、Kafka 短暫不可用）
   - 發送失敗保留，下次掃描時重試（at-least-once）
   - 節點重啟後，CF_OUTBOX 中未發送事件會被重新發送
+  - **不重复發布保證**：同一事件無論由熱路徑（StateMachine）或背景掃描（AsyncOutboxPublisher）發送，均經由同一 `KafkaEventPublisher` callback 路徑刪除 outbox，避免重複發布
 ```
 
 ### 4.4 At-Least-Once 語義與消費者去重
@@ -4583,6 +4590,135 @@ long successCount = futures.stream()
 | AC-09 | SDK 內部 overhead ≤ 0.5ms（不含網路） | 效能測試 |
 | AC-10 | 效能測試模組可通過 SDK 替代 raw HTTP/RestTemplate | 整合測試 |
 | AC-11 | SDK 關閉（`close()`）後所有資源（連線池、執行緒池）正確釋放 | 單元測試 |
+
+
+---
+
+# F-015 Config Abstraction — 配置抽象層
+
+**文件版本**: v0.1  
+**功能**: F-015 Config Abstraction（配置抽象層）  
+**系統**: Next-Gen Internal Ledger Platform  
+**狀態**: Draft for Review  
+**日期**: 2026-05-31  
+**依賴**: F-008 State Machine、F-011 Kafka Outbox、ADR-001
+
+---
+
+## 1. 概述
+
+### 1.1 問題
+
+當前 `LedgerConfig.java` 直接使用 `System.getenv().getOrDefault(...)` 讀取配置，導致：
+
+- 配置中心（Apollo / Nacos）無法覆蓋
+- 測試時 mock 困難
+- 配置值分散，無法集中管理
+
+### 1.2 目標
+
+引入 `ConfigService` 介面，統一所有配置讀取。Spring `@Value` 注入，支援配置中心熱更新。
+
+---
+
+## 2. ConfigService 介面
+
+```java
+public interface ConfigService {
+    String get(String key, String def);
+    int getInt(String key, int def);
+    long getLong(String key, long def);
+    boolean getBool(String key, boolean def);
+}
+```
+
+### 2.1 Spring 實作（預設）
+
+```java
+@Service
+public class SpringConfigService implements ConfigService {
+    @Value("${ledger.rocksdb.path:/tmp/ledger/rocksdb}")
+    private String rocksdbPath;
+
+    @Value("${kafka.bootstrap.servers:localhost:9092}")
+    private String kafkaBootstrapServers;
+
+    @Value("${outbox.poll.interval.secs:10}")
+    private int outboxPollIntervalSecs;
+
+    @Value("${outbox.batch.size:100}")
+    private int outboxBatchSize;
+
+    @Value("${ledger.raft.data.path:/tmp/ledger/raft}")
+    private String raftDataPath;
+
+    @Value("${raft.server.port:28080}")
+    private int raftServerPort;
+
+    @Override public String get(String key, String def) { /* resolve from env/yml/apollo */ }
+    @Override public int getInt(String key, int def) { /* ... */ }
+    @Override public long getLong(String key, long def) { /* ... */ }
+    @Override public boolean getBool(String key, boolean def) { /* ... */ }
+}
+```
+
+---
+
+## 3. 受影響的 Bean
+
+| Bean | 配置項 | 預設值 |
+|------|--------|--------|
+| `rocksDBManager` | `ledger.rocksdb.path` | `/tmp/ledger/rocksdb` |
+| `kafkaEventPublisher` | `kafka.bootstrap.servers` | `localhost:9092` |
+| `asyncOutboxPublisher` | `outbox.poll.interval.secs` | `10` |
+| `asyncOutboxPublisher` | `outbox.batch.size` | `100` |
+| `raftNodeManager` | `ledger.raft.data.path` | `/tmp/ledger/raft` |
+| `raftNodeManager` | `raft.server.port` | `28080` |
+| `nodeRole` | `NODE_ID`（直接讀取，無預設） | — |
+
+> `NODE_ID` / `PEER_NODES` 為 Raft 啟動必要參數，維持直接 `System.getenv()` 讀取，null 表示 standalone 模式。
+
+---
+
+## 4. application.yml 預設值
+
+```yaml
+ledger:
+  rocksdb:
+    path: /tmp/ledger/rocksdb
+  raft:
+    data-path: /tmp/ledger/raft
+    server-port: 28080
+kafka:
+  bootstrap-servers: localhost:9092
+outbox:
+  poll-interval-secs: 10
+  batch-size: 100
+```
+
+---
+
+## 5. Apollo 遷移（未來）
+
+Apollo 遷移時，只需：
+
+1. 引入 `apollo-config-api` 依賴
+2. 新增 `@ApolloConfig` 注入
+3. `ConfigService` 實作改為讀取 Apollo `Config` 實例
+
+零業務代碼變更。
+
+---
+
+## 6. 接受標準
+
+| ID | 接受標準 | 測試類型 |
+|----|---------|---------|
+| CC-01 | `ConfigService` 介面定義完整（get / getInt / getLong / getBool） | 單元測試 |
+| CC-02 | `SpringConfigService` 正確讀取 Spring `@Value`（含 yml 預設值） | 單元測試 |
+| CC-03 | `LedgerConfig` 所有 `System.getenv().getOrDefault()` 替換為 `ConfigService` 注入 | 重構驗證 |
+| CC-04 | Apollo 未引入時，`SpringConfigService` 透過 Spring 標準機制讀取 `application.yml` | 整合測試 |
+| CC-05 | `mvn clean compile` + `mvn test` 全量通過 | 全量測試 |
 
 
 ---
