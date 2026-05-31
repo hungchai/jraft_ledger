@@ -31,6 +31,7 @@
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
+| v0.11 | 2026-05-31 | 文件一致性修復：統一錯誤碼（INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH）、AccountBalanceKey 三維鍵 v0.7 修正、F-002/F-004 失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails`、F-010 補充 freeze/unfreeze/close 冪等鍵、NFR-1 Posting P95 修正為 ≤3ms、docs 更新 snapshot/WriteBatch/balance query 一致性說明 | Ledger Platform Team |
 | v0.10 | 2026-05-31 | §6.2 MySQL View Layer：完整 5 表 schema（account, journal, account_balance, journal_line, projection_event_log）含 DECIMAL(34,16)、ShardingSphere 分片、accountSeq guard、INSERT IGNORE 冪等。§6.4 Kafka Message Format：`ledger.account.v1` / `ledger.balance.change.v1` 訊息結構定義 | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
@@ -207,11 +208,13 @@ Account
               └─ balance: 5000.00
 ```
 
-每個餘額由四維鍵唯一定位：
+每個餘額由三維鍵唯一定位（v0.7 修正）：
 
 ```
-(accountId, balanceType, position, currency) → balance
+AccountBalanceKey = (accountId, balanceType, currency)
 ```
+
+Position 為邏輯映射概念，同一 AccountBalanceKey 下以三個獨立欄位追蹤 CURRENT / LOCKED / FROZEN 餘額。
 
 ---
 
@@ -814,12 +817,12 @@ Balance Type 是賬戶在某一業務視角下的餘額視圖，例如：
 ```
 IF allowNegative=false:
   任何 Posting / Adjustment 不得使 Balance 結果 < 0
-  違反時：拒絕請求，返回 BALANCE_FLOOR_BREACH
+  違反時：拒絕請求，返回 INSUFFICIENT_BALANCE
 
 IF allowNegative=true:
   任何 Posting / Adjustment 不得使 Balance 結果 > 0
   （此類 Balance 業務定義上永遠為負或零，正數違反業務語義）
-  違反時：拒絕請求，返回 BALANCE_CEILING_BREACH
+  違反時：拒絕請求，返回 CREDIT_EXCEEDS_LIMIT
 ```
 
 > 這兩條規則是系統的**硬性不可繞過校驗**，無例外，無強制覆蓋。
@@ -1126,11 +1129,11 @@ GET    /admin/ledger/balance-types/{typeCode}/history     -- 查詢配置歷史
 
 # F-002 v2 Posting API — Batch Atomic Posting（Raft 架構更新版）
 
-**文件版本**: v0.2（基於 ADR-001 更新）  
+**文件版本**: v0.2（基於 ADR-001 更新）— 最新 schema 請參見獨立文件 `F002-v2-posting-api.md` v0.4  
 **功能**: F-002 Posting API  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
-**變更摘要**: 寫路徑由 PostgreSQL 直寫改為 Raft State Machine，Balance 校驗由 DB 讀改為 in-memory 讀
+**變更摘要**: 寫路徑由 PostgreSQL 直寫改為 Raft State Machine，Balance 校驗由 DB 讀改為 in-memory 讀。獨立文件 v0.4 已將 `amount` / `currency` 上提至 Leg 層級，JournalLine 不再獨立攜帶這兩個欄位。
 
 ---
 
@@ -1975,13 +1978,11 @@ POST /ledger/journals/{originalJournalId}/reversal
 {
   "requestId": "rev-req-7f3a9b2c-1234-5678-abcd-ef0123456789",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "JOURNAL_ALREADY_REVERSED",
-      "originalJournalId": "JNL-20260516-000012345",
-      "reversalJournalId": "JNL-20260516-000012346"
-    }
-  ]
+  "errorCodes": ["JOURNAL_ALREADY_REVERSED"],
+  "errorDetails": {
+    "originalJournalId": "JNL-20260516-000012345",
+    "reversalJournalId": "JNL-20260516-000012346"
+  }
 }
 ```
 

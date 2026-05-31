@@ -1,6 +1,6 @@
 # F-004 Reversal — Functional Requirements Specification
 
-**Document Version**: v0.1  
+**Document Version**: v0.2 (Failure Response upgraded to v0.9 errorCodes[] + errorDetails format)  
 **Feature**: F-004 Reversal (Reverse an existing Journal)  
 **System**: Next-Gen Internal Ledger Platform  
 **Status**: Draft for Review  
@@ -239,13 +239,11 @@ POST /ledger/journals/{originalJournalId}/reversal
 {
   "requestId": "rev-req-7f3a9b2c-1234-5678-abcd-ef0123456789",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "JOURNAL_ALREADY_REVERSED",
-      "originalJournalId": "JNL-20260516-000012345",
-      "reversalJournalId": "JNL-20260516-000012346"
-    }
-  ]
+  "errorCodes": ["JOURNAL_ALREADY_REVERSED"],
+  "errorDetails": {
+    "originalJournalId": "JNL-20260516-000012345",
+    "reversalJournalId": "JNL-20260516-000012346"
+  }
 }
 ```
 

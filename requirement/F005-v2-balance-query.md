@@ -1,6 +1,6 @@
 # F-005 v2 Balance Query & Snapshot（Raft 架構更新版）
 
-**文件版本**: v0.3（新增 `position` 欄位 — CURRENT/LOCKED/FROZEN 子餘額）  
+**文件版本**: v0.4（修正 AccountBalanceKey 為三維鍵 (accountId, balanceType, currency)，移除 position 作為物理鍵組件）  
 **功能**: F-005 Balance Query & Snapshot  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
@@ -115,7 +115,7 @@ Body: [
 
 ```java
 // In-memory State Machine 的 Balance 儲存結構
-// Key: AccountBalanceKey = (accountId, balanceType, position, currency)
+// Key: AccountBalanceKey = (accountId, balanceType, currency)
 // Value: BalanceEntry
 
 class BalanceEntry {

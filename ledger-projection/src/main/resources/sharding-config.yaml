@@ -28,12 +28,25 @@ rules:
       keyGenerateStrategy:
         column: id
         keyGeneratorName: snowflake
+    projection_event_log:
+      actualDataNodes: ds_0.projection_event_log_${0..3}
+      tableStrategy:
+        standard:
+          shardingColumn: account_account_id
+          shardingAlgorithmName: event-log-account-hash
+      keyGenerateStrategy:
+        column: id
+        keyGeneratorName: snowflake
 
   shardingAlgorithms:
     account-id-hash:
       type: INLINE
       props:
         algorithm-expression: journal_line_${Math.abs(account_account_id.hashCode()) % 4}
+    event-log-account-hash:
+      type: INLINE
+      props:
+        algorithm-expression: projection_event_log_${Math.abs(account_account_id.hashCode()) % 4}
 
   keyGenerators:
     snowflake:
@@ -42,4 +55,5 @@ rules:
         worker-id: 0
 
 props:
-  sql-show: true
+  # Logging every Logic+Actual SQL at INFO crushes projection throughput. Keep off.
+  sql-show: false

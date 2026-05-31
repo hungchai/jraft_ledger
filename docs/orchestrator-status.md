@@ -24,9 +24,9 @@ d689edc feat: bootstrap SYSTEM_SEED + BANK account type + NFR v0.5 + projection 
 - Fixed misleading API response
 
 ### 4. NFR v0.5 — Performance targets (d689edc)
-- Production: Posting P95≤20ms, P99≤50ms
+- Production: Posting P95≤3ms, P99≤10ms
 - Docker/Local: Posting P95≤50ms, P99≤100ms
-- Updated k6 thresholds to match
+- Updated k6 thresholds to match (corrected P95 from 20ms → 3ms per NFR v0.6)
 
 ### 5. Projection lag monitoring (d689edc)
 - `ledger.projection.seconds.since.last.event` Gauge in ProjectionConsumer

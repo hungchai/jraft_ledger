@@ -1,6 +1,6 @@
 # F-005 v2 Balance Query & Snapshot (Raft Architecture Update)
 
-**Document Version**: v0.3 (Updated for `position` field — CURRENT/LOCKED/FROZEN sub-balances)  
+**Document Version**: v0.4 (Corrected AccountBalanceKey to 3D key (accountId, balanceType, currency); position is logical mapping only)  
 **Feature**: F-005 Balance Query & Snapshot  
 **System**: Next-Gen Internal Ledger Platform  
 **Status**: Draft for Review  
@@ -115,7 +115,7 @@ Body: [
 
 ```java
 // In-memory State Machine balance storage structure
-// Key: AccountBalanceKey = (accountId, balanceType, position, currency)
+// Key: AccountBalanceKey = (accountId, balanceType, currency)
 // Value: BalanceEntry
 
 class BalanceEntry {

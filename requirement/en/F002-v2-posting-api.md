@@ -1,6 +1,6 @@
 # F-002 v2 Posting API — Batch Atomic Posting (Raft Architecture Update)
 
-**Document Version**: v0.4 (Added `position` field to JournalLine — supports CURRENT/LOCKED/FROZEN sub-balance types)  
+**Document Version**: v0.5 (Unified V-13 error code to POSITION_BALANCE_FLOOR_BREACH; failure Response upgraded to v0.9 errorCodes[] + errorDetails format)  
 **Feature**: F-002 Posting API  
 **System**: Next-Gen Internal Ledger Platform  
 **Status**: Draft for Review  
@@ -194,7 +194,7 @@ The `position` field distinguishes different sub-balance states within the same 
 | V-10 | The corresponding balanceType + position + currency for each account must be initialized | `BALANCE_NOT_INITIALIZED` |
 | V-11 | For balances with `allowNegative=false`, DEBIT must not result in a balance below 0 | `INSUFFICIENT_BALANCE` |
 | V-12 | For balances with `allowNegative=true` (e.g. `TRADE_AHEAD_BALANCE`), CREDIT must not result in a balance above 0 | `CREDIT_EXCEEDS_LIMIT` |
-| V-13 | For `position = LOCKED` or `FROZEN`, balance cannot go negative | `LOCKED_BALANCE_CANNOT_BE_NEGATIVE` |
+| V-13 | For `position = LOCKED` or `FROZEN`, balance cannot go negative | `POSITION_BALANCE_FLOOR_BREACH` |
 | V-14 | Account is not frozen (`account.status = ACTIVE`) | `ACCOUNT_FROZEN` |
 
 ---
@@ -311,16 +311,14 @@ COMPANY_ACC is a hotspot, but because all requests are serialized within the sam
 {
   "requestId": "req-550e8400-e29b-41d4-a716-446655440001",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "INSUFFICIENT_BALANCE",
-      "accountId": "CLIENT_ACC_001",
-      "balanceType": "AVAILABLE_BALANCE",
-      "currency": "USD",
-      "required": 800000.00,
-      "available": 500000.00
-    }
-  ]
+  "errorCodes": ["INSUFFICIENT_BALANCE"],
+  "errorDetails": {
+    "accountId": "CLIENT_ACC_001",
+    "balanceType": "AVAILABLE_BALANCE",
+    "currency": "USD",
+    "required": 800000.00,
+    "available": 500000.00
+  }
 }
 ```
 

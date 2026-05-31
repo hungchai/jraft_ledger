@@ -21,6 +21,10 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
 
+logging:
+  level:
+    ShardingSphere-SQL: warn
+
 server:
   port: 8089
 

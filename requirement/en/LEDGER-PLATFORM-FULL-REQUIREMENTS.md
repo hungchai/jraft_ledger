@@ -30,6 +30,7 @@ This document contains the complete technical requirements specification for the
 | v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position and their relationships | Ledger Platform Team |
 | v0.5 | 2026-05-23 | Merged docs/architecture.md, docs/persistence-flow.md into Appendix A/B/C; Added F-013 Idempotency & Hotspot Account Concurrency spec | Ledger Platform Team |
 | v0.6 | 2026-05-24 | Added F-011 Balance Change Event / Kafka Outbox, F-013 Idempotency & Hotspot Account Concurrency, F-014 Java Client SDK, OPS-001 SRE Operational Guidelines; Fixed F-007/F-009 header levels; Corrected account_balance schema: position is logical mapping (amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN), removed position physical column | Ledger Platform Team |
+| v0.11 | 2026-05-31 | Doc consistency fixes: unified error codes (INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH), AccountBalanceKey 3D key v0.7 correction, F-002/F-004 failure Response upgraded to v0.9 errorCodes[] + errorDetails, F-010 added freeze/unfreeze/close idempotency key, NFR-1 Posting P95 corrected to ≤3ms, docs updated for snapshot/WriteBatch/balance query consistency | Ledger Platform Team |
 | v0.10 | 2026-05-31 | §6.2 MySQL View Layer: Full 5-table schema (account, journal, account_balance, journal_line, projection_event_log) — DECIMAL(34,16), ShardingSphere sharding, accountSeq guard, INSERT IGNORE. §6.4 Kafka Message Format: `ledger.account.v1` / `ledger.balance.change.v1` with JSON samples | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: Enriched error responses — REJECTED CommandResult now includes `errorDetails` Map with entity context. `errorCodes` array preserved for backward compat | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2: Restructured MySQL schema with surrogate BIGINT FK + denormalized business keys; Removed FOREIGN KEY constraints; Added projection_event_log idempotency guard + accountSeq guard in upsertBalance; All mapper APIs updated | Ledger Platform Team |
@@ -208,11 +209,13 @@ Account
               └─ balance: 5000.00
 ```
 
-Each balance is uniquely located by a four-dimensional key:
+Each balance is uniquely located by a three-dimensional key (v0.7 correction):
 
 ```
-(accountId, balanceType, position, currency) → balance
+AccountBalanceKey = (accountId, balanceType, currency)
 ```
+
+Position is a logical mapping concept. Under the same AccountBalanceKey, three independent fields track CURRENT / LOCKED / FROZEN balances.
 
 ---
 
@@ -813,12 +816,12 @@ The above are examples only; the system **does not hard-code any type names or l
 ```
 IF allowNegative=false:
   Any Posting / Adjustment must not result in Balance < 0
-  Violation: reject request, return BALANCE_FLOOR_BREACH
+  Violation: reject request, return INSUFFICIENT_BALANCE
 
 IF allowNegative=true:
   Any Posting / Adjustment must not result in Balance > 0
   (Such Balances are by business definition always negative or zero; positive violates business semantics)
-  Violation: reject request, return BALANCE_CEILING_BREACH
+  Violation: reject request, return CREDIT_EXCEEDS_LIMIT
 ```
 
 > These two rules are **hard non-bypassable validations** of the system, no exceptions, no forced override.
@@ -1125,11 +1128,11 @@ All write operations must include `changeReason`, otherwise return `400 CHANGE_R
 
 # F-002 v2 Posting API — Batch Atomic Posting (Raft Architecture Update)
 
-**Document Version**: v0.2 (updated based on ADR-001)  
+**Document Version**: v0.2 (updated based on ADR-001) — latest schema see standalone file `F002-v2-posting-api.md` v0.4  
 **Feature**: F-002 Posting API  
 **System**: Next-Gen Internal Ledger Platform  
 **Status**: Draft for Review  
-**Change Summary**: Write path changed from PostgreSQL direct write to Raft State Machine; Balance validation changed from DB read to in-memory read
+**Change Summary**: Write path changed from PostgreSQL direct write to Raft State Machine; Balance validation changed from DB read to in-memory read. Standalone v0.4 moved `amount` / `currency` up to Leg level; JournalLine no longer carries these fields independently.
 
 ---
 
@@ -1426,16 +1429,14 @@ COMPANY_ACC is a hotspot, but because all requests are serialized in the same Ac
 {
   "requestId": "req-550e8400-e29b-41d4-a716-446655440001",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "INSUFFICIENT_BALANCE",
-      "accountId": "CLIENT_ACC_001",
-      "balanceType": "AVAILABLE_BALANCE",
-      "currency": "USD",
-      "required": 800000.00,
-      "available": 500000.00
-    }
-  ]
+  "errorCodes": ["INSUFFICIENT_BALANCE"],
+  "errorDetails": {
+    "accountId": "CLIENT_ACC_001",
+    "balanceType": "AVAILABLE_BALANCE",
+    "currency": "USD",
+    "required": 800000.00,
+    "available": 500000.00
+  }
 }
 ```
 
@@ -1966,13 +1967,11 @@ POST /ledger/journals/{originalJournalId}/reversal
 {
   "requestId": "rev-req-7f3a9b2c-1234-5678-abcd-ef0123456789",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "JOURNAL_ALREADY_REVERSED",
-      "originalJournalId": "JNL-20260516-000012345",
-      "reversalJournalId": "JNL-20260516-000012346"
-    }
-  ]
+  "errorCodes": ["JOURNAL_ALREADY_REVERSED"],
+  "errorDetails": {
+    "originalJournalId": "JNL-20260516-000012345",
+    "reversalJournalId": "JNL-20260516-000012346"
+  }
 }
 ```
 

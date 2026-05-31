@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.8
-**日期**: 2026-05-30
+**版本**: v0.9
+**日期**: 2026-05-31
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.9 變更摘要**：修正 AccountBalanceKey 描述為 v0.7 三維鍵 (accountId, balanceType, currency)，移除 position 作為物理鍵組件。TC-F008-30、TC-F002-11 調整 AccountBalanceKey 斷言以匹配 v0.7 修正。
+>
 > **v0.8 變更摘要**：新增 enriched error detail 測試案例（TC-F002-16~20、TC-F004-08~09、TC-F008-31~35、TC-F013-11~12）。CommandResult 與 IdempotencyEntry 新增 `errorDetails` Map，用於在 REJECTED 回應中攜帶觸發錯誤的實體上下文（accountId、journalId、balanceType、currency、position 等）。
 >
 > **v0.7 變更摘要**：修復 AccountQueueManager submitAsync 永遠不完成 future 的缺陷（P0 HOTFIX）。新增 TC-QUEUE-04（submitAsync success path）、TC-QUEUE-05（submitAsync exception path），補齊 async future 完成契約的測試覆蓋。
@@ -15,7 +17,7 @@
 >
 > **v0.4 變更摘要**：新增 Module 13（F-013 Idempotency & Hotspot Account Concurrency），新增 TC-F013-01~10。TDD 執行計劃補充 Phase 6.5。
 >
-> **v0.3 變更摘要**：新增 position 字段支持（AccountBalanceKey 複合鍵擴展）。新增 TC-F002-11~15（Posting position）、TC-F005-07~10（Balance Query position）、TC-F008-27~30（State Machine position 驗證規則 V-13）。更新現有測試用例以反映新鍵格式 (accountId, balanceType, currency, position)。
+> **v0.3 變更摘要**：新增 position 字段支持（AccountBalanceKey 複合鍵擴展）。新增 TC-F002-11~15（Posting position）、TC-F005-07~10（Balance Query position）、TC-F008-27~30（State Machine position 驗證規則 V-13）。更新現有測試用例以反映 position 為邏輯映射概念，物理鍵格式為 (accountId, balanceType, currency)。
 >
 > **v0.2 變更摘要**：新增 Module 3 Section 3.4（TC-F008-19 ~ TC-F008-26，accountSeq State Machine）、Module 11 Section 11.1（TC-F011-01 ~ TC-F011-07，BalanceChangeEvent accountSeq），TDD 執行計劃補充 Phase 3.5。
 
@@ -336,7 +338,8 @@ TC-F008-30  applyPosting_positionInJournalLine_correctlyRecorded
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/CURRENT = 1000.00
             When:  apply PostingCommand{ position=LOCKED, DEBIT 100.00 }
             Then:  JournalLine.position=LOCKED
-                   AccountBalanceKey = (CLIENT_ACC_001, AVAILABLE_BALANCE, USD, LOCKED)
+                   AccountBalanceKey = (CLIENT_ACC_001, AVAILABLE_BALANCE, USD)
+                   對應 locked_amount 更新正確
                    balance 更新正確
 
 TC-F008-31  applyPosting_accountNotFound_errorDetailsContainAccountId
@@ -428,7 +431,7 @@ TC-F002-10  post_inactiveBalanceType_returnsBadRequest
 TC-F002-11  post_withPositionCurrent_defaultPositionUsed
             Given: PostingRequest.Line 未指定 position
             When:  post(request)
-            Then:  JournalLine.position=CURRENT，AccountBalanceKey 使用 position=CURRENT
+            Then:  JournalLine.position=CURRENT，對應 amount（CURRENT）欄位更新正確
 
 TC-F002-12  post_withPositionLocked_lockedBalanceUpdated
             Given: CLIENT_ACC_001 AVAILABLE_BALANCE/USD/LOCKED = 500.00

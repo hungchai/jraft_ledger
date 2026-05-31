@@ -14,7 +14,7 @@
 |---|---|---|
 | `journal` | Journal metadata (JSON) | ~5 MB/day |
 | `journal_line` | Per-line balance snapshots (JSON) | ~10 MB/day |
-| `balance` | Current balance per `(accountId, balanceType, position, currency)` | ~5 MB/day |
+| `balance` | Current balance per `(accountId, balanceType, currency)` | ~5 MB/day |
 | `idempotency` | `requestId` → result cache | ~2 MB/day |
 | `account_meta` | Account metadata | ~1 MB/day |
 | `balance_type` | Balance type configs | Negligible |

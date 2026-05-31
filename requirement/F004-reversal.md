@@ -1,6 +1,6 @@
 # F-004 Reversal — 功能需求規格
 
-**文件版本**: v0.1  
+**文件版本**: v0.2（失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails` 格式）  
 **功能**: F-004 Reversal（反轉已有 Journal）  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
@@ -239,13 +239,11 @@ POST /ledger/journals/{originalJournalId}/reversal
 {
   "requestId": "rev-req-7f3a9b2c-1234-5678-abcd-ef0123456789",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "JOURNAL_ALREADY_REVERSED",
-      "originalJournalId": "JNL-20260516-000012345",
-      "reversalJournalId": "JNL-20260516-000012346"
-    }
-  ]
+  "errorCodes": ["JOURNAL_ALREADY_REVERSED"],
+  "errorDetails": {
+    "originalJournalId": "JNL-20260516-000012345",
+    "reversalJournalId": "JNL-20260516-000012346"
+  }
 }
 ```
 

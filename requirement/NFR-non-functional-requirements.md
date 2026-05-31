@@ -1,11 +1,13 @@
 # NFR — 非功能需求規格
 
-**文件版本**: v0.5
+**文件版本**: v0.6
 **功能**: 非功能需求（NFR）
 **系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
 
-> **v0.5 變更摘要**：NFR-1 性能表格新增 Docker/Local 環境延遲目標（Docker 容器化環境因網路虛擬化、無專屬 CPU pinning、Raft replication 走 loopback，延遲目標放寬至 300ms P95）。Production 目標不變。
+> **v0.6 變更摘要**：修正 NFR-1 Posting P95 Production 目標由錯誤的 20ms 調回 ≤ 3ms（與 F-002、ADR-001、PR Checklist 一致）。Docker/Local 維持 ≤ 50ms。
+>
+> **v0.5 變更摘要**：NFR-1 性能表格新增 Docker/Local 環境延遲目標。Production Posting P95 維持 ≤ 3ms（與 F-002、ADR-001、PR Checklist 一致）。Docker/Local 延遲目標放寬至 ≤ 50ms P95（開發/測試環境合理上限）。
 > **v0.4 變更摘要**：NFR-9 新增 Prometheus/Grafana 實作細節（端點、服務、dashboard 配置）。
 > **v0.3 變更摘要**：新增 NFR-16（Raft 集群規模與容錯）與 NFR-17（節點同步監控）。
 > **v0.2 變更摘要**：新增 NFR-13（JVM & GC）、NFR-14（Account Queue）、NFR-15（accountSeq Overflow Policy）；NFR-9 Observability 補充 GC pause 告警和 accountSeq gap 告警。
@@ -16,8 +18,8 @@
 
 | 指標 | Production 目標 | Docker/Local 目標 | 測試條件 |
 |---|---|---|---|
-| Posting P95 延遲 | ≤ 20ms | ≤ 50ms | 1000 並發，含 hotspot 帳戶 |
-| Posting P99 延遲 | ≤ 50ms | ≤ 100ms | 同上 |
+| Posting P95 延遲 | ≤ 3ms | ≤ 50ms | 1000 並發，含 hotspot 帳戶 |
+| Posting P99 延遲 | ≤ 10ms | ≤ 100ms | 同上 |
 | Balance Query P95（Active 帳戶） | ≤ 2ms | ≤ 5ms | 讀 in-memory State Machine |
 | Balance Query P95（Inactive 帳戶） | ≤ 5ms | ≤ 10ms | 讀 RocksDB warm-up |
 | Journal 點查 P95 | ≤ 10ms | ≤ 30ms | MySQL View Layer，索引命中 |

@@ -50,7 +50,7 @@
         │   │   │                                                       │ │   │
         │   │   │  • Consumes Kafka balance.change.v1                  │ │   │
         │   │   │  • Projects to MySQL: journal, journal_line, balance  │ │   │
-        │   │   │  • Idempotent (INSERT ... ON DUPLICATE KEY)           │ │   │
+        │   │   │  • Idempotent (INSERT IGNORE)                         │ │   │
         │   │   │  • Stateless — can scale horizontally                │ │   │
         │   │   └──────────┬───────────────────────────────────────────┘ │   │
         │   │              │                                              │   │
@@ -87,8 +87,9 @@
         ├──6. Publish BalanceChangeEvent → listener
         ├──7. Enqueue event to OutboxStore (RocksDB CF_OUTBOX)
         ├──8. Record idempotency
-        ├──9. takeSnapshot() → RocksDB (all CFs)
-        └──10. Return CommandResult
+        ├──9. WriteBatch → RocksDB (atomic: Journal + JournalLine + Balance + Outbox + Idempotency)
+        ├──10. takeSnapshot() periodically (every 100k entries / EOD / manual)
+        └──11. Return CommandResult
                 │
                 ▼
          KafkaEventPublisher.onEvent(event)
@@ -100,7 +101,7 @@
          ProjectionConsumer.onBalanceChange(message)
                 │
                 ▼
-         MySQL: INSERT journal + journal_line
+         MySQL: INSERT IGNORE journal + INSERT IGNORE journal_line
 ```
 
 ## CQRS Read/Write Split
@@ -108,7 +109,8 @@
 | Operation | Which Node | Storage | Consistency |
 |---|---|---|---|
 | Posting / Reversal / Adjustment | **Leader only** | RocksDB | Strong (Raft Quorum) |
-| Balance Query | **Any node** | In-memory StateMachine | Eventual (~ms lag) |
+| Balance Query (live) | **Leader only** | In-memory StateMachine | Strong |
+| Balance Query (as-of) | **Any node** | MySQL View Layer | Eventual (~1s lag) |
 | Journal Query | **Any node** | MySQL (via Projection) | Eventual (~1s lag) |
 | Reconciliation | **Any node** | MySQL + in-memory | Eventual (T+0) |
 

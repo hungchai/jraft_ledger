@@ -1,6 +1,6 @@
 # F-002 v2 Posting API — Batch Atomic Posting（Raft 架構更新版）
 
-**文件版本**: v0.4（新增 `position` 欄位至 JournalLine — 支援 CURRENT/LOCKED/FROZEN 子餘額類型）  
+**文件版本**: v0.5（統一 V-13 錯誤碼為 `POSITION_BALANCE_FLOOR_BREACH`；失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails` 格式）  
 **功能**: F-002 Posting API  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
@@ -194,7 +194,7 @@ Posting API 接受包含一或多條 leg 的帳務請求，在 Raft Leader 節�
 | V-10 | 每個帳戶的對應 balanceType + position + currency 必須已初始化 | `BALANCE_NOT_INITIALIZED` |
 | V-11 | `allowNegative=false` 的 balance，DEBIT 後不得低於 0 | `INSUFFICIENT_BALANCE` |
 | V-12 | `allowNegative=true` 的 balance（如 TRADE_AHEAD_BALANCE），CREDIT 後不得高於 0 | `CREDIT_EXCEEDS_LIMIT` |
-| V-13 | `position = LOCKED` 或 `FROZEN` 的 balance，不允許負數餘額 | `LOCKED_BALANCE_CANNOT_BE_NEGATIVE` |
+| V-13 | `position = LOCKED` 或 `FROZEN` 的 balance，不允許負數餘額 | `POSITION_BALANCE_FLOOR_BREACH` |
 | V-14 | 帳戶未被凍結（`account.status = ACTIVE`） | `ACCOUNT_FROZEN` |
 
 ---
@@ -311,16 +311,14 @@ COMPANY_ACC 是 hotspot，但因為所有請求都在同一個 Account Queue 裡
 {
   "requestId": "req-550e8400-e29b-41d4-a716-446655440001",
   "status": "REJECTED",
-  "errors": [
-    {
-      "errorCode": "INSUFFICIENT_BALANCE",
-      "accountId": "CLIENT_ACC_001",
-      "balanceType": "AVAILABLE_BALANCE",
-      "currency": "USD",
-      "required": 800000.00,
-      "available": 500000.00
-    }
-  ]
+  "errorCodes": ["INSUFFICIENT_BALANCE"],
+  "errorDetails": {
+    "accountId": "CLIENT_ACC_001",
+    "balanceType": "AVAILABLE_BALANCE",
+    "currency": "USD",
+    "required": 800000.00,
+    "available": 500000.00
+  }
 }
 ```
 

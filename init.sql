@@ -98,7 +98,18 @@ CREATE TABLE IF NOT EXISTS projection_event_log (
     INDEX idx_journal_line_id (journal_line_id),
     INDEX idx_processed_at (processed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-  COMMENT='Projection idempotency event log. One row per (account_account_id, balance_type, currency, account_seq). UK rejects exact Kafka duplicates. Application rejects stale sequences.';
+  COMMENT='Projection idempotency event log. One row per (account_account_id, balance_type, currency, account_seq). UK rejects exact Kafka duplicates. Application rejects stale sequences. Sharded by account_account_id hash.';
+
+-- ============================================================
+-- Sharding physical tables for projection_event_log (4 shards,
+-- aligned with journal_line). Sharded by account_account_id hash
+-- via ShardingSphere-JDBC. LIKE copies all columns, indexes and
+-- the uk_event_seq unique key.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS projection_event_log_0 LIKE projection_event_log;
+CREATE TABLE IF NOT EXISTS projection_event_log_1 LIKE projection_event_log;
+CREATE TABLE IF NOT EXISTS projection_event_log_2 LIKE projection_event_log;
+CREATE TABLE IF NOT EXISTS projection_event_log_3 LIKE projection_event_log;
 
 -- ============================================================
 -- journal_line — Journal line items. Append-only.

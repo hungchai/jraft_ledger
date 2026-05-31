@@ -4,11 +4,28 @@ import com.tomma8.ledger.dao.mapper.BalanceTypeMapper;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.ConsumerFactory;
 
 import java.time.LocalDateTime;
 
 @Configuration
 public class ProjectionConfig {
+
+    /**
+     * Batch listener factory for the balance-change consumer: delivers a whole
+     * poll batch (up to max-poll-records) as a {@code List<String>} so it can be
+     * written in one BATCH transaction. The account listener keeps the default
+     * (single-record) factory.
+     */
+    @Bean
+    ConcurrentKafkaListenerContainerFactory<String, String> batchFactory(
+            ConsumerFactory<String, String> consumerFactory) {
+        var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
+        factory.setConsumerFactory(consumerFactory);
+        factory.setBatchListener(true);
+        return factory;
+    }
 
     @Bean
     CommandLineRunner initBalanceTypes(BalanceTypeMapper balanceTypeMapper) {

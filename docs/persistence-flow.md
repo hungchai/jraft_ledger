@@ -65,10 +65,11 @@
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ 6. ATOMIC BALANCE UPDATE (in-memory)                             │   │
+│  │ 6. ATOMIC BALANCE UPDATE (in-memory + RocksDB WriteBatch)        │   │
 │  │    for each line:                                                │   │
 │  │      nextSeq = current.accountSeq + 1                             │   │
 │  │      balanceStore.put(key, BalanceEntry{after, nextSeq, ...})    │   │
+│  │    WriteBatch: balance CF + journal CF + journal_line CF         │   │
 │  │    (accountSeq overflow check: if >= 80% Long.MAX_VALUE → alert) │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
@@ -86,8 +87,11 @@
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ 9. PERSIST (if persistAfterApply=true)                           │   │
-│  │    takeSnapshot() → serialize ALL state to RocksDB:              │   │
+│  │ 9. PERSIST (WriteBatch per apply — always)                       │   │
+│  │    RocksDB WriteBatch: Journal + JournalLine + Balance +         │   │
+│  │    Outbox + Idempotency 原子寫入                                  │   │
+│  │                                                                   │   │
+│  │    takeSnapshot() → 週期性（每 10萬 entries / EOD / 手動）         │   │
 │  │                                                                   │   │
 │  │    ┌─────────────────────────────────────────────────────────┐   │   │
 │  │    │                   RocksDB (Source of Truth)              │   │   │

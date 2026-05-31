@@ -1,8 +1,9 @@
 # F-001 Balance Type Registry — 功能需求規格
 
-**文件版本**: v0.2  
+**文件版本**: v0.3  
 **功能**: F-001 Balance Type Registry  
 **系統**: Next-Gen Internal Ledger Platform  
+**變更摘要**：v0.3 統一錯誤碼為 `INSUFFICIENT_BALANCE` / `CREDIT_EXCEEDS_LIMIT`，移除 `BALANCE_FLOOR_BREACH` / `BALANCE_CEILING_BREACH`。
 **定位說明**: 本 Ledger 為純 Booking Engine，定位為高頻、高並發帳務處理核心。配置管理、Limit 管控、Maker-Checker、客戶級別 Override 均屬上游 Domain 的責任，本系統不負責。  
 **狀態**: Draft for Review
 
@@ -86,12 +87,12 @@ Balance Type 是賬戶在某一業務視角下的餘額視圖，例如：
 ```
 IF allowNegative=false:
   任何 Posting / Adjustment 不得使 Balance 結果 < 0
-  違反時：拒絕請求，返回 BALANCE_FLOOR_BREACH
+  違反時：拒絕請求，返回 INSUFFICIENT_BALANCE
 
 IF allowNegative=true:
   任何 Posting / Adjustment 不得使 Balance 結果 > 0
   （此類 Balance 業務定義上永遠為負或零，正數違反業務語義）
-  違反時：拒絕請求，返回 BALANCE_CEILING_BREACH
+  違反時：拒絕請求，返回 CREDIT_EXCEEDS_LIMIT
 ```
 
 > 這兩條規則是系統的**硬性不可繞過校驗**，無例外，無強制覆蓋。

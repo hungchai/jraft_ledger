@@ -1,6 +1,6 @@
 # F-010 Account Management — 功能需求規格
 
-**文件版本**: v0.1  
+**文件版本**: v0.2（凍結/解凍/關閉 API 補充 `requestId` 冪等鍵欄位）  
 **功能**: F-010 Account Management（帳戶管理）  
 **系統**: Next-Gen Internal Ledger Platform  
 **狀態**: Draft for Review  
@@ -83,6 +83,14 @@ POST /ledger/accounts/{accountId}/freeze
 POST /ledger/accounts/{accountId}/unfreeze
 POST /ledger/accounts/{accountId}/close
 ```
+
+**Request Body**
+
+| 欄位 | 類型 | 必填 | 說明 |
+|---|---|---|---|
+| `requestId` | `string(UUIDv7)` | ✅ | 冪等鍵，重複請求返回原結果 |
+| `operatorId` | `string` | ✅ | 操作者 ID |
+| `changeReason` | `string` | ❌ | 操作原因 |
 
 - 凍結 / 解凍走 Raft（影響 State Machine 帳戶狀態）
 - 關閉需校驗所有 Balance Type 餘額為零，否則拒絕

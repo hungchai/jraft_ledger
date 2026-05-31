@@ -1,6 +1,6 @@
 # F-010 Account Management — Functional Requirements Specification
 
-**Document Version**: v0.1
+**Document Version**: v0.2 (Added requestId idempotency key to freeze/unfreeze/close APIs)
 **Feature**: F-010 Account Management
 **System**: Next-Gen Internal Ledger Platform
 **Status**: Draft for Review
@@ -83,6 +83,14 @@ POST /ledger/accounts/{accountId}/freeze
 POST /ledger/accounts/{accountId}/unfreeze
 POST /ledger/accounts/{accountId}/close
 ```
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `requestId` | `string(UUIDv7)` | ✅ | Idempotency key; duplicate requests return the original result |
+| `operatorId` | `string` | ✅ | Operator ID |
+| `changeReason` | `string` | ❌ | Reason for the operation |
 
 - Freeze / Unfreeze go through Raft (affects account state in the State Machine)
 - Close must validate that all balance type balances are zero; otherwise, it is rejected

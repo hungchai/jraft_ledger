@@ -30,7 +30,7 @@
 ```
 3 Raft Voting Nodes  (ledger-1 :8081, ledger-2 :8082, ledger-3 :8083)
 1 Learner / Projection (ledger-projection :8089)
-1 MySQL 8.0            (:3306)
+1 MySQL 8.4            (:3306)
 1 Kafka                (:9092)
 1 Prometheus           (:9090)
 1 Grafana              (:3000)
@@ -75,9 +75,9 @@ until curl -s http://localhost:8083/health | grep -q "UP"; do sleep 2; done
 
 | Account Type | Count | Prefix | Balance Init | allowNegative |
 |---|---|---|---|---|
-| CLIENT | 9,990 | `STRESS-CLI-` | 1,000 USD | false |
-| COMPANY | 10 | `STRESS-CO-` | 1,000,000 USD | false |
-| HOTSPOT | 1 | `STRESS-HOT-CO-001` | 10,000,000 USD | false |
+| CLIENT | 9,990 | `STRESS-CLI-` | 1,000 USDT | false |
+| COMPANY | 10 | `STRESS-CO-` | 1,000,000 USDT | false |
+| HOTSPOT | 1 | `STRESS-HOT-CO-001` | 1,000 BTC + 200M USDT | false |
 
 > **Total**: 10,001 accounts. Creates deterministic test population.
 
@@ -117,9 +117,9 @@ CLIENT_999 ──┘
 | Duration | 120 s |
 | Concurrent clients | 1,000 |
 | Posting per client | 100 RFQ (10,000 total) |
-| Amount per RFQ | 1.00 USD |
-| Direction | CLIENT DEBIT 1.00 → HOTSPOT CREDIT 1.00 |
-| Assertion | No duplicate journals, HOTSPOT final balance = 10,000,000 + 10,000.00 |
+| Amount per RFQ | 1.00 USDT |
+| Direction | CLIENT DEBIT 1.00 USDT → HOTSPOT CREDIT 1.00 USDT |
+| Assertion | No duplicate journals, HOTSPOT final USDT balance = 200M + 10,000.00 |
 
 **Mapped TC**: TC-F002-09, TC-F013-06, TC-F013-07, TC-NFR-02
 
@@ -133,7 +133,7 @@ CLIENT_999 ──┘
 | Ratio | 60 % deposit (CLIENT credit), 40 % withdrawal (CLIENT debit) |
 | Concurrent | 500 |
 | Total postings | 20,000 |
-| Amount | Random uniform 1.00 – 100.00 USD |
+| Amount | Random uniform 1.00 – 100.00 USDT |
 | Assertion | Sum(all debits) = Sum(all credits) per currency. L1 reconciliation passes. |
 
 **Mapped TC**: TC-F002-01, TC-F007-01
@@ -144,9 +144,9 @@ CLIENT_999 ──┘
 
 | Parameter | Value |
 |---|---|
-| Target account | `STRESS-CLI-MAX-001` seeded with 1,000.00 USD |
+| Target account | `STRESS-CLI-MAX-001` seeded with 1,000.00 USDT |
 | Concurrent | 1,100 |
-| Each withdrawal | 1.00 USD |
+| Each withdrawal | 1.00 USDT |
 | Expected successes | 1,000 (balance exhausted) |
 | Expected rejections | 100 (INSUFFICIENT_BALANCE) |
 | Assertion | No negative balance observed. Final balance = 0.00. Exactly 1,000 COMPLETED journals. |

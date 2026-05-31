@@ -1,6 +1,6 @@
 # F-001 Balance Type Registry — Functional Requirements Specification
 
-**Document Version**: v0.2  
+**Document Version**: v0.3 (Unified error codes to INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT; removed BALANCE_FLOOR_BREACH / BALANCE_CEILING_BREACH)  
 **Feature**: F-001 Balance Type Registry  
 **System**: Next-Gen Internal Ledger Platform  
 **Positioning Statement**: This Ledger is a pure Booking Engine, positioned as a high-frequency, high-concurrency accounting processing core. Configuration management, limit control, maker-checker, and client-level overrides are the responsibility of upstream domains; this system does not handle them.  
@@ -86,12 +86,12 @@ The above are examples only; the system **does not hard-code any type names or l
 ```
 IF allowNegative=false:
   Any Posting / Adjustment must not result in Balance < 0
-  On violation: reject request, return BALANCE_FLOOR_BREACH
+  On violation: reject request, return INSUFFICIENT_BALANCE
 
 IF allowNegative=true:
   Any Posting / Adjustment must not result in Balance > 0
   (Such balances are by definition always negative or zero; positive violates business semantics)
-  On violation: reject request, return BALANCE_CEILING_BREACH
+  On violation: reject request, return CREDIT_EXCEEDS_LIMIT
 ```
 
 > These two rules are **hard non-bypassable validations** of the system; no exceptions, no forced override.
