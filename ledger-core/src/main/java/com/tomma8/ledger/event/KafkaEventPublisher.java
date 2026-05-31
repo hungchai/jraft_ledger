@@ -5,6 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.domain.event.AccountCreatedEvent;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
 import com.tomma8.ledger.domain.event.LedgerEventListener;
+import com.tomma8.ledger.rocksdb.OutboxStore;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -30,6 +31,7 @@ public class KafkaEventPublisher implements LedgerEventListener {
     private final KafkaProducer<String, String> producer;
     private final String balanceChangeTopic;
     private final String accountTopic;
+    private OutboxStore outboxStore;
 
     public KafkaEventPublisher(String bootstrapServers, String balanceChangeTopic) {
         this(bootstrapServers, balanceChangeTopic, "ledger.account.v1");
@@ -47,6 +49,10 @@ public class KafkaEventPublisher implements LedgerEventListener {
         this.producer = new KafkaProducer<>(props);
     }
 
+    public void setOutboxStore(OutboxStore outboxStore) {
+        this.outboxStore = outboxStore;
+    }
+
     @Override
     public void onEvent(BalanceChangeEvent event) {
         try {
@@ -56,6 +62,8 @@ public class KafkaEventPublisher implements LedgerEventListener {
             producer.send(record, (metadata, exception) -> {
                 if (exception != null) {
                     log.error("Failed to publish balance event {}: {}", event.eventId(), exception.getMessage());
+                } else if (outboxStore != null) {
+                    outboxStore.markSent(event.eventId());
                 }
             });
         } catch (Exception e) {

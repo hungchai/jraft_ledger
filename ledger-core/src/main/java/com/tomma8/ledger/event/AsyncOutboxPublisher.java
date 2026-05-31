@@ -83,15 +83,10 @@ public class AsyncOutboxPublisher implements AutoCloseable {
             for (BalanceChangeEvent event : events) {
                 try {
                     kafkaPublisher.onEvent(event);
-                    // Fire-and-forget: KafkaEventPublisher uses async send with callback.
-                    // We delete from outbox after send (at-least-once semantics).
-                    // If Kafka ack fails, the callback logs it; on next scan the event
-                    // won't be found (already deleted). This is acceptable because
-                    // the live path (in StateMachine.apply) already sent the event.
-                    // The outbox is a recovery path — if it gets deleted before Kafka
-                    // ack on a crash, the live path's WriteBatch also wrote it, so
-                    // it will be re-scanned after restart.
-                    outboxStore.markSent(event.eventId());
+                    // Callback-driven deletion: KafkaEventPublisher send-callback
+                    // calls outboxStore.markSent(eventId) on Kafka ack success.
+                    // If callback never fires (crash), event stays in outbox and
+                    // will be re-scanned on next poll.
                     ok++;
                 } catch (Exception e) {
                     log.warn("Failed to publish outbox event {} (account={} balanceType={})",
