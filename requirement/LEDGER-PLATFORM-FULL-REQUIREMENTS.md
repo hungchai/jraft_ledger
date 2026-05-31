@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.9  
-**日期**: 2026-05-30  
+**版本**: v0.10  
+**日期**: 2026-05-31  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -31,6 +31,7 @@
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
+| v0.10 | 2026-05-31 | §6.2 MySQL View Layer：完整 5 表 schema（account, journal, account_balance, journal_line, projection_event_log）含 DECIMAL(34,16)、ShardingSphere 分片、accountSeq guard、INSERT IGNORE 冪等。§6.4 Kafka Message Format：`ledger.account.v1` / `ledger.balance.change.v1` 訊息結構定義 | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
 
@@ -500,9 +501,110 @@ Leader 宕機 → Raft 自動選舉新 Leader
 
 ### 6.2 MySQL（View Layer）
 
-- 由 Learner 異步寫入
-- 儲存完整 journal、account_balance snapshot、reconciliation 報表
+- 由 ProjectionConsumer（Kafka Listener）異步寫入
+- 儲存完整 journal、account_balance、journal_line、projection_event_log
 - 只做讀取用途，不在寫路徑上
+- ShardingSphere-JDBC 水平分片 `journal_line`（4 shards by account_id hash）
+
+#### account（帳戶）
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | 代理主鍵 |
+| account_id | VARCHAR(64) UNIQUE NOT NULL | 業務鍵 |
+| account_type | VARCHAR(16) NOT NULL | CLIENT \| COMPANY \| NOSTRO \| SUSPENSE \| CONTROL \| BANK |
+| display_name | VARCHAR(128) | 顯示名稱 |
+| owner_id | VARCHAR(64) | 擁有者 |
+| status | VARCHAR(16) NOT NULL | ACTIVE \| FROZEN \| CLOSED |
+| created_at | TIMESTAMP(6) NOT NULL | 創建時間 |
+| updated_at | TIMESTAMP(6) NOT NULL | 更新時間 |
+
+#### journal（分錄頭）
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | 代理主鍵 |
+| journal_id | VARCHAR(64) UNIQUE NOT NULL | 業務鍵 (JNL-XXXX) |
+| journal_type | VARCHAR(32) NOT NULL | NORMAL \| REVERSAL \| MANUAL_ADJUSTMENT |
+| request_id | VARCHAR(64) NOT NULL | 冪等鍵 (UUID v7) |
+| business_event_type | VARCHAR(64) | RFQ_SETTLEMENT \| WITHDRAWAL \| FEE |
+| business_event_ref | VARCHAR(128) | 業務參考 |
+| value_date | DATE NOT NULL | 生效日 |
+| status | VARCHAR(16) NOT NULL | CONFIRMED \| REVERSED |
+| cross_period | BOOLEAN DEFAULT FALSE | 跨期標記 |
+| created_at | TIMESTAMP(6) NOT NULL | 創建時間 |
+| updated_at | TIMESTAMP(6) NOT NULL | 更新時間 |
+
+#### account_balance（餘額快照）
+
+One row per (account_account_id, balance_type, currency).
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | 代理主鍵 |
+| account_id | BIGINT NOT NULL | 參考 account.id（無 FK constraint） |
+| account_account_id | VARCHAR(64) NOT NULL | Denormalized 業務鍵 |
+| balance_type | VARCHAR(64) NOT NULL | 餘額類型 |
+| currency | VARCHAR(8) NOT NULL | ISO 4217 / 自訂幣種 |
+| amount | DECIMAL(34,16) NOT NULL | CURRENT position 餘額 |
+| frozen_amount | DECIMAL(34,16) NOT NULL | FROZEN position 餘額 |
+| locked_amount | DECIMAL(34,16) NOT NULL | LOCKED position 餘額 |
+| account_seq | BIGINT NOT NULL | 單調遞增序號（seq guard） |
+| last_journal_id | VARCHAR(64) | 最近變更的分錄 |
+| created_at | TIMESTAMP(6) NOT NULL | 創建時間 |
+| updated_at | TIMESTAMP(6) NOT NULL | 更新時間 |
+
+UK: `(account_account_id, balance_type, currency)`
+
+Upsert 使用 accountSeq guard：
+```sql
+amount = IF(#{accountSeq} >= account_seq, VALUES(amount), amount),
+account_seq = IF(#{accountSeq} >= account_seq, VALUES(account_seq), account_seq)
+```
+
+#### journal_line（分錄行）
+
+Append-only。ShardingSphere-JDBC 水平分片為 `journal_line_0` ~ `journal_line_3`（4 shards by account_account_id hash）。
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | 代理主鍵 |
+| journal_id | BIGINT NOT NULL | 參考 journal.id |
+| account_id | BIGINT NOT NULL | 參考 account.id |
+| account_balance_id | BIGINT NOT NULL | 參考 account_balance.id |
+| journal_line_id | VARCHAR(72) UNIQUE NOT NULL | 業務鍵 |
+| journal_journal_id | VARCHAR(64) NOT NULL | Denormalized |
+| account_account_id | VARCHAR(64) NOT NULL | Denormalized |
+| leg_id | VARCHAR(64) | Leg 標識 |
+| balance_type | VARCHAR(64) NOT NULL | 餘額類型 |
+| position | VARCHAR(16) NOT NULL | CURRENT \| LOCKED \| FROZEN |
+| currency | VARCHAR(8) NOT NULL | 幣種 |
+| entry_type | VARCHAR(8) NOT NULL | DEBIT \| CREDIT |
+| amount | DECIMAL(34,16) NOT NULL | 交易金額 (>0) |
+| balance_before | DECIMAL(34,16) NOT NULL | 交易前餘額 |
+| balance_after | DECIMAL(34,16) NOT NULL | 交易後餘額 |
+| config_version | INT NOT NULL | Balance Type config 版本 |
+| created_at | TIMESTAMP(6) NOT NULL | 創建時間 |
+| updated_at | TIMESTAMP(6) NOT NULL | 更新時間 |
+
+> **注意**：全部 FK 欄位為邏輯參考（無 FOREIGN KEY constraint），資料完整性由 RocksDB State Machine 保證。`INSERT IGNORE` 用於冪等寫入。
+
+#### projection_event_log（投影冪等）
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | 代理主鍵 |
+| account_account_id | VARCHAR(64) NOT NULL | 帳戶業務鍵 |
+| balance_type | VARCHAR(64) NOT NULL | 餘額類型 |
+| currency | VARCHAR(8) NOT NULL | 幣種 |
+| account_seq | BIGINT NOT NULL | 單調遞增序號 |
+| journal_line_id | VARCHAR(72) NOT NULL | 分錄行業務鍵 |
+| journal_journal_id | VARCHAR(64) NOT NULL | 分錄業務鍵 |
+| event_id | VARCHAR(64) NOT NULL | Kafka event UUID |
+| status | VARCHAR(16) NOT NULL | APPLIED \| SKIPPED_DUPLICATE \| SKIPPED_STALE |
+| processed_at | TIMESTAMP(6) NOT NULL | 處理時間 |
+
+UK: `(account_account_id, balance_type, currency, account_seq)`
 
 ### 6.3 資料保證
 
@@ -510,6 +612,80 @@ Leader 宕機 → Raft 自動選舉新 Leader
 RocksDB：強持久性，是帳務的唯一真相（source of truth）
 MySQL：最終一致性的查詢視圖，可從 RocksDB replay 重建
 ```
+
+### 6.4 Kafka Message Format
+
+ProjectionConsumer 監聽兩個 topic，訊息由 State Machine → OutboxStore → Kafka Producer 發出。
+
+#### Topic: `ledger.account.v1`
+
+帳戶創建 / 狀態變更事件。由 `onAccountCreated` 監聽。
+
+```json
+{
+  "accountId": "STRESS-HOT-CO-001",
+  "accountType": "COMPANY",
+  "displayName": "Hotspot Co",
+  "ownerId": "CO-HOTSPOT",
+  "status": "ACTIVE",
+  "createdAt": [2026, 5, 30, 13, 30, 0, 123456000]
+}
+```
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| accountId | String | 業務鍵 |
+| accountType | String | CLIENT \| COMPANY \| NOSTRO \| SUSPENSE \| CONTROL \| BANK |
+| displayName | String | 顯示名稱（可空） |
+| ownerId | String\|null | 擁有者（可空） |
+| status | String | ACTIVE \| FROZEN \| CLOSED |
+| createdAt | JSON Array | [年, 月, 日, 時, 分, 秒, 納秒] |
+
+#### Topic: `ledger.balance.change.v1`
+
+每次 State Machine apply 後發出，一筆 journal_line 對應一個 event。由 `onBalanceChange` 監聽。
+
+```json
+{
+  "eventId": "19e7827f731a12e2502069a44e6",
+  "journalId": "JNL-0001",
+  "journalLineId": "JNL-0001-01",
+  "requestId": "k6-2-0-1780132341011",
+  "commandType": "POSTING",
+  "accountId": "STRESS-HOT-CO-001",
+  "balanceType": "AVAILABLE_BALANCE",
+  "position": "CURRENT",
+  "currency": "USDT",
+  "entryType": "CREDIT",
+  "amount": 5000.00000000,
+  "preBalance": 0,
+  "postBalance": 5000.00000000,
+  "accountSeq": 1,
+  "businessEventRef": "SEED-BTC",
+  "valueDate": [2026, 5, 27],
+  "configVersion": 1
+}
+```
+
+| 欄位 | 類型 | 說明 |
+|---|---|---|
+| eventId | String | Kafka event UUID（追蹤用） |
+| journalId | String | 分錄業務鍵 |
+| journalLineId | String | 分錄行業務鍵 (JNL-XXXX-NN) |
+| requestId | String | 原始請求 UUID v7 |
+| commandType | String | POSTING \| REVERSAL \| ADJUSTMENT |
+| accountId | String | 帳戶業務鍵 |
+| balanceType | String | 餘額類型 |
+| position | String | CURRENT \| LOCKED \| FROZEN |
+| currency | String | 幣種代碼 |
+| entryType | String | DEBIT \| CREDIT |
+| amount | Number | 交易金額 |
+| preBalance | Number | 交易前餘額 |
+| postBalance | Number | 交易後餘額 |
+| accountSeq | Long | 單調遞增序號（projection seq guard） |
+| businessEventRef | String | 上游業務參考 |
+| valueDate | JSON Array | [年, 月, 日] |
+| configVersion | Integer | Balance Type config 版本 |
 
 ---
 
