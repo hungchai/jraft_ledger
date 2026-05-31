@@ -2,86 +2,196 @@ apiVersion: 1
 
 groups:
   - name: ledger-critical
+    folder: Ledger Alerts
     interval: 30s
     rules:
-      - alert: PostingLatencyHigh
-        expr: histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[2m])) > 0.003
+      - uid: posting-latency-high
+        title: "Posting P95 latency > 3ms sustained for 2 minutes"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 2m
-        labels:
-          severity: critical
         annotations:
           summary: "Posting P95 latency > 3ms sustained for 2 minutes"
           description: "Current P95: {{ $value | humanizeDuration }}. Check Raft leader load, GC, RocksDB compaction."
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket[2m])) > 0.003
 
-      - alert: RaftLeaderElection
-        expr: changes(ledger_raft_is_leader[5m]) > 0
+      - uid: raft-leader-election
+        title: "Raft leader election detected"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         labels:
           severity: critical
         annotations:
           summary: "Raft leader election detected"
           description: "Leader changed in last 5 minutes. Check node health and network partition."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: changes(ledger_raft_is_leader[5m]) > 0
 
-      - alert: JournalUnbalanced
-        expr: ledger_reconciliation_l1_unbalanced_total > 0
+      - uid: journal-unbalanced
+        title: "Unbalanced journal detected in L1 reconciliation"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Unbalanced journal detected in L1 reconciliation"
           description: "L1 reconciliation found {{ $value }} unbalanced journals. Immediate investigation required."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ledger_reconciliation_l1_unbalanced_total > 0
 
   - name: ledger-warning
+    folder: Ledger Alerts
     interval: 30s
     rules:
-      - alert: QueueDepthHigh
-        expr: ledger_account_queue_depth > 500
+      - uid: queue-depth-high
+        title: "Account queue depth > 500"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         labels:
           severity: warning
         annotations:
           summary: "Account queue depth > 500"
           description: "Account {{ $labels.accountId }} queue depth: {{ $value }}. Check backpressure and Raft throughput."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ledger_account_queue_depth > 500
 
-      - alert: GcPauseHigh
-        expr: max(jvm_gc_pause_seconds_max) > 0.01
+      - uid: gc-pause-high
+        title: "JVM GC pause > 10ms"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "JVM GC pause > 10ms"
           description: "Max GC pause: {{ $value | humanizeDuration }}. Check heap pressure."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(jvm_gc_pause_seconds_max) > 0.01
 
-      - alert: OutboxBacklog
-        expr: ledger_outbox_pending > 10000
+      - uid: outbox-backlog
+        title: "Outbox pending events > 10,000"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Outbox pending events > 10,000"
           description: "Pending events: {{ $value }}. Kafka producer may be falling behind."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ledger_outbox_pending > 10000
 
-      - alert: ProjectionLagHigh
-        expr: ledger_projection_seconds_since_last_event > 10
+      - uid: projection-lag-high
+        title: "Projection consumer lag > 10 seconds"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Projection consumer lag > 10 seconds"
           description: "Last event processed {{ $value }}s ago. Kafka consumer may be falling behind or stalled."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ledger_projection_seconds_since_last_event > 10
 
-      - alert: ProjectionLagCritical
-        expr: ledger_projection_seconds_since_last_event > 30
+      - uid: projection-lag-critical
+        title: "Projection consumer lag > 30 seconds"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Projection consumer lag > 30 seconds"
           description: "Last event processed {{ $value }}s ago. MySQL view layer is >30s behind State Machine."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: ledger_projection_seconds_since_last_event > 30
 
-      - alert: RejectionRateHigh
-        expr: rate(ledger_posting_rejected_count[5m]) > 10
+      - uid: rejection-rate-high
+        title: "Posting rejection rate > 10/min"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "Posting rejection rate > 10/min"
           description: "Rejection rate: {{ $value }} per second over 5m. Check application logs for error codes."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: rate(ledger_posting_rejected_count[5m]) > 10

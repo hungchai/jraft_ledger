@@ -30,6 +30,7 @@ This document contains the complete technical requirements specification for the
 | v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position and their relationships | Ledger Platform Team |
 | v0.5 | 2026-05-23 | Merged docs/architecture.md, docs/persistence-flow.md into Appendix A/B/C; Added F-013 Idempotency & Hotspot Account Concurrency spec | Ledger Platform Team |
 | v0.6 | 2026-05-24 | Added F-011 Balance Change Event / Kafka Outbox, F-013 Idempotency & Hotspot Account Concurrency, F-014 Java Client SDK, OPS-001 SRE Operational Guidelines; Fixed F-007/F-009 header levels; Corrected account_balance schema: position is logical mapping (amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN), removed position physical column | Ledger Platform Team |
+| v0.12 | 2026-05-31 | Added F-016 Micrometer Metrics & Observability spec: full definition of Timer / Counter / Gauge metrics inventory, Prometheus scrape configuration, Grafana Alert Rules and Dashboard Panel specs, Hotspot Account Queue depth monitoring, Projection Lag monitoring, JVM GC Pause Alert | Ledger Platform Team |
 | v0.11 | 2026-05-31 | Doc consistency fixes: unified error codes (INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH), AccountBalanceKey 3D key v0.7 correction, F-002/F-004 failure Response upgraded to v0.9 errorCodes[] + errorDetails, F-010 added freeze/unfreeze/close idempotency key, NFR-1 Posting P95 corrected to ≤3ms, docs updated for snapshot/WriteBatch/balance query consistency | Ledger Platform Team |
 | v0.10 | 2026-05-31 | §6.2 MySQL View Layer: Full 5-table schema (account, journal, account_balance, journal_line, projection_event_log) — DECIMAL(34,16), ShardingSphere sharding, accountSeq guard, INSERT IGNORE. §6.4 Kafka Message Format: `ledger.account.v1` / `ledger.balance.change.v1` with JSON samples | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: Enriched error responses — REJECTED CommandResult now includes `errorDetails` Map with entity context. `errorCodes` array preserved for backward compat | Ledger Platform Team |
@@ -58,6 +59,8 @@ This document contains the complete technical requirements specification for the
 | F-011 | Balance Change Event / Kafka Outbox | Kafka balance change event publishing (accountSeq, Outbox Pattern) |
 | F-013 | Idempotency & Hotspot Concurrency | Idempotency (requestId) and hotspot account Account Queue concurrency |
 | F-014 | Java Client SDK | Java client SDK: Leader discovery, auto-retry, sync/async API |
+| F-015 | Config Abstraction | Configuration abstraction layer: Spring `@Value` injection, supports Apollo / Nacos and other config center hot updates |
+| F-016 | Micrometer Metrics & Observability | Full Micrometer metrics inventory: Timer / Counter / Gauge, Prometheus scrape, Grafana Alert / Dashboard |
 | OPS-001 | SRE Operational Guidelines | RocksDB compaction/backup, Raft recovery, MySQL sync recovery, DR drills |
 | NFR | Non-Functional Requirements | Performance, availability, consistency, security, capacity |
 | Appendix A | Module Dependency & Docker Compose | Module dependency graph and deployment architecture |

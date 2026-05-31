@@ -107,3 +107,9 @@ Status: ✅ PASS
 Summary: Fixed ledger-restful tests (ApplicationContext load). Fixed: (1) @Value key mismatch — raft.server.port → ledger.raft.server-port. (2) RaftNodeManager null in standalone → added @Autowired(required=false) to accountQueueManager parameter. ledger-restful tests: 10/10 PASS.
 Findings: none
 Next: docker build → smoke tests → commit
+
+## [2026-05-31 18:00] Step 3 — ledger-orchestrator (docker + smoke)
+Status: ✅ PASS
+Summary: docker-compose build ledger-base + ledger1/2/3 started. All nodes healthy. Smoke tests: 18/18 PASS (balance, idempotency, cross-node consistency, Raft index).
+Findings: MySQL projection skipped (projection service not started — expected)
+Next: qa-engineer traceability check → final summary

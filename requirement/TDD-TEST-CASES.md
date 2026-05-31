@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.11
+**版本**: v0.12
 **日期**: 2026-05-31
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.12 變更摘要**：新增 Module 21（F-016 Micrometer Metrics & Observability），新增 TC-F016-01~10。涵蓋 Metrics 暴露、標籤正確性、Alert Rule 觸發、Histogram bucket SLO、Projection gauges 獨立暴露。
+>
 > **v0.11 變更摘要**：新增 TC-F011-10~12（Outbox callback-driven deletion）。驗證 KafkaEventPublisher send callback 刪除 outbox、AsyncOutboxPublisher 不再直接調用 markSent、熱路徑 callback 即時清理 outbox。
 >
 > **v0.10 變更摘要**：新增 Module 20（F-015 Config Abstraction），新增 TC-F015-01~05。ConfigService 介面 + SpringConfigService 實作，移除 LedgerConfig 中所有 `System.getenv().getOrDefault()`。
@@ -1237,6 +1239,29 @@ TC-PROJ-10  journalLine_missingSurrogateLogicallyAllowed
 
 ---
 
+## Module 21：Micrometer Metrics & Observability（F-016）
+
+### 21.1 Metrics 暴露與標籤正確性
+
+**前置條件**：ledger-restful 與 ledger-projection 模組啟動成功，Micrometer Prometheus Registry 已註冊
+
+**測試內容**：驗證所有 `ledger.` 前綴指標正確暴露於 `/actuator/prometheus`，標籤值域符合規格
+
+| ID | 測試內容 | Given | When | Then |
+|----|---------|-------|------|------|
+| TC-F016-01 | `/actuator/prometheus` 返回全部 `ledger.` 前綴指標 | 應用啟動完成 | GET `/actuator/prometheus` | 回應包含 ledger.posting.duration、ledger.balance.query.duration、ledger.outbox.pending、ledger.raft.is_leader、ledger.account.queue.depth、ledger.projection.seconds.since.last.event 等 |
+| TC-F016-02 | `ledger.posting.duration` 含 outcome + businessEventType 兩個 tag | 提交一筆 RFQ_SETTLEMENT Posting | GET `/actuator/prometheus` | 找到 `ledger_posting_duration_seconds_count{outcome="COMPLETED",businessEventType="RFQ_SETTLEMENT"}` |
+| TC-F016-03 | `ledger.balance.query.duration` 含 queryType (live/live-position/asof/batch) | 執行四種查詢 | GET `/actuator/prometheus` | 找到四種 queryType 對應的 `ledger_balance_query_duration_seconds_count` |
+| TC-F016-04 | hotspot account gauges 預設註冊 4 個帳戶 | 應用啟動完成 | GET `/actuator/prometheus` | 找到 `ledger_account_queue_depth{accountId="STRESS-HOT-CO-001"}`、`COMPANY_FX_ACC`、`NOSTRO_USD`、`SUSPENSE_USD` |
+| TC-F016-05 | Projection gauges 在 projection 節點獨立暴露 | ledger-projection 啟動 | GET `:8089/actuator/prometheus` | 回應包含 `ledger_projection_seconds_since_last_event`、`ledger_projection_events_processed`、`ledger_projection_balance_queue_depth`、`ledger_projection_balance_writes` |
+| TC-F016-06 | Alert Rule `posting-latency-high` 在 P95 > 3ms 持續 2min 觸發 | 注入高延遲 Posting（sleep 100ms）持續 2min | Prometheus evaluation | Alert 狀態為 `firing`，severity=critical |
+| TC-F016-07 | Alert Rule `raft-leader-election` 在 leader 切換時立即觸發 | 強制 kill Leader 節點 | Prometheus evaluation | Alert 狀態為 `firing`，severity=critical |
+| TC-F016-08 | Histogram bucket 含 `le="0.003"` 供 P95 SLO 計算 | 應用啟動完成 | GET `/actuator/prometheus` | 找到 `ledger_posting_duration_seconds_bucket{le="0.003"}` |
+| TC-F016-09 | `ledger.outbox.pending` 在 Outbox 積壓時 > 0 | 停止 Kafka consumer，持續寫入 Posting | GET `/actuator/prometheus` | `ledger_outbox_pending` > 0 |
+| TC-F016-10 | `ledger.reconciliation.l1.unbalanced.total` 在 L1 發現不平衡時 +1 | 製造一筆借貸不平衡 Journal | 執行 L1 Reconciliation | `ledger_reconciliation_l1_unbalanced_total` 增加 1 |
+
+---
+
 ## 測試執行順序建議（TDD Red-Green 順序）
 
 ```
@@ -1288,4 +1313,7 @@ Phase 8 — Projection MySQL View Layer v2【v0.6 新增】
 
 Phase 9 — Config Abstraction【v0.10 新增】
   TC-F015-01~05（ConfigService + SpringConfigService + LedgerConfig refactor）
+
+Phase 10 — Micrometer Metrics & Observability【v0.11 新增】
+  TC-F016-01~10（Metrics expose + tag correctness + alert firing + histogram bucket + projection gauges）
 ```

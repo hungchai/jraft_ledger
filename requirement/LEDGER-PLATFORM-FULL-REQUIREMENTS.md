@@ -32,6 +32,7 @@
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
 | v0.13 | 2026-05-31 | F-011：修正 Outbox Pattern 為 callback-driven deletion，消除重複發布；KafkaEventPublisher send callback 負責刪除 outbox，AsyncOutboxPublisher 不再直接調用 markSent | Ledger Platform Team |
+| v0.14 | 2026-05-31 | 新增 F-016 Micrometer Metrics & Observability 規格：完整定義 Timer / Counter / Gauge 指標清單、Prometheus 抓取保型、Grafana Alert Rule 與 Dashboard Panel 規格、Hotspot Account Queue 深度監控、Projection Lag 監控、JVM GC Pause Alert | Ledger Platform Team |
 | v0.12 | 2026-05-31 | 新增 F-015 Config Abstraction：ConfigService 介面 + SpringConfigService 實作，移除 LedgerConfig 中所有 `System.getenv().getOrDefault()`，支援 Apollo / Nacos 等配置中心熱更新 | Ledger Platform Team |
 | v0.11 | 2026-05-31 | 文件一致性修復：統一錯誤碼（INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH）、AccountBalanceKey 三維鍵 v0.7 修正、F-002/F-004 失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails`、F-010 補充 freeze/unfreeze/close 冪等鍵、NFR-1 Posting P95 修正為 ≤3ms、docs 更新 snapshot/WriteBatch/balance query 一致性說明 | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
@@ -59,6 +60,7 @@
 | F-013 | Idempotency & Hotspot Concurrency | 冪等性 (requestId) 與熱點帳戶 Account Queue 併發處理 |
 | F-014 | Java Client SDK | Java 客戶端 SDK：Leader 發現、自動重試、同步/非同步 API |
 | F-015 | Config Abstraction | 配置抽象層：Spring `@Value` 注入，支援 Apollo / Nacos 等配置中心熱更新 |
+| F-016 | Micrometer Metrics & Observability | Micrometer 指標全集：Timer / Counter / Gauge、Prometheus 抓取、Grafana Alert / Dashboard |
 | OPS-001 | SRE 運維指南 | RocksDB 壓實備份、Raft 復原、MySQL 同步修復、DR 演練 |
 | NFR | 非功能需求 | 性能、可用性、一致性、安全、容量 |
 | Appendix A | Module Dependency & Docker Compose | 模組依賴圖與部署架構 |
