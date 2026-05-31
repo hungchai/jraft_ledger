@@ -33,8 +33,16 @@ public record BalanceUpdate(
                 && Objects.equals(currency, that.currency);
     }
 
+    /**
+     * Hash over the key fields only. Manual 31-multiplier form avoids the
+     * {@code Object[]} varargs array that {@link Objects#hash} allocates on
+     * every call — this runs on the ConflationQueue hot path.
+     */
     @Override
     public int hashCode() {
-        return Objects.hash(accountId, balanceType, currency);
+        int h = accountId == null ? 0 : accountId.hashCode();
+        h = 31 * h + (balanceType == null ? 0 : balanceType.hashCode());
+        h = 31 * h + (currency == null ? 0 : currency.hashCode());
+        return h;
     }
 }

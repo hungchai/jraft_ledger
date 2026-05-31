@@ -1,4 +1,5 @@
 {
+  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
   "permissions": {
     "allow": [
       "Read(//Users/tomma/GIT/jraft_ledger/**)",

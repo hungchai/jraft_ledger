@@ -89,3 +89,9 @@ d689edc feat: bootstrap SYSTEM_SEED + BANK account type + NFR v0.5 + projection 
 | `grafana/.../alert_rules.yml` | +2 projection lag alerts |
 | `scripts/k6-posting-stress.js` | USDT 16dp, setup checks, leader refresh, retry, higher seed |
 | `docs/orchestrator-status.md` | Full session log |
+
+## [2026-05-31 15:52] Step 0 — ledger-orchestrator (data-recon session)
+Status: ✅ PASS
+Summary: Completed live data recon against running Docker stack. 204 balances verified cross-node, journal counts match smJournalSeq (69,023), balance sums = 0, zero orphan records. Dispatched ops-sre to formalize `scripts/data-recon.sh`.
+Findings: 4 accounts have no account_balance rows (lazy projection, API returns 0 — expected). journal_line sharded across _0.._3; business key cross-ref clean.
+Next: ops-sre
