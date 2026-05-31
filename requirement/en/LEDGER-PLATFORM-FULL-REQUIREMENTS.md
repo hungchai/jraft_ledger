@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## Technical Requirements Specification (Full Document)
 
-**Version**: v0.7  
-**Date**: 2026-05-25  
+**Version**: v0.10  
+**Date**: 2026-05-31  
 **Status**: Draft for Review  
 **System**: Next-Gen Internal Ledger Platform  
 **Positioning**: iBank core ledger foundation, supporting multi-entity, multi-product, multi-currency, multi-ledger double-entry bookkeeping
@@ -30,6 +30,9 @@ This document contains the complete technical requirements specification for the
 | v0.4 | 2026-05-23 | Added Core Concepts chapter: defines Account, BalanceType, Position and their relationships | Ledger Platform Team |
 | v0.5 | 2026-05-23 | Merged docs/architecture.md, docs/persistence-flow.md into Appendix A/B/C; Added F-013 Idempotency & Hotspot Account Concurrency spec | Ledger Platform Team |
 | v0.6 | 2026-05-24 | Added F-011 Balance Change Event / Kafka Outbox, F-013 Idempotency & Hotspot Account Concurrency, F-014 Java Client SDK, OPS-001 SRE Operational Guidelines; Fixed F-007/F-009 header levels; Corrected account_balance schema: position is logical mapping (amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN), removed position physical column | Ledger Platform Team |
+| v0.10 | 2026-05-31 | §6.2 MySQL View Layer: Full 5-table schema (account, journal, account_balance, journal_line, projection_event_log) — DECIMAL(34,16), ShardingSphere sharding, accountSeq guard, INSERT IGNORE. §6.4 Kafka Message Format: `ledger.account.v1` / `ledger.balance.change.v1` with JSON samples | Ledger Platform Team |
+| v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: Enriched error responses — REJECTED CommandResult now includes `errorDetails` Map with entity context. `errorCodes` array preserved for backward compat | Ledger Platform Team |
+| v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2: Restructured MySQL schema with surrogate BIGINT FK + denormalized business keys; Removed FOREIGN KEY constraints; Added projection_event_log idempotency guard + accountSeq guard in upsertBalance; All mapper APIs updated | Ledger Platform Team |
 | v0.7 | 2026-05-25 | Added centralized LedgerErrorCode enum as single source of truth for error codes (matches V-01~V-13 validation rules); Code must use enum, not string literals | Ledger Platform Team |
 
 
@@ -497,9 +500,110 @@ Recovery time: depends on number of logs since last snapshot
 
 ### 6.2 MySQL (View Layer)
 
-- Written asynchronously by Learner
-- Stores complete journals, account_balance snapshots, reconciliation reports
+- Written asynchronously by ProjectionConsumer (Kafka Listener)
+- Stores journal, account_balance, journal_line, projection_event_log
 - Read-only usage, not on the write path
+- ShardingSphere-JDBC horizontal sharding for `journal_line` (4 shards by account_id hash)
+
+#### account
+
+| Column | Type | Description |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | Surrogate primary key |
+| account_id | VARCHAR(64) UNIQUE NOT NULL | Business key |
+| account_type | VARCHAR(16) NOT NULL | CLIENT \| COMPANY \| NOSTRO \| SUSPENSE \| CONTROL \| BANK |
+| display_name | VARCHAR(128) | Display name |
+| owner_id | VARCHAR(64) | Owner |
+| status | VARCHAR(16) NOT NULL | ACTIVE \| FROZEN \| CLOSED |
+| created_at | TIMESTAMP(6) NOT NULL | Creation timestamp |
+| updated_at | TIMESTAMP(6) NOT NULL | Update timestamp |
+
+#### journal
+
+| Column | Type | Description |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | Surrogate primary key |
+| journal_id | VARCHAR(64) UNIQUE NOT NULL | Business key (JNL-XXXX) |
+| journal_type | VARCHAR(32) NOT NULL | NORMAL \| REVERSAL \| MANUAL_ADJUSTMENT |
+| request_id | VARCHAR(64) NOT NULL | Idempotency key (UUID v7) |
+| business_event_type | VARCHAR(64) | RFQ_SETTLEMENT \| WITHDRAWAL \| FEE |
+| business_event_ref | VARCHAR(128) | Business reference |
+| value_date | DATE NOT NULL | Effective date |
+| status | VARCHAR(16) NOT NULL | CONFIRMED \| REVERSED |
+| cross_period | BOOLEAN DEFAULT FALSE | Cross-period flag |
+| created_at | TIMESTAMP(6) NOT NULL | Creation timestamp |
+| updated_at | TIMESTAMP(6) NOT NULL | Update timestamp |
+
+#### account_balance
+
+One row per (account_account_id, balance_type, currency).
+
+| Column | Type | Description |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | Surrogate primary key |
+| account_id | BIGINT NOT NULL | References account.id (no FK constraint) |
+| account_account_id | VARCHAR(64) NOT NULL | Denormalized business key |
+| balance_type | VARCHAR(64) NOT NULL | Balance type code |
+| currency | VARCHAR(8) NOT NULL | ISO 4217 or custom currency code |
+| amount | DECIMAL(34,16) NOT NULL | CURRENT position balance |
+| frozen_amount | DECIMAL(34,16) NOT NULL | FROZEN position balance |
+| locked_amount | DECIMAL(34,16) NOT NULL | LOCKED position balance |
+| account_seq | BIGINT NOT NULL | Monotonic sequence number (seq guard) |
+| last_journal_id | VARCHAR(64) | Most recent journal that changed this row |
+| created_at | TIMESTAMP(6) NOT NULL | Creation timestamp |
+| updated_at | TIMESTAMP(6) NOT NULL | Update timestamp |
+
+UK: `(account_account_id, balance_type, currency)`
+
+Upsert uses accountSeq guard:
+```sql
+amount = IF(#{accountSeq} >= account_seq, VALUES(amount), amount),
+account_seq = IF(#{accountSeq} >= account_seq, VALUES(account_seq), account_seq)
+```
+
+#### journal_line
+
+Append-only. Sharded via ShardingSphere-JDBC into `journal_line_0` through `journal_line_3` (4 shards by account_account_id hash).
+
+| Column | Type | Description |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | Surrogate primary key |
+| journal_id | BIGINT NOT NULL | References journal.id |
+| account_id | BIGINT NOT NULL | References account.id |
+| account_balance_id | BIGINT NOT NULL | References account_balance.id |
+| journal_line_id | VARCHAR(72) UNIQUE NOT NULL | Business key |
+| journal_journal_id | VARCHAR(64) NOT NULL | Denormalized |
+| account_account_id | VARCHAR(64) NOT NULL | Denormalized |
+| leg_id | VARCHAR(64) | Leg identifier |
+| balance_type | VARCHAR(64) NOT NULL | Balance type code |
+| position | VARCHAR(16) NOT NULL | CURRENT \| LOCKED \| FROZEN |
+| currency | VARCHAR(8) NOT NULL | Currency code |
+| entry_type | VARCHAR(8) NOT NULL | DEBIT \| CREDIT |
+| amount | DECIMAL(34,16) NOT NULL | Transaction amount (>0) |
+| balance_before | DECIMAL(34,16) NOT NULL | Balance before posting |
+| balance_after | DECIMAL(34,16) NOT NULL | Balance after posting |
+| config_version | INT NOT NULL | Balance Type config version |
+| created_at | TIMESTAMP(6) NOT NULL | Creation timestamp |
+| updated_at | TIMESTAMP(6) NOT NULL | Update timestamp |
+
+> **Note**: All FK columns are logical references only (no FOREIGN KEY constraints). Data integrity is guaranteed by the RocksDB State Machine. `INSERT IGNORE` is used for idempotent projection inserts.
+
+#### projection_event_log
+
+| Column | Type | Description |
+|---|---|---|
+| id | BIGINT AUTO_INCREMENT PK | Surrogate primary key |
+| account_account_id | VARCHAR(64) NOT NULL | Account business key |
+| balance_type | VARCHAR(64) NOT NULL | Balance type code |
+| currency | VARCHAR(8) NOT NULL | Currency code |
+| account_seq | BIGINT NOT NULL | Monotonic sequence number |
+| journal_line_id | VARCHAR(72) NOT NULL | Journal line business key |
+| journal_journal_id | VARCHAR(64) NOT NULL | Journal business key |
+| event_id | VARCHAR(64) NOT NULL | Kafka event UUID |
+| status | VARCHAR(16) NOT NULL | APPLIED \| SKIPPED_DUPLICATE \| SKIPPED_STALE |
+| processed_at | TIMESTAMP(6) NOT NULL | Processing timestamp |
+
+UK: `(account_account_id, balance_type, currency, account_seq)`
 
 ### 6.3 Data Guarantee
 
@@ -507,6 +611,80 @@ Recovery time: depends on number of logs since last snapshot
 RocksDB: Strong durability, the single source of truth for ledger data
 MySQL: Eventually consistent query view, can be rebuilt from RocksDB replay
 ```
+
+### 6.4 Kafka Message Format
+
+The ProjectionConsumer listens to two topics. Messages are emitted by State Machine → OutboxStore → Kafka Producer.
+
+#### Topic: `ledger.account.v1`
+
+Account creation / status change events. Consumed by `onAccountCreated`.
+
+```json
+{
+  "accountId": "STRESS-HOT-CO-001",
+  "accountType": "COMPANY",
+  "displayName": "Hotspot Co",
+  "ownerId": "CO-HOTSPOT",
+  "status": "ACTIVE",
+  "createdAt": [2026, 5, 30, 13, 30, 0, 123456000]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| accountId | String | Business key |
+| accountType | String | CLIENT \| COMPANY \| NOSTRO \| SUSPENSE \| CONTROL \| BANK |
+| displayName | String | Display name (may be empty) |
+| ownerId | String\|null | Owner (may be null) |
+| status | String | ACTIVE \| FROZEN \| CLOSED |
+| createdAt | JSON Array | [year, month, day, hour, minute, second, nanosecond] |
+
+#### Topic: `ledger.balance.change.v1`
+
+Emitted after every State Machine apply. One event per journal_line. Consumed by `onBalanceChange`.
+
+```json
+{
+  "eventId": "19e7827f731a12e2502069a44e6",
+  "journalId": "JNL-0001",
+  "journalLineId": "JNL-0001-01",
+  "requestId": "k6-2-0-1780132341011",
+  "commandType": "POSTING",
+  "accountId": "STRESS-HOT-CO-001",
+  "balanceType": "AVAILABLE_BALANCE",
+  "position": "CURRENT",
+  "currency": "USDT",
+  "entryType": "CREDIT",
+  "amount": 5000.00000000,
+  "preBalance": 0,
+  "postBalance": 5000.00000000,
+  "accountSeq": 1,
+  "businessEventRef": "SEED-BTC",
+  "valueDate": [2026, 5, 27],
+  "configVersion": 1
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| eventId | String | Kafka event UUID (for tracing) |
+| journalId | String | Journal business key |
+| journalLineId | String | Journal line business key (JNL-XXXX-NN) |
+| requestId | String | Original request UUID v7 |
+| commandType | String | POSTING \| REVERSAL \| ADJUSTMENT |
+| accountId | String | Account business key |
+| balanceType | String | Balance type code |
+| position | String | CURRENT \| LOCKED \| FROZEN |
+| currency | String | Currency code |
+| entryType | String | DEBIT \| CREDIT |
+| amount | Number | Transaction amount |
+| preBalance | Number | Balance before posting |
+| postBalance | Number | Balance after posting |
+| accountSeq | Long | Monotonic sequence (projection seq guard) |
+| businessEventRef | String | Upstream business reference |
+| valueDate | JSON Array | [year, month, day] |
+| configVersion | Integer | Balance Type config version |
 
 ---
 
