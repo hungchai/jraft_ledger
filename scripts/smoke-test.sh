@@ -27,6 +27,7 @@ find_leader() {
 }
 
 BASE=$(find_leader "${1:-auto}")
+PROJECTION="http://localhost:8089"
 
 # Generate unique suffix for this run
 SUFFIX="$(date +%s%N | tail -c 6)"
@@ -46,10 +47,15 @@ echo "=== Smoke Tests against $BASE ==="
 echo "Using unique accounts: $CLIENT_ACC, $COMPANY_ACC"
 echo ""
 
-# 1. Health
-echo "[1] Health check"
+# 1. Health — Ledger cluster
+echo "[1] Health check (ledger cluster)"
 R=$(curl -s "$BASE/health")
 check "health UP" '"UP"' "$R"
+
+# 1b. Projection health
+echo "[1b] Health check (projection)"
+R=$(curl -s "$PROJECTION/actuator/health")
+check "projection health UP" '"UP"' "$R"
 
 # 2. Create account
 echo "[2] Create $CLIENT_ACC"
@@ -245,16 +251,40 @@ check "lastAppliedIndex within 1 across nodes" "1" "$( [ "$LAI_DIFF" -le 1 ] && 
 check "smRaftLogIndex identical across nodes" "$SMR1" "$SMR2"
 check "smJournalSeq identical across nodes" "$JRS1" "$JRS2"
 
-# C. MySQL projection consistency
+# C. MySQL projection consistency (poll — projection is async)
 echo "[C] MySQL projection consistency"
-MYSQL_AMT=$(docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN \
-  -e "SELECT amount FROM account_balance WHERE account_account_id = '$CLIENT_ACC' AND balance_type = 'AVAILABLE_BALANCE' AND currency = 'USD'" 2>/dev/null || echo "")
-if [ -n "$MYSQL_AMT" ]; then
-  # MySQL returns DECIMAL with trailing zeros (e.g. 700.00000000), strip for comparison
-  MYSQL_AMT_TRIMMED=$(echo "$MYSQL_AMT" | sed 's/\.0*$//')
-  check "MySQL balance matches SM" "$MYSQL_AMT_TRIMMED" "$AMT1"
+MYSQL_MATCH=0
+for attempt in $(seq 1 15); do
+  MYSQL_AMT=$(docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN \
+    -e "SELECT amount FROM account_balance WHERE account_account_id = '$CLIENT_ACC' AND balance_type = 'AVAILABLE_BALANCE' AND currency = 'USD'" 2>/dev/null || echo "")
+  if [ -n "$MYSQL_AMT" ]; then
+    MYSQL_AMT_TRIMMED=$(echo "$MYSQL_AMT" | sed 's/\.0*$//')
+    # Normalize SM amount: strip trailing .0* so 700.0 == 700
+    AMT1_TRIM=$(echo "$AMT1" | sed 's/\.0*$//')
+    if [ "$MYSQL_AMT_TRIMMED" = "$AMT1_TRIM" ]; then
+      MYSQL_MATCH=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [ "$MYSQL_MATCH" -eq 1 ]; then
+  check "MySQL balance matches SM" "$AMT1_TRIM" "$MYSQL_AMT_TRIMMED"
 else
-  echo "  SKIP: MySQL not reachable"
+  echo "  FAIL: MySQL projection consistency (timed out or mismatch)"
+  FAIL=$((FAIL+1))
+fi
+
+# D. Projection consumer lag / event processing
+echo "[D] Projection event processing"
+PROJ_METRICS=$(curl -s "$PROJECTION/actuator/prometheus")
+PROJ_EVENTS=$(echo "$PROJ_METRICS" | grep 'ledger_projection_events_processed{' | sed 's/.* //')
+if [ -n "$PROJ_EVENTS" ] && [ "$PROJ_EVENTS" != "0" ]; then
+  echo "  PASS: projection has processed events ($PROJ_EVENTS)"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL: projection events_processed is zero or missing"
+  FAIL=$((FAIL+1))
 fi
 
 echo ""
