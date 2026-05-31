@@ -21,21 +21,29 @@ public class ConflationQueue {
 
     private final LongAdder offered = new LongAdder();
     private final LongAdder conflated = new LongAdder();
-    /** Approximate pending count (key count, not total offers). */
-    private volatile int approxSize = 0;
 
     /**
      * Offer a balance update. If a newer update for the same key already
      * exists (higher accountSeq), this offer is dropped.
+     *
+     * <p>Uses compute() for atomic compare-and-swap: the entire
+     * (check-seq, decide, update) sequence is irreversible and race-free.
+     * The array hack captures the replacement decision out of the lambda.
      */
     public void offer(BalanceUpdate bu) {
         offered.increment();
-        BalanceUpdate prev = latest.put(bu, bu);
-        if (prev == null) {
-            approxSize++;
-        } else if (prev.accountSeq() > bu.accountSeq()) {
-            latest.put(bu, prev); // restore higher-seq
-        } else {
+        boolean[] replaced = {false};
+        latest.compute(bu, (k, v) -> {
+            if (v == null) {
+                return bu;
+            }
+            if (v.accountSeq() > bu.accountSeq()) {
+                return v; // keep newer
+            }
+            replaced[0] = true;
+            return bu;
+        });
+        if (replaced[0]) {
             conflated.increment();
         }
     }
@@ -43,22 +51,44 @@ public class ConflationQueue {
     /**
      * Drain up to {@code max} conflated updates into {@code out}.
      * Returns number drained. No ordering guarantee — concurrent-safe.
+     *
+     * <p>The compute callback only removes an entry if the value reference
+     * is still the same one we observed — meaning a concurrent offer() for
+     * the same key (which would replace the value) will prevent removal
+     * and skip that entry. This ensures no update is lost to drain.
      */
     public int drainTo(List<BalanceUpdate> out, int max) {
         out.clear();
         int count = 0;
-        var iter = latest.values().iterator();
+        var iter = latest.entrySet().iterator();
         while (count < max && iter.hasNext()) {
-            out.add(iter.next());
-            iter.remove();
-            count++;
+            var entry = iter.next();
+            BalanceUpdate value = entry.getValue();
+            boolean[] removed = {false};
+            latest.compute(entry.getKey(), (k, v) -> {
+                if (v == value) {
+                    removed[0] = true;
+                    out.add(value);
+                    return null;
+                }
+                return v;
+            });
+            if (removed[0]) {
+                count++;
+            }
         }
-        approxSize = Math.max(0, approxSize - count);
         return count;
     }
 
-    public int size() { return approxSize; }
-    public boolean isEmpty() { return approxSize <= 0; }
+    /** Drop all pending updates. Safe to call concurrently with offer/drain. */
+    public void clear() {
+        latest.clear();
+        offered.reset();
+        conflated.reset();
+    }
+
+    public int size() { return latest.size(); }
+    public boolean isEmpty() { return latest.isEmpty(); }
     public long offeredCount() { return offered.sum(); }
     public long conflatedCount() { return conflated.sum(); }
 }

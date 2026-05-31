@@ -100,6 +100,9 @@ public class ProjectionConsumer {
                     session.commit();
                 }
                 balanceWrites.add(drained);
+                log.info("[BALANCE] drained={} queueSize={} offered={} conflated={}",
+                        drained, balanceQueue.size(),
+                        balanceQueue.offeredCount(), balanceQueue.conflatedCount());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
