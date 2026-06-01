@@ -96,8 +96,9 @@ if $FLUSH && ! $RECON_ONLY; then
   rm -rf "$PROJECT_DIR/jraft_ledger/mysql" \
          "$PROJECT_DIR/jraft_ledger/node1/rocksdb" "$PROJECT_DIR/jraft_ledger/node1/raft" \
          "$PROJECT_DIR/jraft_ledger/node2/rocksdb" "$PROJECT_DIR/jraft_ledger/node2/raft" \
-         "$PROJECT_DIR/jraft_ledger/node3/rocksdb" "$PROJECT_DIR/jraft_ledger/node3/raft"
-  pass "MySQL + RocksDB + Raft log flushed"
+         "$PROJECT_DIR/jraft_ledger/node3/rocksdb" "$PROJECT_DIR/jraft_ledger/node3/raft" \
+         "$PROJECT_DIR/jraft_ledger/kafka"
+  pass "MySQL + RocksDB + Raft log + Kafka flushed"
 fi
 
 # ============================================================
@@ -155,7 +156,7 @@ if ! $RECON_ONLY; then
     "$K6_SCRIPT" 2>&1) || true
 
   # Extract key metrics
-  ITERATIONS=$(echo "$K6_OUTPUT" | grep "iterations" | tail -1 | grep -oE '[0-9.]+' | head -1)
+  ITERATIONS=$(echo "$K6_OUTPUT" | grep "iterations\.\.\." | grep -oE '[0-9]+' | head -1)
   FAILED=$(echo "$K6_OUTPUT" | grep "http_req_failed" | tail -1 | grep -oE '[0-9.]+%' | head -1)
   P50=$(echo "$K6_OUTPUT" | grep "p(50)=" | tail -1 | grep -oE 'p\(50\)=[0-9.]+ms' | head -1)
   P95=$(echo "$K6_OUTPUT" | grep "p(95)=" | tail -1 | grep -oE 'p\(95\)=[0-9.]+ms' | head -1)
