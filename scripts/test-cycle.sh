@@ -328,10 +328,102 @@ done
 # 6. Summary
 # ============================================================
 
+# ============================================================
+# 6. Diagnostic snapshot — capture full node state for debugging
+# ============================================================
+
+DIAG_DIR="$PROJECT_DIR/jraft_ledger/diagnostics"
+mkdir -p "$DIAG_DIR"
+DIAG_FILE="$DIAG_DIR/recon-$(date +%Y%m%d-%H%M%S).log"
+{
+  echo "=== Diagnostic Snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+  echo "Test: $VUS VUs × $DURATION"
+  echo "Iterations: ${ITERATIONS:-?}  Failed: ${FAILED:-?}  p50=${P50:-?}  p95=${P95:-?}"
+  echo ""
+  echo "--- Raft Status ---"
+  for p in 8081 8082 8083; do
+    curl -s "http://localhost:${p}/ledger/cluster/raft-status" 2>/dev/null
+    echo ""
+  done
+  echo ""
+  echo "--- STRESS-HOT-CO-001 Balances ---"
+  for p in 8081 8082 8083; do
+    echo -n ":${p} "
+    curl -s "http://localhost:${p}/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=USDT" 2>/dev/null
+    echo ""
+    echo -n ":${p} "
+    curl -s "http://localhost:${p}/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=BTC" 2>/dev/null
+    echo ""
+  done
+  echo ""
+  echo "--- MySQL: $HOTSPOT_ACC ---"
+  docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -t \
+    -e "SELECT account_account_id, currency, amount, account_seq FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
+  echo ""
+  echo "--- MySQL: Journal count ---"
+  docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN \
+    -e "SELECT COUNT(*) FROM journal; SELECT COUNT(*) FROM projection_event_log;" 2>/dev/null
+  echo ""
+  echo "--- Follower logs (last 20 errors) ---"
+  for n in 2 3; do
+    echo "=== node-${n} ==="
+    docker logs "ledger-node-${n}" 2>&1 | grep -i "error\|exception\|Failed to apply" | tail -5
+  done
+} > "$DIAG_FILE" 2>/dev/null
+
+# ============================================================
+# 7. Summary
+# ============================================================
+
 echo ""
-echo "========================================"
-echo "  Results: $PASS passed, $FAIL failed, $WARN warnings"
-echo "========================================"
+echo "========================================="
+echo " TEST CYCLE SUMMARY"
+echo "========================================="
+printf "  %-8s %s\n" "VUs:"      "$VUS"
+printf "  %-8s %s\n" "Duration:" "$DURATION"
+printf "  %-8s %s\n" "Iter:"     "${ITERATIONS:-?}"
+printf "  %-8s %s\n" "Failed:"   "${FAILED:-?}"
+printf "  %-8s %s\n" "p50:"      "${P50:-?}"
+printf "  %-8s %s\n" "p95:"      "${P95:-?}"
+echo ""
+printf "  %-4s %-25s %s\n" "?" "Check" "Detail"
+echo "  ──── ──────────────────────── ──────────────────────────────────"
+printf "  %-4s %-25s %s\n" \
+  "$([ "$LA1" = "$LA2" ] && [ "$LA2" = "$LA3" ] && echo "✅" || echo "❌")" \
+  "Raft lastAppliedIndex" \
+  "$LA1 / $LA2 / $LA3"
+printf "  %-4s %-25s %s\n" \
+  "$([ "$DIFF_SM" -le 10 ] && echo "✅" || echo "❌")" \
+  "Raft smJournalSeq" \
+  "$SM1 / $SM2 / $SM3 (max diff=$DIFF_SM)"
+printf "  %-4s %-25s %s\n" \
+  "$([ "$SM_JNLS" = "$MYSQL_JNLS" ] && echo "✅" || echo "⚠️")" \
+  "MySQL journal lag" \
+  "SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$((SM_JNLS - MYSQL_JNLS))"
+
+# Hotspot balance summary
+for ccy in "${CURRENCIES[@]}"; do
+  V1=$(api_balance "${NODES[0]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  V2=$(api_balance "${NODES[1]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  V3=$(api_balance "${NODES[2]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  M=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$HOTSPOT_ACC' AND currency='$ccy';")
+  MATCH=$(num_eq "$V1" "$V2" && num_eq "$V2" "$V3" && echo "✅" || echo "❌")
+  M_MATCH=$(num_eq "$V1" "$M" && echo "✅" || echo "⚠️")
+  printf "  %-4s %-25s %s\n" \
+    "$MATCH" \
+    "Hotspot $ccy cross-node" \
+    "$(normalize "$V1") / $(normalize "$V2") / $(normalize "$V3")"
+  printf "  %-4s %-25s %s\n" \
+    "$M_MATCH" \
+    "Hotspot $ccy MySQL" \
+    "leader=$(normalize "$V1") MySQL=$(normalize "$M")"
+done
+
+echo "  ──── ──────────────────────── ──────────────────────────────────"
+printf "  %-25s %d passed, %d failed, %d warnings\n" "" "$PASS" "$FAIL" "$WARN"
+echo "========================================="
+echo "  Diagnostics: $DIAG_FILE"
+echo ""
 
 if [ "$FAIL" -eq 0 ]; then
   echo -e "${GREEN}TEST CYCLE PASSED${NC}"
