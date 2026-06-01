@@ -222,7 +222,8 @@ echo ""
 echo "=== Step 5: Reconciliation ==="
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
-ACCOUNTS=("STRESS-HOT-CO-001" "STRESS-CLI-0001" "STRESS-CLI-0002")
+HOTSPOT_ACC="STRESS-HOT-CO-001"
+ACCOUNTS=("$HOTSPOT_ACC" "STRESS-CLI-0001" "STRESS-CLI-0002")
 CURRENCIES=("USDT" "BTC")
 
 # --- Raft consistency ---
@@ -248,7 +249,36 @@ else
   fail "smJournalSeq diverged: $SM1 / $SM2 / $SM3 (diff=$DIFF_SM)"
 fi
 
-# --- API balance cross-node ---
+# --- 🔴 HOTSPOT ($HOTSPOT_ACC) — mandatory reconciliation rule ---
+echo ""
+echo "--- 🔴 HOTSPOT: $HOTSPOT_ACC ---"
+for ccy in "${CURRENCIES[@]}"; do
+  V1=$(api_balance "${NODES[0]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  V2=$(api_balance "${NODES[1]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  V3=$(api_balance "${NODES[2]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+  MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$HOTSPOT_ACC' AND currency='$ccy';")
+  LEADER_VAL=$(api_balance "$BASE_URL" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
+
+  # Cross-node check
+  if num_eq "$V1" "$V2" && num_eq "$V2" "$V3"; then
+    pass "$ccy cross-node: identical ($(normalize "$V1"))"
+  else
+    # Compute numeric diffs
+    D21=$(python3 -c "print(float('$V2') - float('$V1'))" 2>/dev/null || echo "?")
+    D31=$(python3 -c "print(float('$V3') - float('$V1'))" 2>/dev/null || echo "?")
+    fail "$ccy cross-node: leader=$V1 node2=$V2(d$D21) node3=$V3(d$D31)"
+  fi
+
+  # MySQL vs leader check
+  if num_eq "$LEADER_VAL" "$MYSQL_VAL"; then
+    pass "$ccy MySQL vs leader: match ($(normalize "$LEADER_VAL"))"
+  else
+    DM=$(python3 -c "print(float('$MYSQL_VAL') - float('$LEADER_VAL'))" 2>/dev/null || echo "?")
+    fail "$ccy MySQL vs leader: leader=$LEADER_VAL MySQL=$MYSQL_VAL(d$DM)"
+  fi
+done
+
+# --- API balance cross-node (clients) ---
 echo ""
 echo "--- API balance cross-node ---"
 for acc in "${ACCOUNTS[@]}"; do
@@ -262,19 +292,6 @@ for acc in "${ACCOUNTS[@]}"; do
       fail "$acc $ccy: $V1 / $V2 / $V3"
     fi
   done
-done
-
-# --- MySQL vs Leader API (Hotspot) ---
-echo ""
-echo "--- MySQL vs Leader API ---"
-for ccy in "${CURRENCIES[@]}"; do
-  API_VAL=$(api_balance "$BASE_URL" "STRESS-HOT-CO-001" "AVAILABLE_BALANCE" "$ccy")
-  MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='STRESS-HOT-CO-001' AND currency='$ccy';")
-  if num_eq "$API_VAL" "$MYSQL_VAL"; then
-    pass "Hotspot $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
-  else
-    fail "Hotspot $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
-  fi
 done
 
 # --- MySQL journal count vs SM ---
