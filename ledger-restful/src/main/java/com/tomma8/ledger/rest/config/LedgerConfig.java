@@ -289,6 +289,10 @@ public class LedgerConfig {
                                         AccountMetaStore accountMetaStore,
                                         LedgerStateMachine ledgerStateMachine) {
         return args -> {
+            // Restore persisted state from RocksDB before bootstrapping.
+            // This ensures previously persisted accounts/balances survive restarts.
+            ledgerStateMachine.loadSnapshotFromRocksDB();
+
             // Register balance types
             configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
                     "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
@@ -335,6 +339,10 @@ public class LedgerConfig {
                     log.info("Bootstrap account created: {} (type={})", ba.id(), ba.type());
                 }
             }
+            // Persist bootstrap accounts + any initial state to RocksDB snapshot.
+            // Without this, bootstrap accounts exist only in-memory and are lost on restart.
+            try { ledgerStateMachine.takeSnapshot(); log.info("Bootstrap snapshot saved"); }
+            catch (Exception e) { log.warn("Bootstrap snapshot failed (RocksDB may not be open): {}", e.getMessage()); }
         };
     }
 }

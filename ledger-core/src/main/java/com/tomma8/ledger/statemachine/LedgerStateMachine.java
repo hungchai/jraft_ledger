@@ -507,10 +507,13 @@ public class LedgerStateMachine {
             long tBalanceEnd = System.nanoTime();
 
             // 6. Generate journal
-            long index = raftLogIndex.incrementAndGet();
+            // index/seq/journalId must all derive from the Raft log index so they
+            // are identical across nodes. Fall back to local counters only on the
+            // non-Raft path (raftIndex == 0: standalone/tests).
             long seq = raftIndex > 0
                     ? raftIndex
                     : journalSequence.incrementAndGet();
+            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
             String journalId = raftIndex > 0
                     ? String.format("JNL-%016d", raftIndex)
                     : String.format("JNL-%04d", seq);
@@ -799,10 +802,10 @@ public class LedgerStateMachine {
                 return result;
             }
 
-            long index = raftLogIndex.incrementAndGet();
             long seq = raftIndex > 0
                     ? raftIndex
                     : journalSequence.incrementAndGet();
+            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
             String reversalJournalId = raftIndex > 0
                     ? String.format("JNL-%016d", raftIndex)
                     : String.format("JNL-%04d", seq);
