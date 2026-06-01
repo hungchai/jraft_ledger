@@ -155,6 +155,9 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             lastAppliedIndex.set(index);
             iter.next();
         }
+        } finally {
+            snapshotLock.readLock().unlock();
+        }
     }
 
     private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
@@ -185,6 +188,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     @Override
     public void onSnapshotSave(SnapshotWriter writer, Closure done) {
+        snapshotLock.writeLock().lock();
         try {
             byte[] data = ledgerStateMachine.snapshotBytes();
             String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
@@ -195,11 +199,14 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         } catch (Exception e) {
             log.error("Snapshot save failed", e);
             done.run(new Status(RaftError.EIO, e.getMessage()));
+        } finally {
+            snapshotLock.writeLock().unlock();
         }
     }
 
     @Override
     public boolean onSnapshotLoad(SnapshotReader reader) {
+        snapshotLock.writeLock().lock();
         try {
             if (reader.listFiles() != null && !reader.listFiles().isEmpty()) {
                 String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
@@ -216,6 +223,8 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         } catch (Exception e) {
             log.error("Snapshot load failed", e);
             return false;
+        } finally {
+            snapshotLock.writeLock().unlock();
         }
     }
 
