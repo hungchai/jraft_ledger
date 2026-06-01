@@ -774,9 +774,9 @@ public class LedgerStateMachine {
                 var entry = existing2.get();
                 if (CommandResult.COMPLETED.equals(entry.status())) {
                     return CommandResult.completed(entry.journalId());
+                }
+                return CommandResult.rejected(entry.errors(), entry.errorDetails());
             }
-            return CommandResult.rejected(entry.errors(), entry.errorDetails());
-        }
 
         // Re-fetch original journal
             Journal orig = journalStore.get(cmd.originalJournalId());
