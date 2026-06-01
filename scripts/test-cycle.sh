@@ -74,6 +74,19 @@ mysql_query() {
   docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN -e "$1" 2>/dev/null
 }
 
+# Normalize numeric strings: strip trailing zeros, then trailing dot.
+# "100000300.0000000000000000" → "100000300"
+# "100000300.0" → "100000300"
+# "3999.99589552" → "3999.99589552"
+normalize() {
+  echo "$1" | sed -E 's/0+$//;s/\.$//'
+}
+
+# Compare two numeric strings after normalization.
+num_eq() {
+  [ "$(normalize "$1")" = "$(normalize "$2")" ]
+}
+
 api_balance() {
   local node=$1 account=$2 btype=$3 ccy=$4
   curl -s --max-time 5 "${node}/ledger/balances?accountId=${account}&balanceType=${btype}&currency=${ccy}" \
@@ -257,7 +270,7 @@ echo "--- MySQL vs Leader API ---"
 for ccy in "${CURRENCIES[@]}"; do
   API_VAL=$(api_balance "$BASE_URL" "STRESS-HOT-CO-001" "AVAILABLE_BALANCE" "$ccy")
   MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='STRESS-HOT-CO-001' AND currency='$ccy';")
-  if [ "$API_VAL" = "$MYSQL_VAL" ]; then
+  if num_eq "$API_VAL" "$MYSQL_VAL"; then
     pass "Hotspot $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
   else
     fail "Hotspot $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
@@ -286,8 +299,8 @@ for acc in STRESS-CLI-0001 STRESS-CLI-0002 STRESS-CLI-0050 STRESS-CLI-0100; do
   for ccy in "${CURRENCIES[@]}"; do
     API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
     MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
-    if [ "$API_VAL" = "$MYSQL_VAL" ]; then
-      pass "$acc $ccy: match ($API_VAL)"
+    if num_eq "$API_VAL" "$MYSQL_VAL"; then
+      pass "$acc $ccy: match ($(normalize "$MYSQL_VAL"))"
     else
       fail "$acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
     fi
