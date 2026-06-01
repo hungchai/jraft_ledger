@@ -207,8 +207,8 @@ public class LedgerStateMachine {
         journalSequence.set(journalCount);
     }
 
-    public long getRaftLogIndex() { return raftLogIndex.get(); }
-    public long getJournalSequence() { return journalSequence.get(); }
+    public long getRaftLogIndex() { return journalStore.size(); }
+    public long getJournalSequence() { return journalStore.size(); }
 
     public BalanceStore getBalanceStore() { return balanceStore; }
     public AccountMetaStore getAccountMetaStore() { return accountMetaStore; }
