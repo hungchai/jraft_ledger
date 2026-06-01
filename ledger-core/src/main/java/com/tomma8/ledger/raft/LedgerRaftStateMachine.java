@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * SOFAJRaft StateMachine adapter wrapping our LedgerStateMachine.
@@ -43,6 +44,10 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private volatile boolean isLeader;
     private NodeRole nodeRole;
     private java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands;
+
+    // Guards snapshot save/load against concurrent onApply to prevent
+    // capturing partial state (e.g. one balance updated but not the other).
+    private final ReentrantReadWriteLock snapshotLock = new ReentrantReadWriteLock();
 
     // Reusable deserialization buffer to avoid per-command byte[] allocation on hot path
     private static final int DESER_BUFFER_SIZE = 16384;
@@ -76,7 +81,9 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     @Override
     public void onApply(Iterator iter) {
-        while (iter.hasNext()) {
+        snapshotLock.readLock().lock();
+        try {
+            while (iter.hasNext()) {
             long index = iter.getIndex();
             Closure done = iter.done();
             ByteBuffer data = iter.getData();
@@ -96,8 +103,8 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                     long tDeserEnd = System.nanoTime();
 
-                    // Segment 3: execute state machine
-                    CommandResult result = executeCommand(cmd);
+                    // Segment 3: execute state machine with deterministc Raft index
+                    CommandResult result = executeCommand(cmd, index);
                     long tExecuteEnd = System.nanoTime();
 
                     // Segment 3 end: complete future → unblocks HTTP thread
@@ -150,28 +157,28 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
-    private CommandResult executeCommand(RaftCommand cmd) {
+    private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
         if (cmd instanceof AdjustmentCommand a) {
-            return ledgerStateMachine.applyAdjustment(a);
+            return ledgerStateMachine.applyAdjustment(a, raftIndex);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledgerStateMachine.applyPosting(p);
+            return ledgerStateMachine.applyPosting(p, raftIndex);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledgerStateMachine.applyReversal(r);
+            return ledgerStateMachine.applyReversal(r, raftIndex);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledgerStateMachine.applyAccountCreate(a);
+            return ledgerStateMachine.applyAccountCreate(a, raftIndex);
         }
         if (cmd instanceof AccountFreezeCommand f) {
-            return f.freeze() ? ledgerStateMachine.applyFreeze(f)
-                    : ledgerStateMachine.applyUnfreeze(f);
+            return f.freeze() ? ledgerStateMachine.applyFreeze(f, raftIndex)
+                    : ledgerStateMachine.applyUnfreeze(f, raftIndex);
         }
         if (cmd instanceof AccountCloseCommand c) {
-            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId());
+            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId(), raftIndex);
         }
         if (cmd instanceof AccountAddBalanceTypeCommand a) {
-            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId());
+            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), raftIndex);
         }
         throw new IllegalArgumentException("Unknown command: " + cmd.getClass().getName());
     }

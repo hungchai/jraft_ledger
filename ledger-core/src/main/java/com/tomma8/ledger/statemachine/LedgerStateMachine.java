@@ -113,6 +113,28 @@ public class LedgerStateMachine {
         }
     }
 
+    private void persistAccountMeta(String accountId, Account account) {
+        if (rocksDB == null) return;
+        try {
+            byte[] key = accountId.getBytes(StandardCharsets.UTF_8);
+            byte[] value = objectMapper.writeValueAsBytes(account);
+            rocksDB.put("account_meta", key, value);
+        } catch (Exception e) {
+            log.error("RocksDB account_meta write failed for accountId={}", accountId, e);
+        }
+    }
+
+    private void persistBalanceEntry(AccountBalanceKey key, BalanceEntry entry) {
+        if (rocksDB == null || entry == null) return;
+        try {
+            String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
+            byte[] value = objectMapper.writeValueAsBytes(entry);
+            rocksDB.put("balance", keyStr.getBytes(StandardCharsets.UTF_8), value);
+        } catch (Exception e) {
+            log.error("RocksDB balance write failed for key={}", key, e);
+        }
+    }
+
     private static final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
@@ -142,6 +164,27 @@ public class LedgerStateMachine {
         byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
         if (raw == null) return;
         restoreFromBytes(raw);
+    }
+
+    /**
+     * Load persisted state from RocksDB into in-memory stores.
+     * Call this on startup before any bootstrap/init logic so that
+     * previously persisted state (accounts, balances) is restored.
+     * Idempotent — if no snapshot exists, this is a no-op.
+     */
+    public void loadSnapshotFromRocksDB() {
+        if (rocksDB == null) return;
+        try {
+            byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
+            if (raw == null || raw.length == 0) {
+                log.info("No RocksDB snapshot found — starting from empty state");
+                return;
+            }
+            restoreFromBytes(raw);
+            log.info("Restored state from RocksDB snapshot");
+        } catch (Exception e) {
+            log.warn("Failed to load RocksDB snapshot (starting fresh): {}", e.getMessage());
+        }
     }
 
     public byte[] snapshotBytes() throws Exception {
@@ -239,18 +282,27 @@ public class LedgerStateMachine {
 
     public CommandResult applyPosting(PostingCommand cmd) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING");
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", 0);
+    }
+    public CommandResult applyPosting(PostingCommand cmd, long raftIndex) {
+        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", raftIndex);
     }
 
     public CommandResult applyAdjustment(AdjustmentCommand cmd) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT");
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", 0);
+    }
+    public CommandResult applyAdjustment(AdjustmentCommand cmd, long raftIndex) {
+        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", raftIndex);
     }
 
     private CommandResult applyJournalCommand(String requestId, String businessEventType,
                                               String businessEventRef, LocalDate valueDate,
                                               List<PostingCommand.Leg> legs,
-                                              JournalType journalType, String commandLabel) {
+                                              JournalType journalType, String commandLabel,
+                                              long raftIndex) {
         long t0 = System.nanoTime();
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
@@ -456,8 +508,12 @@ public class LedgerStateMachine {
 
             // 6. Generate journal
             long index = raftLogIndex.incrementAndGet();
-            long seq = journalSequence.incrementAndGet();
-            String journalId = String.format("JNL-%04d", seq);
+            long seq = raftIndex > 0
+                    ? raftIndex
+                    : journalSequence.incrementAndGet();
+            String journalId = raftIndex > 0
+                    ? String.format("JNL-%016d", raftIndex)
+                    : String.format("JNL-%04d", seq);
             Instant now = Instant.now();
 
             for (var lwl : reusableLines) {
@@ -572,6 +628,9 @@ public class LedgerStateMachine {
 
     // ── Account Management ─────────────────────────────────────
 
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
+        return applyAccountCreate(cmd);
+    }
     public CommandResult applyAccountCreate(AccountCreateCommand cmd) {
         var existing = accountMetaStore.get(cmd.accountId());
         if (existing.isPresent()) {
@@ -596,11 +655,13 @@ public class LedgerStateMachine {
                 Set.copyOf(allowedBalanceTypes), Instant.now());
 
         accountMetaStore.put(cmd.accountId(), account);
+        persistAccountMeta(cmd.accountId(), account);
 
         // Initialize balances
         for (var init : cmd.balanceInitializations()) {
             AccountBalanceKey key = new AccountBalanceKey(cmd.accountId(), init.balanceType(), "CURRENT", init.currency());
             balanceStore.initialize(key);
+            persistBalanceEntry(key, balanceStore.get(key).orElse(null));
         }
 
         // Publish account creation event
@@ -622,37 +683,49 @@ public class LedgerStateMachine {
         return CommandResult.completed(null);
     }
 
+    public CommandResult applyFreeze(AccountFreezeCommand cmd, long raftIndex) { return applyFreeze(cmd); }
     public CommandResult applyFreeze(AccountFreezeCommand cmd) {
         Account account = accountMetaStore.getOrThrow(cmd.accountId());
-        accountMetaStore.put(cmd.accountId(), account.withStatus(AccountStatus.FROZEN));
+        Account updated = account.withStatus(AccountStatus.FROZEN);
+        accountMetaStore.put(cmd.accountId(), updated);
+        persistAccountMeta(cmd.accountId(), updated);
         return CommandResult.completed(null);
     }
 
+    public CommandResult applyUnfreeze(AccountFreezeCommand cmd, long raftIndex) { return applyUnfreeze(cmd); }
     public CommandResult applyUnfreeze(AccountFreezeCommand cmd) {
         Account account = accountMetaStore.getOrThrow(cmd.accountId());
         if (account.status() == AccountStatus.CLOSED) {
             throw new AccountClosedException(cmd.accountId());
         }
-        accountMetaStore.put(cmd.accountId(), account.withStatus(AccountStatus.ACTIVE));
+        Account updated = account.withStatus(AccountStatus.ACTIVE);
+        accountMetaStore.put(cmd.accountId(), updated);
+        persistAccountMeta(cmd.accountId(), updated);
         return CommandResult.completed(null);
     }
 
+    public CommandResult applyCloseAccount(String accountId, String requestId, long raftIndex) { return applyCloseAccount(accountId, requestId); }
     public CommandResult applyCloseAccount(String accountId, String requestId) {
         if (balanceStore.hasNonZeroBalance(accountId)) {
             throw new AccountHasNonZeroBalanceException(accountId);
         }
         Account account = accountMetaStore.getOrThrow(accountId);
-        accountMetaStore.put(accountId, account.withStatus(AccountStatus.CLOSED));
+        Account updated = account.withStatus(AccountStatus.CLOSED);
+        accountMetaStore.put(accountId, updated);
+        persistAccountMeta(accountId, updated);
         return CommandResult.completed(null);
     }
 
+    public CommandResult applyAddBalanceType(String accountId, String balanceType, String currency, String requestId, long raftIndex) { return applyAddBalanceType(accountId, balanceType, currency, requestId); }
     public CommandResult applyAddBalanceType(String accountId, String balanceType, String currency, String requestId) {
         Account account = accountMetaStore.getOrThrow(accountId);
         Account updated = account.withAdditionalBalanceType(balanceType);
         accountMetaStore.put(accountId, updated);
+        persistAccountMeta(accountId, updated);
 
         AccountBalanceKey key = new AccountBalanceKey(accountId, balanceType, "CURRENT", currency);
         balanceStore.initialize(key);
+        persistBalanceEntry(key, balanceStore.get(key).orElse(null));
 
         return CommandResult.completed(null);
     }
@@ -660,6 +733,12 @@ public class LedgerStateMachine {
     // ── Reversal (F-008 Section 4.2) ──────────────────────────────
 
     public CommandResult applyReversal(ReversalCommand cmd) {
+        return applyReversalInternal(cmd, 0);
+    }
+    public CommandResult applyReversal(ReversalCommand cmd, long raftIndex) {
+        return applyReversalInternal(cmd, raftIndex);
+    }
+    private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
@@ -721,8 +800,12 @@ public class LedgerStateMachine {
             }
 
             long index = raftLogIndex.incrementAndGet();
-            long seq = journalSequence.incrementAndGet();
-            String reversalJournalId = String.format("JNL-%04d", seq);
+            long seq = raftIndex > 0
+                    ? raftIndex
+                    : journalSequence.incrementAndGet();
+            String reversalJournalId = raftIndex > 0
+                    ? String.format("JNL-%016d", raftIndex)
+                    : String.format("JNL-%04d", seq);
             Instant now = Instant.now();
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
