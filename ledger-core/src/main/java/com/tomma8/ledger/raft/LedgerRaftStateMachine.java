@@ -144,18 +144,25 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             while (iter.hasNext()) {
             long index = iter.getIndex();
             Closure done = iter.done();
-            ByteBuffer data = iter.getData();
+            // CRITICAL: iter.getData() returns the same ByteBuffer instance held
+            // by SOFAJRaft's in-memory LogEntry cache. On the leader the replicator
+            // reads that very buffer to ship the entry to lagging followers, so any
+            // get(...) here that advances its position would make a later replication
+            // see remaining()==0 and deliver a zero-byte payload — the follower then
+            // persists an empty entry and its state machine diverges. Duplicate once
+            // up front so every read below operates on an independent position/limit
+            // and the original buffer is never mutated. (null-safe: getData() may be
+            // null for empty/no-op entries.)
+            ByteBuffer raw = iter.getData();
+            ByteBuffer data = raw != null ? raw.duplicate() : null;
             int dataLen = data != null ? data.remaining() : -1;
             // PROOF-EMPTY: log every entry's full payload (hex) so we can prove
-            // what the replicator actually delivered. Truncated to 128 hex chars
-            // to keep logs bounded; small entries (≤32 bytes) printed in full.
+            // what the replicator actually delivered. Truncated to keep logs bounded.
             String dataHex = "";
             if (data != null && data.hasRemaining()) {
                 int dumpLen = Math.min(data.remaining(), 64);
                 byte[] dump = new byte[dumpLen];
-                int savePos = data.position();
-                data.get(dump, 0, dumpLen);
-                data.position(savePos);
+                data.duplicate().get(dump, 0, dumpLen);
                 StringBuilder sb = new StringBuilder(dumpLen * 2);
                 for (byte b : dump) sb.append(String.format("%02x", b & 0xff));
                 dataHex = sb.toString();
@@ -197,23 +204,16 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     continue;
                 }
             }
+            // Safe to consume position here: `data` is a duplicate (or a
+            // recovered entry), never the replicator's shared cache buffer.
             int len = data.remaining();
-            // CRITICAL: never advance the original ByteBuffer's position.
-            // iter.getData() returns the same ByteBuffer instance held by the
-            // in-memory LogEntry cache. On the leader, SOFAJRaft's replicator
-            // reads this same buffer to ship the entry to lagging followers.
-            // If onApply consumes the position (data.get advances it), a later
-            // replication reads remaining()==0 and delivers a zero-byte payload
-            // to the follower, which then persists an empty entry and diverges.
-            // Read through a duplicate so position/limit stay untouched.
-            ByteBuffer readBuf = data.duplicate();
             byte[] bytes;
             if (len <= DESER_BUFFER_SIZE) {
                 bytes = DESER_BUFFER.get();
-                readBuf.get(bytes, 0, len);
+                data.get(bytes, 0, len);
             } else {
                 bytes = new byte[len];
-                readBuf.get(bytes);
+                data.get(bytes);
             }
             long tApplyStart = System.nanoTime(); // Segment 3 start
                 try {
