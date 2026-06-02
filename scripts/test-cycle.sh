@@ -319,9 +319,63 @@ else
   warn "Journal count: SM=$SM_JNLS MySQL=$MYSQL_JNLS (lag=$((SM_JNLS - MYSQL_JNLS)))"
 fi
 
-# --- MySQL event count ---
-MYSQL_EVENTS=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")
-echo "  MySQL events: $MYSQL_EVENTS"
+# --- MySQL events (sharded) ---
+echo ""
+echo "--- MySQL counts ---"
+MYSQL_EVENTS=$(mysql_query \
+  "SELECT SUM(cnt) FROM (
+     SELECT COUNT(*) AS cnt FROM projection_event_log_0
+     UNION ALL SELECT COUNT(*) FROM projection_event_log_1
+     UNION ALL SELECT COUNT(*) FROM projection_event_log_2
+     UNION ALL SELECT COUNT(*) FROM projection_event_log_3
+   ) t;")
+echo "  MySQL events (sharded): ${MYSQL_EVENTS:-0}"
+
+MYSQL_JNLS_COUNT=$(mysql_query "SELECT COUNT(*) FROM journal;")
+echo "  MySQL journals: $MYSQL_JNLS_COUNT"
+
+MYSQL_LINES=$(mysql_query \
+  "SELECT SUM(cnt) FROM (
+     SELECT COUNT(*) AS cnt FROM journal_line_0
+     UNION ALL SELECT COUNT(*) FROM journal_line_1
+     UNION ALL SELECT COUNT(*) FROM journal_line_2
+     UNION ALL SELECT COUNT(*) FROM journal_line_3
+   ) t;")
+echo "  MySQL journal_lines (sharded): ${MYSQL_LINES:-0}"
+
+MYSQL_BALANCES=$(mysql_query "SELECT COUNT(*) FROM account_balance;")
+echo "  MySQL balances: $MYSQL_BALANCES"
+
+# --- Full MySQL balance reconciliation (all accounts) ---
+echo ""
+echo "--- Full MySQL balance reconciliation ---"
+RECON_FILE=$(mktemp)
+MYSQL_RECON=0
+MYSQL_RECON_FAIL=0
+MYSQL_RECON_SKIP=0
+
+# Get all distinct account/ccy pairs from MySQL that have a balance
+mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null | while read -r acc ccy; do
+  [ -z "$acc" ] && continue
+  API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
+  MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
+
+  if [ "$API_VAL" = "ERR" ] || [ -z "$MYSQL_VAL" ]; then
+    MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
+  elif num_eq "$API_VAL" "$MYSQL_VAL"; then
+    MYSQL_RECON=$((MYSQL_RECON + 1))
+  else
+    MYSQL_RECON_FAIL=$((MYSQL_RECON_FAIL + 1))
+    fail "MySQL $acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
+  fi
+done
+# Recon counters written to /tmp for parent shell access
+echo "MATCH=$MYSQL_RECON MISMATCH=$MYSQL_RECON_FAIL SKIP=$MYSQL_RECON_SKIP" > "$RECON_FILE"
+
+# Fallback: if sharded event_log tables don't exist yet, try uns sharded
+if [ "${MYSQL_EVENTS:-0}" = "0" ]; then
+  MYSQL_EVENTS=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")
+fi
 
 # --- Sample client MySQL vs Leader ---
 echo ""
@@ -374,9 +428,41 @@ DIAG_FILE="$DIAG_DIR/recon-$(date +%Y%m%d-%H%M%S).log"
   docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -t \
     -e "SELECT account_account_id, currency, amount, account_seq FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
   echo ""
-  echo "--- MySQL: Journal count ---"
-  docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN \
-    -e "SELECT COUNT(*) FROM journal; SELECT COUNT(*) FROM projection_event_log;" 2>/dev/null
+  echo "--- MySQL: Counts ---"
+  echo "  journals=$(mysql_query "SELECT COUNT(*) FROM journal;")"
+  echo "  balance_rows=$(mysql_query "SELECT COUNT(*) FROM account_balance;")"
+  echo "  events=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")"
+  echo "  journal_lines=$MYSQL_LINES"
+  echo ""
+  echo "--- MySQL: Full balance reconciliation (all accounts) ---"
+  MYSQL_RECON_TOTAL=0 MYSQL_RECON_OK=0 MYSQL_RECON_BAD=0 MYSQL_RECON_SKIP=0
+  echo "  account_id,currency,api_amount,mysql_amount,status" > /tmp/recon_detail.csv
+  mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null | while read -r acc ccy; do
+    [ -z "$acc" ] && continue
+    MYSQL_RECON_TOTAL=$((MYSQL_RECON_TOTAL + 1))
+    API_VAL=$(curl -s --max-time 5 "${BASE_URL}/ledger/balances?accountId=${acc}&balanceType=AVAILABLE_BALANCE&currency=${ccy}" 2>/dev/null \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('amount','ERR'))" 2>/dev/null || echo "ERR")
+    MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='${acc}' AND currency='${ccy}';")
+    if [ "$API_VAL" = "ERR" ] || [ -z "$MYSQL_VAL" ]; then
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},SKIP" >> /tmp/recon_detail.csv
+      MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
+    elif [ "$(normalize "$API_VAL")" = "$(normalize "$MYSQL_VAL")" ]; then
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},MATCH" >> /tmp/recon_detail.csv
+      MYSQL_RECON_OK=$((MYSQL_RECON_OK + 1))
+    else
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},MISMATCH" >> /tmp/recon_detail.csv
+      MYSQL_RECON_BAD=$((MYSQL_RECON_BAD + 1))
+    fi
+    echo "MYSQL_RECON_TOTAL=$MYSQL_RECON_TOTAL MYSQL_RECON_OK=$MYSQL_RECON_OK MYSQL_RECON_BAD=$MYSQL_RECON_BAD MYSQL_RECON_SKIP=$MYSQL_RECON_SKIP" > /tmp/recon_counters
+  done
+  wait
+  # Read counters from subshell
+  eval "$(cat /tmp/recon_counters 2>/dev/null)"
+  echo "  Recon: total=${MYSQL_RECON_TOTAL:-0} match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} skip=${MYSQL_RECON_SKIP:-0}"
+  if [ -s /tmp/recon_detail.csv ]; then
+    echo "  Recon detail:"
+    cat /tmp/recon_detail.csv
+  fi
   echo ""
   echo "--- Follower logs (last 20 errors) ---"
   for n in 2 3; do
@@ -441,6 +527,19 @@ for ccy in "${CURRENCIES[@]}"; do
     "Hotspot $ccy MySQL" \
     "leader=$(normalize "$V1") MySQL=$(normalize "$M")"
 done
+
+  # MySQL full recon
+  eval "$(cat /tmp/recon_counters 2>/dev/null)"
+  printf "  %-4s %-25s %s\n" \
+    "$( [ "${MYSQL_RECON_BAD:-0}" -eq 0 ] && [ "${MYSQL_RECON_OK:-0}" -gt 0 ] && echo "✅" || echo "⚠️")" \
+    "MySQL balance recon (all)" \
+    "match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} skip=${MYSQL_RECON_SKIP:-0}"
+
+  # MySQL event/journal/line counts
+  printf "  %-4s %-25s %s\n" \
+    "📊" \
+    "MySQL counts" \
+    "journals=$MYSQL_JNLS_COUNT events=${MYSQL_EVENTS:-0} lines=${MYSQL_LINES:-0} balances=$MYSQL_BALANCES"
 
 echo "  ──── ──────────────────────── ──────────────────────────────────"
 printf "  %-25s %d passed, %d failed, %d warnings\n" "" "$PASS" "$FAIL" "$WARN"
