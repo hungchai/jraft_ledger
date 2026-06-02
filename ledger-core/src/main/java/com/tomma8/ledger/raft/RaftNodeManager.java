@@ -63,6 +63,9 @@ public class RaftNodeManager implements AutoCloseable {
             try {
                 this.node = raftGroupService.start();
                 if (this.node != null) {
+                    // Wire Node into the FSM so it can recover missing log
+                    // entries via reflection (see LedgerRaftStateMachine.setNode)
+                    this.stateMachine.setNode(this.node);
                     log.info("Raft node started: {}", serverId);
                     return true;
                 }

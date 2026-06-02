@@ -69,6 +69,9 @@ public class ClusterController {
         long appliedIndex = raftNodeManager.getStateMachine().getLastAppliedIndex();
         long smRaftLogIndex = raftNodeManager.getStateMachine().getLedgerStateMachine().getRaftLogIndex();
         long smJournalSeq = raftNodeManager.getStateMachine().getLedgerStateMachine().getJournalSequence();
+        long smAccountCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getAccountMetaStore().size();
+        long smBalanceCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getBalanceStore().size();
+        long smConfigCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getBalanceTypeConfigStore().size();
 
         Map<String, Object> status = new HashMap<>();
         status.put("nodeId", nodeId);
@@ -77,6 +80,9 @@ public class ClusterController {
         status.put("lastAppliedIndex", appliedIndex);
         status.put("smRaftLogIndex", smRaftLogIndex);
         status.put("smJournalSeq", smJournalSeq);
+        status.put("smAccountCount", smAccountCount);
+        status.put("smBalanceCount", smBalanceCount);
+        status.put("smConfigCount", smConfigCount);
 
         String peersEnv = System.getenv("PEER_NODES");
         List<String> peers = peersEnv != null

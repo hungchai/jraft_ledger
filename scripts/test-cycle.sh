@@ -195,24 +195,38 @@ echo "=== Step 4: Wait for projection catch-up ==="
 SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
 MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
 LAG=$((SM_JNLS - MYSQL_JNLS))
+echo "  Initial: SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$LAG"
 
-if [ "$LAG" -gt 100 ]; then
-  echo -n "SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$LAG — waiting"
+# Drain-rate / ETA tracking: lag is expected (async Kafka->projection->MySQL
+# pipeline). We poll the MySQL journal count, derive projection throughput
+# (rows/sec) and an ETA so the operator can see lag is shrinking, not stuck.
+PROJ_RATE=0
+if [ "$LAG" -gt 10 ]; then
+  prev_mysql=$MYSQL_JNLS
   for i in $(seq 1 60); do
     sleep 5
+    SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
     MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
     LAG=$((SM_JNLS - MYSQL_JNLS))
-    echo -n "."
+    PROJ_RATE=$(( (MYSQL_JNLS - prev_mysql) / 5 ))
+    prev_mysql=$MYSQL_JNLS
+    if [ "$PROJ_RATE" -gt 0 ]; then
+      ETA=$((LAG / PROJ_RATE))
+      printf "  [%3ds] lag=%-6d drain=%d/s eta=%ds\n" "$((i*5))" "$LAG" "$PROJ_RATE" "$ETA"
+    else
+      printf "  [%3ds] lag=%-6d drain=0/s eta=stalled\n" "$((i*5))" "$LAG"
+    fi
     if [ "$LAG" -le 10 ]; then break; fi
   done
-  echo ""
 fi
 
 if [ "$LAG" -le 10 ]; then
   pass "Projection caught up (lag=$LAG)"
 else
-  warn "Projection still lagging: $LAG journals behind"
+  warn "Projection still lagging: $LAG journals behind (drain=${PROJ_RATE}/s)"
 fi
+PROJ_LAG_FINAL=$LAG
+PROJ_RATE_FINAL=$PROJ_RATE
 
 # ============================================================
 # 5. Reconcile
@@ -396,10 +410,19 @@ printf "  %-4s %-25s %s\n" \
   "$([ "$DIFF_SM" -le 10 ] && echo "✅" || echo "❌")" \
   "Raft smJournalSeq" \
   "$SM1 / $SM2 / $SM3 (max diff=$DIFF_SM)"
+# Re-measure lag fresh at summary time (projection keeps draining after Step 4).
+SM_NOW=$(raft_status "$BASE_URL" "smJournalSeq")
+MYSQL_NOW=$(mysql_query "SELECT COUNT(*) FROM journal;")
+LAG_NOW=$((SM_NOW - MYSQL_NOW))
+if [ "$LAG_NOW" -gt 0 ] && [ "${PROJ_RATE_FINAL:-0}" -gt 0 ]; then
+  ETA_NOW="$((LAG_NOW / PROJ_RATE_FINAL))s"
+else
+  ETA_NOW="-"
+fi
 printf "  %-4s %-25s %s\n" \
-  "$([ "$SM_JNLS" = "$MYSQL_JNLS" ] && echo "✅" || echo "⚠️")" \
+  "$([ "$LAG_NOW" -le 10 ] && echo "✅" || echo "⚠️")" \
   "MySQL journal lag" \
-  "SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$((SM_JNLS - MYSQL_JNLS))"
+  "SM=$SM_NOW MySQL=$MYSQL_NOW lag=$LAG_NOW drain=${PROJ_RATE_FINAL:-?}/s eta=$ETA_NOW"
 
 # Hotspot balance summary
 for ccy in "${CURRENCIES[@]}"; do

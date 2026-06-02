@@ -2,11 +2,13 @@ package com.tomma8.ledger.raft;
 
 import com.alipay.sofa.jraft.Closure;
 import com.alipay.sofa.jraft.Iterator;
+import com.alipay.sofa.jraft.Node;
 import com.alipay.sofa.jraft.Status;
 import com.alipay.sofa.jraft.core.StateMachineAdapter;
 import com.alipay.sofa.jraft.entity.LeaderChangeContext;
 import com.alipay.sofa.jraft.error.RaftError;
-import com.alipay.sofa.jraft.error.RaftError;
+import com.alipay.sofa.jraft.storage.LogManager;
+import com.alipay.sofa.jraft.entity.LogEntry;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotReader;
 import com.alipay.sofa.jraft.storage.snapshot.SnapshotWriter;
 import com.tomma8.ledger.domain.command.AccountAddBalanceTypeCommand;
@@ -28,6 +30,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -43,6 +46,10 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private final AtomicLong lastAppliedIndex = new AtomicLong(0);
     private volatile boolean isLeader;
     private NodeRole nodeRole;
+    private Node node;
+    // Resolved via reflection from NodeImpl.logManager (SOFAJRaft 1.4.0+).
+    // Allows recovering full entries when replicator delivers empty payloads.
+    private volatile LogManager logManager;
     private java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<CommandResult>> pendingCommands;
 
     // Guards snapshot save/load against concurrent onApply to prevent
@@ -56,6 +63,57 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     public LedgerRaftStateMachine(LedgerStateMachine ledgerStateMachine) {
         this.ledgerStateMachine = ledgerStateMachine;
+        this.ledgerStateMachine.setLastAppliedIndexSource(this.lastAppliedIndex::get);
+    }
+
+    /**
+     * Wire the Raft Node so we can recover missing log entries via reflection.
+     * Called from RaftNodeManager after raftGroupService.start() succeeds.
+     */
+    public void setNode(Node node) {
+        this.node = node;
+        this.logManager = resolveLogManager(node);
+        if (this.logManager != null) {
+            log.info("[RECOVERY_READY] LogManager resolved via reflection — empty-payload entries can be recovered from local log storage");
+        } else {
+            log.warn("[RECOVERY_DEGRADED] Could not resolve LogManager via reflection — empty-payload entries will be skipped (divergence risk)");
+        }
+    }
+
+    private static LogManager resolveLogManager(Node node) {
+        if (node == null) return null;
+        try {
+            // SOFAJRaft 1.4.0: private LogManager logManager; on NodeImpl
+            java.lang.reflect.Field f = node.getClass().getDeclaredField("logManager");
+            f.setAccessible(true);
+            return (LogManager) f.get(node);
+        } catch (NoSuchFieldException e) {
+            log.warn("[RECOVERY_REFLECT_FAIL] NoSuchField 'logManager' on {} — SOFAJRaft version may differ from 1.4.0", node.getClass().getName());
+        } catch (Throwable t) {
+            log.warn("[RECOVERY_REFLECT_FAIL] reflection error: {}", t.toString());
+        }
+        return null;
+    }
+
+    /**
+     * Try to recover the full log entry from local LogStorage (RocksDB) when
+     * the replicator delivered an empty payload. Returns null if recovery is
+     * not possible (LogManager not wired or entry not yet flushed).
+     */
+    private LogEntry tryRecoverEntry(long index) {
+        if (logManager == null) return null;
+        try {
+            LogEntry entry = logManager.getEntry(index);
+            if (entry == null) {
+                log.debug("[RECOVERY_NULL] index={} LogManager returned null", index);
+                return null;
+            }
+            return entry;
+        } catch (Throwable t) {
+            // IndexOutOfBounds / log compacted — not recoverable
+            log.debug("[RECOVERY_FAIL] index={} {}", index, t.getClass().getSimpleName());
+            return null;
+        }
     }
 
     public long getLastAppliedIndex() {
@@ -87,21 +145,82 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             long index = iter.getIndex();
             Closure done = iter.done();
             ByteBuffer data = iter.getData();
-
+            int dataLen = data != null ? data.remaining() : -1;
+            // PROOF-EMPTY: log every entry's full payload (hex) so we can prove
+            // what the replicator actually delivered. Truncated to 128 hex chars
+            // to keep logs bounded; small entries (≤32 bytes) printed in full.
+            String dataHex = "";
             if (data != null && data.hasRemaining()) {
-                int len = data.remaining();
-                byte[] bytes;
-                if (len <= DESER_BUFFER_SIZE) {
-                    bytes = DESER_BUFFER.get();
-                    data.get(bytes, 0, len);
+                int dumpLen = Math.min(data.remaining(), 64);
+                byte[] dump = new byte[dumpLen];
+                int savePos = data.position();
+                data.get(dump, 0, dumpLen);
+                data.position(savePos);
+                StringBuilder sb = new StringBuilder(dumpLen * 2);
+                for (byte b : dump) sb.append(String.format("%02x", b & 0xff));
+                dataHex = sb.toString();
+            }
+            log.info("[APPLY_IN] index={} dataLen={} hasDone={} dataHex={}", index, dataLen, done != null, dataHex);
+
+            // Empty-payload entries: SOFAJRaft replicator sometimes delivers
+            // a zero-byte payload to follower onApply. hasDone=false confirms
+            // no client closure is waiting.
+            //
+            // Recovery path: when this happens, we try to read the *real*
+            // entry from the local LogManager (which the replicator wrote
+            // to RocksDB log storage *before* the in-memory batch was
+            // delivered to onApply). If recovery succeeds we apply normally
+            // — no divergence. If recovery fails we MUST skip + advance
+            // lastAppliedIndex to avoid hanging the FSM caller; but we
+            // log loud so operators know the follower diverged.
+            if (data == null || !data.hasRemaining()) {
+                LogEntry recovered = tryRecoverEntry(index);
+                if (recovered != null) {
+                    ByteBuffer recoveredData = recovered.getData();
+                    if (recoveredData != null && recoveredData.hasRemaining()) {
+                        log.warn("[APPLY_RECOVERED_EMPTY] index={} recoveredLen={} — replicator delivered empty but LogManager had the real entry",
+                                index, recoveredData.remaining());
+                        data = recoveredData;
+                        // fall through to normal apply path below
+                    } else {
+                        log.error("[APPLY_RECOVER_BUT_EMPTY] index={} — both replicator AND LogManager have empty entry; this is a true empty (batch marker) or missing data",
+                                index);
+                        lastAppliedIndex.set(index);
+                        iter.next();
+                        continue;
+                    }
                 } else {
-                    bytes = new byte[len];
-                    data.get(bytes);
+                    log.error("[APPLY_SKIP_NO_RECOVERY] index={} hasDone={} — empty entry, LogManager not available for recovery; follower will diverge from leader on this index",
+                            index, done != null);
+                    lastAppliedIndex.set(index);
+                    iter.next();
+                    continue;
                 }
-                long tApplyStart = System.nanoTime(); // Segment 3 start
+            }
+            int len = data.remaining();
+            // CRITICAL: never advance the original ByteBuffer's position.
+            // iter.getData() returns the same ByteBuffer instance held by the
+            // in-memory LogEntry cache. On the leader, SOFAJRaft's replicator
+            // reads this same buffer to ship the entry to lagging followers.
+            // If onApply consumes the position (data.get advances it), a later
+            // replication reads remaining()==0 and delivers a zero-byte payload
+            // to the follower, which then persists an empty entry and diverges.
+            // Read through a duplicate so position/limit stay untouched.
+            ByteBuffer readBuf = data.duplicate();
+            byte[] bytes;
+            if (len <= DESER_BUFFER_SIZE) {
+                bytes = DESER_BUFFER.get();
+                readBuf.get(bytes, 0, len);
+            } else {
+                bytes = new byte[len];
+                readBuf.get(bytes);
+            }
+            long tApplyStart = System.nanoTime(); // Segment 3 start
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                     long tDeserEnd = System.nanoTime();
+                    log.info("[APPLY_DONE_DESER] index={} reqId={} amts={}", index, cmd.requestId(),
+                            summarizeAmounts(cmd));
 
                     // Segment 3: execute state machine with deterministc Raft index
                     CommandResult result = executeCommand(cmd, index);
@@ -147,12 +266,8 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                         done.run(new Status(RaftError.EIO, e.getMessage()));
                     }
                 }
-            } else {
-                if (done != null) {
-                    done.run(Status.OK());
-                }
-            }
             lastAppliedIndex.set(index);
+            log.info("[APPLY_OUT] index={}", index);
             iter.next();
         }
         } finally {
@@ -256,6 +371,22 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     private String serverIdStr() {
         return nodeRole != null ? nodeRole.getNodeId() : "unknown";
+    }
+
+    private static String summarizeAmounts(RaftCommand cmd) {
+        StringBuilder sb = new StringBuilder("[");
+        List<PostingCommand.Leg> legs = null;
+        if (cmd instanceof PostingCommand p) legs = p.legs();
+        else if (cmd instanceof AdjustmentCommand a) legs = a.legs();
+        if (legs != null) {
+            for (int i = 0; i < legs.size(); i++) {
+                if (i > 0) sb.append(",");
+                var amt = legs.get(i).amount();
+                sb.append(amt.toPlainString()).append("/s").append(amt.scale())
+                        .append("/u").append(amt.unscaledValue().toString());
+            }
+        }
+        return sb.append("]").toString();
     }
 
     public void setNodeId(String nodeId) {

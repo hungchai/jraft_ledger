@@ -166,27 +166,6 @@ public class LedgerStateMachine {
         restoreFromBytes(raw);
     }
 
-    /**
-     * Load persisted state from RocksDB into in-memory stores.
-     * Call this on startup before any bootstrap/init logic so that
-     * previously persisted state (accounts, balances) is restored.
-     * Idempotent — if no snapshot exists, this is a no-op.
-     */
-    public void loadSnapshotFromRocksDB() {
-        if (rocksDB == null) return;
-        try {
-            byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
-            if (raw == null || raw.length == 0) {
-                log.info("No RocksDB snapshot found — starting from empty state");
-                return;
-            }
-            restoreFromBytes(raw);
-            log.info("Restored state from RocksDB snapshot");
-        } catch (Exception e) {
-            log.warn("Failed to load RocksDB snapshot (starting fresh): {}", e.getMessage());
-        }
-    }
-
     public byte[] snapshotBytes() throws Exception {
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
@@ -207,7 +186,15 @@ public class LedgerStateMachine {
         journalSequence.set(journalCount);
     }
 
-    public long getRaftLogIndex() { return journalStore.size(); }
+    private java.util.function.LongSupplier lastAppliedIndexSource;
+
+    public void setLastAppliedIndexSource(java.util.function.LongSupplier source) {
+        this.lastAppliedIndexSource = source;
+    }
+
+    public long getRaftLogIndex() {
+        return lastAppliedIndexSource != null ? lastAppliedIndexSource.getAsLong() : raftLogIndex.get();
+    }
     public long getJournalSequence() { return journalStore.size(); }
 
     public BalanceStore getBalanceStore() { return balanceStore; }
@@ -458,6 +445,17 @@ public class LedgerStateMachine {
                 var line = lwl.line();
                 BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
                         .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
+
+                // DEBUG-DIVERGE: capture per-node config view for cross-node diff
+                String nodeId = System.getenv("HOSTNAME");
+                if (nodeId == null) nodeId = System.getenv("NODE_ID");
+                if (nodeId == null) nodeId = "unknown";
+                log.info("[DEBUG_APPLY] node={} reqId={} raftIndex={} cmd={} acc={} bt={} ccy={} cfgVer={} allowNeg={} curAmt={}",
+                        nodeId, requestId, raftIndex, commandLabel,
+                        line.accountId(), line.balanceType(), lwl.currency(),
+                        config.configVersion(), config.allowNegative(),
+                        balanceStore.get(new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency()))
+                                .orElse(BalanceEntry.zero()).amount().toPlainString());
 
                 AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
                 BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());

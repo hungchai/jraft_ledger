@@ -289,9 +289,10 @@ public class LedgerConfig {
                                         AccountMetaStore accountMetaStore,
                                         LedgerStateMachine ledgerStateMachine) {
         return args -> {
-            // Restore persisted state from RocksDB before bootstrapping.
-            // This ensures previously persisted accounts/balances survive restarts.
-            ledgerStateMachine.loadSnapshotFromRocksDB();
+            // Snapshot restore happens via onSnapshotLoad() from leader transfer
+            // during Raft startup. Local RocksDB restore removed — stale local
+            // snapshots caused followers to skip replaying log entries that fell
+            // in the snapshot boundary gap, producing cross-node balance divergence.
 
             // Register balance types
             configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(

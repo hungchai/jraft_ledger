@@ -98,6 +98,9 @@ services:
         -XX:-OmitStackTraceInFastThrow
         -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
     depends_on:
       mysql:
         condition: service_healthy
@@ -144,6 +147,9 @@ services:
         -XX:-OmitStackTraceInFastThrow
         -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
     depends_on:
       ledger1:
         condition: service_started
@@ -192,6 +198,9 @@ services:
         -XX:-OmitStackTraceInFastThrow
         -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
     depends_on:
       ledger2:
         condition: service_started
