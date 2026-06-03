@@ -20,15 +20,20 @@ FLUSH=true
 RECON_ONLY=false
 K6_SCRIPT="$SCRIPT_DIR/k6-posting-stress.js"
 BASE_URL=""
+DIAG_DIR="$PROJECT_DIR/jraft_ledger/diagnostics"
+mkdir -p "$DIAG_DIR"
 # Projection catch-up: journal-count lag must be <= PROJ_LAG_MAX before MySQL
 # balance checks count as FAIL (otherwise WARN only — async pipeline).
 PROJ_LAG_MAX=10
 PROJ_WAIT_POLL_SEC=5
 PROJ_WAIT_MAX_LOOPS=120   # 120 * 5s = 600s max wait
 PROJ_STALL_POLLS=12       # stop early if lag unchanged for 12 polls (60s)
-PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
 PROJ_BALANCE_QUEUE_MAX=0  # balance conflation queue must be empty
 PROJ_OUTBOX_MAX=100       # leader outbox backlog tolerance
+PROJ_RATE_IDLE_MAX=1.0    # events/s threshold; below = "no new work"
+PROJ_IDLE_READY_SEC=3     # seconds since last event before pipeline is "quiet"
+PROJ_IDLE_REQUIRED_POLLS=2  # need N consecutive idle polls before ready=true
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
 
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
@@ -102,19 +107,33 @@ fetch_prom_projection_metrics() {
   PROJ_SINCE_LAST_EVENT=$(prom_scalar 'ledger_projection_seconds_since_last_event_seconds')
 }
 
-# Pipeline ready: balance queue drained and outbox not backlogged.
+# Pipeline ready: balance queue drained, outbox drained, AND no events flowing.
+# An empty queue alone is a transient drain window — events still in flight
+# can refill it within milliseconds. True ready means the consumer is idle.
+PROJ_IDLE_POLLS=0
 projection_pipeline_ready() {
   fetch_prom_projection_metrics
-  if [ "$PROJ_BALANCE_QUEUE" = "ERR" ] || [ "$PROJ_OUTBOX_PENDING" = "ERR" ]; then
+  if [ "$PROJ_BALANCE_QUEUE" = "ERR" ] || [ "$PROJ_OUTBOX_PENDING" = "ERR" ] \
+     || [ "$PROJ_EVENTS_RATE" = "ERR" ] || [ "$PROJ_SINCE_LAST_EVENT" = "ERR" ]; then
     PROJ_PIPELINE_READY=0
+    PROJ_IDLE_POLLS=0
     return 1
   fi
   python3 -c "
 import sys
 q = float('${PROJ_BALANCE_QUEUE}')
 o = float('${PROJ_OUTBOX_PENDING}')
-sys.exit(0 if q <= ${PROJ_BALANCE_QUEUE_MAX} and o <= ${PROJ_OUTBOX_MAX} else 1)
-" && PROJ_PIPELINE_READY=1 && return 0
+r = float('${PROJ_EVENTS_RATE}')
+i = float('${PROJ_SINCE_LAST_EVENT}')
+ok = q <= ${PROJ_BALANCE_QUEUE_MAX} and o <= ${PROJ_OUTBOX_MAX} \
+     and r <= ${PROJ_RATE_IDLE_MAX} and i >= ${PROJ_IDLE_READY_SEC}
+sys.exit(0 if ok else 1)
+" || { PROJ_PIPELINE_READY=0; PROJ_IDLE_POLLS=0; return 1; }
+  PROJ_IDLE_POLLS=$((PROJ_IDLE_POLLS + 1))
+  if [ "$PROJ_IDLE_POLLS" -ge "$PROJ_IDLE_REQUIRED_POLLS" ]; then
+    PROJ_PIPELINE_READY=1
+    return 0
+  fi
   PROJ_PIPELINE_READY=0
   return 1
 }
@@ -352,6 +371,15 @@ if ! $RECON_ONLY; then
   else
     pass "0% failures"
   fi
+
+  # Move k6 HTML report (from k6-reporter handleSummary) to diagnostics
+  K6_HTML=$(ls -t k6-report-*.html 2>/dev/null | head -1)
+  if [ -n "$K6_HTML" ] && [ -f "$K6_HTML" ]; then
+    mkdir -p "$DIAG_DIR"
+    mv "$K6_HTML" "$DIAG_DIR/"
+    K6_HTML_PATH="$DIAG_DIR/$K6_HTML"
+    echo "  k6 HTML report: $K6_HTML_PATH"
+  fi
 fi
 
 # ============================================================
@@ -568,8 +596,6 @@ done
 # 6. Diagnostic snapshot — capture full node state for debugging
 # ============================================================
 
-DIAG_DIR="$PROJECT_DIR/jraft_ledger/diagnostics"
-mkdir -p "$DIAG_DIR"
 DIAG_FILE="$DIAG_DIR/recon-$(date +%Y%m%d-%H%M%S).log"
 DIAG_TMP=$(mktemp)
 {
@@ -682,10 +708,10 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   echo "  journal_lag (SM_journals - MySQL_journals) = $DIAG_LAG"
   if projection_pipeline_ready; then
     PROJ_PIPELINE_READY=1
-    echo "  pipeline_ready: ✅ (balance_queue <= $PROJ_BALANCE_QUEUE_MAX AND outbox <= $PROJ_OUTBOX_MAX)"
+    echo "  pipeline_ready: ✅ (queue=$PROJ_BALANCE_QUEUE outbox=$PROJ_OUTBOX_PENDING rate=$PROJ_EVENTS_RATE/s idle=$PROJ_SINCE_LAST_EVENT s, idle_polls=$PROJ_IDLE_POLLS)"
   else
     PROJ_PIPELINE_READY=0
-    echo "  pipeline_ready: ❌ (balance_queue=$PROJ_BALANCE_QUEUE outbox=$PROJ_OUTBOX_PENDING)"
+    echo "  pipeline_ready: ❌ (queue=$PROJ_BALANCE_QUEUE outbox=$PROJ_OUTBOX_PENDING rate=$PROJ_EVENTS_RATE/s idle=$PROJ_SINCE_LAST_EVENT s, idle_polls=$PROJ_IDLE_POLLS/$PROJ_IDLE_REQUIRED_POLLS)"
   fi
 
   # --- Full balance reconciliation ---
@@ -745,6 +771,50 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   LINES=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) FROM journal_line_1 UNION ALL SELECT COUNT(*) FROM journal_line_2 UNION ALL SELECT COUNT(*) FROM journal_line_3) t;")
   AVG_LEGS=$(python3 -c "print(f'{${LINES}/${JNLS}:.2f}' if ${JNLS} else '0.0')" 2>/dev/null || echo "?")
   echo "  journals=$JNLS  journal_lines=$LINES  avg_legs_per_journal=$AVG_LEGS (expect 2.0 for postings, 0 for adjustments)"
+
+  # --- TPS snapshot (instantaneous rates from Prometheus) ---
+  echo ""
+  echo "--- TPS (instantaneous rates from Prometheus) ---"
+  POSTING_TPS=$(prom_scalar "rate(ledger_posting_duration_seconds_count[1m])" 2>/dev/null)
+  APPLIED_TPS=$(prom_scalar "rate(ledger_raft_last_applied_index[1m])" 2>/dev/null)
+  OUTBOX_TPS=$(prom_scalar "rate(ledger_outbox_published[1m])" 2>/dev/null)
+  PROJ_TPS=$(prom_scalar "rate(ledger_projection_events_processed[1m])" 2>/dev/null)
+  printf "  %-26s %s\n" "API posting TPS"     "${POSTING_TPS:-ERR} /s"
+  printf "  %-26s %s\n" "Raft apply TPS"      "${APPLIED_TPS:-ERR} /s"
+  printf "  %-26s %s\n" "Outbox publish TPS"  "${OUTBOX_TPS:-ERR} /s"
+  printf "  %-26s %s\n" "Projection write TPS" "${PROJ_TPS:-ERR} /s"
+  if [ -n "${ITERATIONS:-}" ] && [ "${ITERATIONS:-0}" != "?" ] && [ "${ITERATIONS:-0}" -gt 0 ] 2>/dev/null; then
+    DUR_S=$(echo "$DURATION" | sed -E 's/([0-9]+)m/\1*60/;s/([0-9]+)s/\1/' | bc 2>/dev/null || echo 0)
+    K6_TPS=$(python3 -c "print(f'{$ITERATIONS/$DUR_S:.1f}' if $DUR_S else '0.0')" 2>/dev/null || echo "?")
+    printf "  %-26s %s /s  (k6 iterations=%s over %s)\n" "k6 send TPS" "$K6_TPS" "$ITERATIONS" "$DURATION"
+  else
+    printf "  %-26s %s\n" "k6 send TPS" "N/A (--recon-only)"
+  fi
+
+  # --- JVM GC metrics (all 4 java services) ---
+  echo ""
+  echo "--- JVM GC: pause count + total + max + bytes allocated (since JVM start) ---"
+  printf "  %-12s %-10s %-22s %-10s %-22s %s\n" "service" "gc_count" "total_pause" "max_ms" "allocated_bytes" "stops_over_5ms"
+  GC_TOTAL_STOPS=0
+  for entry in "ledger1:8081" "ledger2:8082" "ledger3:8083" "projection:8089"; do
+    name="${entry%:*}"; port="${entry#*:}"
+    PROM=$(curl -s --max-time 5 "http://localhost:${port}/actuator/prometheus" 2>/dev/null)
+    if [ -z "$PROM" ]; then
+      printf "  %-12s %-10s %-22s %-10s %-22s %s\n" "$name" "DOWN" "-" "-" "-" "-"
+      continue
+    fi
+    GC_COUNT=$(echo "$PROM" | awk -F'[{} ]' '/^jvm_gc_pause_seconds_count/ {sum+=$(NF)} END{printf "%d", sum+0}')
+    GC_SUM=$(echo "$PROM" | awk -F'[{} ]' '/^jvm_gc_pause_seconds_sum/ {sum+=$(NF)} END{printf "%.3f s", sum+0}')
+    GC_MAX=$(echo "$PROM" | awk -F'[{} ]' '/^jvm_gc_pause_seconds_max/ {v=$(NF)+0; if(v>m_max) m_max=v} END{printf "%.1f", (m_max+0)*1000}')
+    GC_ALLOC=$(echo "$PROM" | awk '/^jvm_gc_memory_allocated_bytes_total/ {$1=""; v=$2+0; if (v>=1e9) printf "%.2f GB", v/1e9; else if (v>=1e6) printf "%.2f MB", v/1e6; else printf "%.0f B", v; exit}')
+    # Stops over 5ms: count of jvm_gc_pause_seconds_max rows > 0.005 (cause breakdown)
+    GC_SLOW=$(echo "$PROM" | awk -F'[{} ]' '/^jvm_gc_pause_seconds_max/ {v=$(NF)+0; if(v>0.005) c++} END{printf "%d", c+0}')
+    [ -z "$GC_SLOW" ] && GC_SLOW=0
+    GC_TOTAL_STOPS=$((GC_TOTAL_STOPS + GC_SLOW))
+    printf "  %-12s %-10s %-22s %-10s %-22s %s\n" "$name" "$GC_COUNT" "$GC_SUM" "${GC_MAX}ms" "${GC_ALLOC:-?}" "$GC_SLOW"
+  done
+  echo "  (stops_over_5ms = any jvm_gc_pause_seconds_max row > 5ms; ZGC pauses themselves are sub-ms)"
+  echo "  Total stops>5ms across all 4 services: $GC_TOTAL_STOPS"
 
   # --- Raft error logs (last 5 per node) ---
   echo ""
@@ -836,9 +906,22 @@ done
     "journals=$MYSQL_JNLS_COUNT events=${MYSQL_EVENTS:-0} lines=${MYSQL_LINES:-0} balances=$MYSQL_BALANCES"
 
 echo "  ──── ──────────────────────── ──────────────────────────────────"
+# Fetch TPS for summary (sub-shell scope in recon doesn't leak)
+SUMMARY_POSTING=$(prom_scalar "rate(ledger_posting_duration_seconds_count[1m])" 2>/dev/null)
+SUMMARY_APPLIED=$(prom_scalar "rate(ledger_raft_last_applied_index[1m])" 2>/dev/null)
+SUMMARY_OUTBOX=$(prom_scalar "rate(ledger_outbox_published[1m])" 2>/dev/null)
+SUMMARY_PROJ=$(prom_scalar "rate(ledger_projection_events_processed[1m])" 2>/dev/null)
+if [ -n "${ITERATIONS:-}" ] && [ "${ITERATIONS:-0}" != "?" ] && [ "${ITERATIONS:-0}" -gt 0 ] 2>/dev/null; then
+  DUR_S=$(echo "$DURATION" | sed -E 's/([0-9]+)m/\1*60/;s/([0-9]+)s/\1/' | bc 2>/dev/null || echo 0)
+  K6_TPS_S=$(python3 -c "print(f'{$ITERATIONS/$DUR_S:.1f}' if $DUR_S else '0.0')" 2>/dev/null || echo "?")
+else
+  K6_TPS_S="N/A"
+fi
+printf "  %-4s %-25s %s\n" "⚡" "TPS (1m rate)" "api=${SUMMARY_POSTING:-?} raft=${SUMMARY_APPLIED:-?} outbox=${SUMMARY_OUTBOX:-?} proj=${SUMMARY_PROJ:-?} k6=${K6_TPS_S}/s"
 printf "  %-25s %d passed, %d failed, %d warnings\n" "" "$PASS" "$FAIL" "$WARN"
 echo "========================================="
 echo "  Diagnostics: $DIAG_FILE"
+[ -n "${K6_HTML_PATH:-}" ] && echo "  k6 HTML report: $K6_HTML_PATH"
 echo ""
 
 if [ "$FAIL" -eq 0 ]; then

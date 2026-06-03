@@ -1,11 +1,21 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
+import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.3/index.js';
 
 // Stress Test: RFQ Hotspot — maps to docs/STRESS-TEST-PLAN.md Phase 2
 // RFQ BUY/SELL scenarios with BTC/USDT pair (BTC 8dp, USDT 16dp)
 // BUY: Client buys USDT, sells BTC
 // SELL: Client sells USDT, buys BTC
 // Usage: k6 run --vus 1000 --duration 120s scripts/k6-posting-stress.js
+
+export function handleSummary(data) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  return {
+    'stdout': textSummary(data, { indent: '  ', enableColors: true }),
+    [`k6-report-${ts}.html`]: htmlReport(data),
+  };
+}
 
 export const options = {
   stages: [
