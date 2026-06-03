@@ -142,134 +142,78 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         snapshotLock.readLock().lock();
         try {
             while (iter.hasNext()) {
-            long index = iter.getIndex();
-            Closure done = iter.done();
-            // CRITICAL: iter.getData() returns the same ByteBuffer instance held
-            // by SOFAJRaft's in-memory LogEntry cache. On the leader the replicator
-            // reads that very buffer to ship the entry to lagging followers, so any
-            // get(...) here that advances its position would make a later replication
-            // see remaining()==0 and deliver a zero-byte payload — the follower then
-            // persists an empty entry and its state machine diverges. Duplicate once
-            // up front so every read below operates on an independent position/limit
-            // and the original buffer is never mutated. (null-safe: getData() may be
-            // null for empty/no-op entries.)
-            ByteBuffer raw = iter.getData();
-            ByteBuffer data = raw != null ? raw.duplicate() : null;
-            int dataLen = data != null ? data.remaining() : -1;
-            // PROOF-EMPTY: log every entry's full payload (hex) so we can prove
-            // what the replicator actually delivered. Truncated to keep logs bounded.
-            String dataHex = "";
-            if (data != null && data.hasRemaining()) {
-                int dumpLen = Math.min(data.remaining(), 64);
-                byte[] dump = new byte[dumpLen];
-                data.duplicate().get(dump, 0, dumpLen);
-                StringBuilder sb = new StringBuilder(dumpLen * 2);
-                for (byte b : dump) sb.append(String.format("%02x", b & 0xff));
-                dataHex = sb.toString();
-            }
-            log.info("[APPLY_IN] index={} dataLen={} hasDone={} dataHex={}", index, dataLen, done != null, dataHex);
+                long index = iter.getIndex();
+                Closure done = iter.done();
+                // CRITICAL: duplicate() protects the replicator's shared ByteBuffer.
+                // Without it get() advances position → replicator ships empty bytes → divergence.
+                ByteBuffer raw = iter.getData();
+                ByteBuffer data = raw != null ? raw.duplicate() : null;
 
-            // Empty-payload entries: SOFAJRaft replicator sometimes delivers
-            // a zero-byte payload to follower onApply. hasDone=false confirms
-            // no client closure is waiting.
-            //
-            // Recovery path: when this happens, we try to read the *real*
-            // entry from the local LogManager (which the replicator wrote
-            // to RocksDB log storage *before* the in-memory batch was
-            // delivered to onApply). If recovery succeeds we apply normally
-            // — no divergence. If recovery fails we MUST skip + advance
-            // lastAppliedIndex to avoid hanging the FSM caller; but we
-            // log loud so operators know the follower diverged.
-            if (data == null || !data.hasRemaining()) {
-                LogEntry recovered = tryRecoverEntry(index);
-                if (recovered != null) {
-                    ByteBuffer recoveredData = recovered.getData();
-                    if (recoveredData != null && recoveredData.hasRemaining()) {
-                        log.warn("[APPLY_RECOVERED_EMPTY] index={} recoveredLen={} — replicator delivered empty but LogManager had the real entry",
-                                index, recoveredData.remaining());
-                        data = recoveredData;
-                        // fall through to normal apply path below
+                if (data == null || !data.hasRemaining()) {
+                    LogEntry recovered = tryRecoverEntry(index);
+                    if (recovered != null && recovered.getData() != null && recovered.getData().hasRemaining()) {
+                        log.warn("[RECOVERY] index={} len={} — empty payload recovered from LogManager",
+                                index, recovered.getData().remaining());
+                        data = recovered.getData();
                     } else {
-                        log.error("[APPLY_RECOVER_BUT_EMPTY] index={} — both replicator AND LogManager have empty entry; this is a true empty (batch marker) or missing data",
-                                index);
+                        log.error("[SKIP_EMPTY] index={} — empty entry, no recovery", index);
                         lastAppliedIndex.set(index);
                         iter.next();
                         continue;
                     }
-                } else {
-                    log.error("[APPLY_SKIP_NO_RECOVERY] index={} hasDone={} — empty entry, LogManager not available for recovery; follower will diverge from leader on this index",
-                            index, done != null);
-                    lastAppliedIndex.set(index);
-                    iter.next();
-                    continue;
                 }
-            }
-            // Safe to consume position here: `data` is a duplicate (or a
-            // recovered entry), never the replicator's shared cache buffer.
-            int len = data.remaining();
-            byte[] bytes;
-            if (len <= DESER_BUFFER_SIZE) {
-                bytes = DESER_BUFFER.get();
+
+                int len = data.remaining();
+                byte[] bytes = len <= DESER_BUFFER_SIZE ? DESER_BUFFER.get() : new byte[len];
                 data.get(bytes, 0, len);
-            } else {
-                bytes = new byte[len];
-                data.get(bytes);
-            }
-            long tApplyStart = System.nanoTime(); // Segment 3 start
+
+                long tStart = System.nanoTime();
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                     long tDeserEnd = System.nanoTime();
-                    log.info("[APPLY_DONE_DESER] index={} reqId={} amts={}", index, cmd.requestId(),
-                            summarizeAmounts(cmd));
 
-                    // Segment 3: execute state machine with deterministc Raft index
+                    if (log.isDebugEnabled()) {
+                        log.debug("[APPLY] index={} cmd={} reqId={} len={} deser={}us",
+                                index, cmd.getClass().getSimpleName(), cmd.requestId(),
+                                len, (tDeserEnd - tStart) / 1000);
+                    }
+
                     CommandResult result = executeCommand(cmd, index);
-                    long tExecuteEnd = System.nanoTime();
+                    long tExecEnd = System.nanoTime();
 
-                    // Segment 3 end: complete future → unblocks HTTP thread
                     if (pendingCommands != null) {
                         var future = pendingCommands.remove(cmd.requestId());
                         if (future != null) future.complete(result);
                     }
-
-                    // done.run() signals commit acknowledgment to Raft
                     if (done != null) {
-                        done.run(result.isCompleted() ? Status.OK() : new Status(RaftError.EBUSY, result.errorCodes().toString()));
+                        done.run(result.isCompleted() ? Status.OK()
+                                : new Status(RaftError.EBUSY, result.errorCodes().toString()));
                     }
 
-                    long tDone = System.nanoTime();
-                    long deserMs = (tDeserEnd - tApplyStart) / 1_000_000;
-                    long executeMs = (tExecuteEnd - tDeserEnd) / 1_000_000;
-                    long futureCompleteMs = (tDone - tExecuteEnd) / 1_000_000;
-                    long totalApplyMs = (tDone - tApplyStart) / 1_000_000;
-
-                    // Log detailed timing for Segment 3
-                    if (totalApplyMs > 5) {
-                        log.info("[APPLY_TIMING] cmd={} index={} deser={}ms exec={}ms future={}ms total={}ms",
-                                cmd.getClass().getSimpleName(), index, deserMs, executeMs, futureCompleteMs, totalApplyMs);
+                    long totalUs = (tExecEnd - tStart) / 1000;
+                    if (totalUs > 5000) {
+                        log.warn("[APPLY_SLOW] cmd={} index={} total={}us",
+                                cmd.getClass().getSimpleName(), index, totalUs);
                     }
                 } catch (Exception e) {
-                    log.error("Failed to apply raft command", e);
+                    log.error("[APPLY_FAIL] index={} len={}", index, len, e);
                     if (pendingCommands != null) {
-                        RaftCommand cmd = null;
                         try {
-                            cmd = CommandSerializer.deserialize(bytes, len);
-                        } catch (Exception ignored) {}
-                        if (cmd != null) {
+                            RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                             var future = pendingCommands.remove(cmd.requestId());
                             if (future != null) {
                                 future.complete(CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR));
                             }
-                        }
+                        } catch (Exception ignored) {}
                     }
                     if (done != null) {
                         done.run(new Status(RaftError.EIO, e.getMessage()));
                     }
                 }
-            lastAppliedIndex.set(index);
-            log.info("[APPLY_OUT] index={}", index);
-            iter.next();
-        }
+
+                lastAppliedIndex.set(index);
+                iter.next();
+            }
         } finally {
             snapshotLock.readLock().unlock();
         }

@@ -15,7 +15,7 @@ spring:
       fetch-max-wait: 500ms
     listener:
       type: single
-      concurrency: 1
+      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:4}
 
 mybatis:
   configuration:

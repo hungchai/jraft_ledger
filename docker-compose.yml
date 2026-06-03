@@ -38,6 +38,7 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@ledger-kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 4
     volumes:
       - ./jraft_ledger/kafka:/var/lib/kafka/data
     networks:
@@ -257,6 +258,7 @@ services:
       SPRING_DATASOURCE_USERNAME: ledger
       SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      KAFKA_CONSUMER_CONCURRENCY: 4
       SNOWFLAKE_WORKER_ID: 9
     depends_on:
       mysql:
