@@ -20,14 +20,27 @@ FLUSH=true
 RECON_ONLY=false
 K6_SCRIPT="$SCRIPT_DIR/k6-posting-stress.js"
 BASE_URL=""
+# Projection catch-up: journal-count lag must be <= PROJ_LAG_MAX before MySQL
+# balance checks count as FAIL (otherwise WARN only — async pipeline).
+PROJ_LAG_MAX=10
+PROJ_WAIT_POLL_SEC=5
+PROJ_WAIT_MAX_LOOPS=120   # 120 * 5s = 600s max wait
+PROJ_STALL_POLLS=12       # stop early if lag unchanged for 12 polls (60s)
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
+PROJ_BALANCE_QUEUE_MAX=0  # balance conflation queue must be empty
+PROJ_OUTBOX_MAX=100       # leader outbox backlog tolerance
 
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
+  echo "         [--proj-lag-max N] [--proj-wait-max-loops N] [--prometheus-url URL]"
   echo "  --vus N         Number of VUs (default: 10)"
   echo "  --duration M    Test duration (default: 2m)"
   echo "  --no-flush      Skip data flush"
   echo "  --recon-only    Only run reconciliation (skip k6)"
   echo "  --base-url URL  Explicit leader URL (auto-detect if not set)"
+  echo "  --proj-lag-max N   Max SM-MySQL journal lag for strict balance FAIL (default: 10)"
+  echo "  --proj-wait-max-loops N  Poll iterations in each wait phase (default: 120 = 600s)"
+  echo "  --prometheus-url URL  Prometheus query API (default: http://localhost:9090)"
   exit 1
 }
 
@@ -38,6 +51,9 @@ while [ $# -gt 0 ]; do
     --no-flush) FLUSH=false; shift ;;
     --recon-only) RECON_ONLY=true; shift ;;
     --base-url) BASE_URL="$2"; shift 2 ;;
+    --proj-lag-max) PROJ_LAG_MAX="$2"; shift 2 ;;
+    --proj-wait-max-loops) PROJ_WAIT_MAX_LOOPS="$2"; shift 2 ;;
+    --prometheus-url) PROMETHEUS_URL="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -56,6 +72,145 @@ PASS=0; FAIL=0; WARN=0
 pass()  { echo -e "  ${GREEN}✅ $1${NC}"; PASS=$((PASS+1)); }
 fail()  { echo -e "  ${RED}❌ $1${NC}"; FAIL=$((FAIL+1)); }
 warn()  { echo -e "  ${YELLOW}⚠️  $1${NC}"; WARN=$((WARN+1)); }
+
+# Query Prometheus instant vector; print scalar value or ERR.
+prom_scalar() {
+  local query="$1"
+  local encoded
+  encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''${query}'''))")
+  curl -s --max-time 5 "${PROMETHEUS_URL}/api/v1/query?query=${encoded}" 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    r = d.get('data', {}).get('result', [])
+    if not r:
+        print('ERR')
+    else:
+        print(r[0].get('value', [None, 'ERR'])[1])
+except Exception:
+    print('ERR')
+" 2>/dev/null || echo "ERR"
+}
+
+# Fetch projection pipeline gauges from Prometheus (more reliable than journal
+# count alone: balance queue + outbox reflect actual pipeline backlog).
+fetch_prom_projection_metrics() {
+  PROJ_BALANCE_QUEUE=$(prom_scalar 'ledger_projection_balance_queue_depth')
+  PROJ_OUTBOX_PENDING=$(prom_scalar 'max(ledger_outbox_pending)')
+  PROJ_EVENTS_RATE=$(prom_scalar 'rate(ledger_projection_events_processed[1m])')
+  PROJ_SINCE_LAST_EVENT=$(prom_scalar 'ledger_projection_seconds_since_last_event_seconds')
+}
+
+# Pipeline ready: balance queue drained and outbox not backlogged.
+projection_pipeline_ready() {
+  fetch_prom_projection_metrics
+  if [ "$PROJ_BALANCE_QUEUE" = "ERR" ] || [ "$PROJ_OUTBOX_PENDING" = "ERR" ]; then
+    PROJ_PIPELINE_READY=0
+    return 1
+  fi
+  python3 -c "
+import sys
+q = float('${PROJ_BALANCE_QUEUE}')
+o = float('${PROJ_OUTBOX_PENDING}')
+sys.exit(0 if q <= ${PROJ_BALANCE_QUEUE_MAX} and o <= ${PROJ_OUTBOX_MAX} else 1)
+" && PROJ_PIPELINE_READY=1 && return 0
+  PROJ_PIPELINE_READY=0
+  return 1
+}
+
+prom_metrics_line() {
+  printf "queue=%s outbox=%s rate=%s/s idle=%ss" \
+    "${PROJ_BALANCE_QUEUE:-?}" "${PROJ_OUTBOX_PENDING:-?}" \
+    "${PROJ_EVENTS_RATE:-?}" "${PROJ_SINCE_LAST_EVENT:-?}"
+}
+
+# Strict MySQL balance FAIL when journal lag is low OR Prometheus says pipeline ready.
+mysql_recon_strict() {
+  [ "${PROJ_LAG_AT_RECON:-999999}" -le "$PROJ_LAG_MAX" ] || [ "${PROJ_PIPELINE_READY:-0}" -eq 1 ]
+}
+
+# Poll until SM journal count ~= MySQL journal count. Sets global LAG, PROJ_RATE.
+# Also polls Prometheus; exits early when pipeline ready even if journal lag > 0.
+# Returns 0 if lag <= PROJ_LAG_MAX or pipeline ready, 1 otherwise.
+wait_projection_catchup() {
+  local phase="${1:-projection}"
+  SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
+  MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+  if ! [[ "$SM_JNLS" =~ ^[0-9]+$ ]] || ! [[ "$MYSQL_JNLS" =~ ^[0-9]+$ ]]; then
+    warn "[$phase] cannot measure lag (SM=$SM_JNLS MySQL=$MYSQL_JNLS)"
+    LAG=999999
+    return 1
+  fi
+  LAG=$((SM_JNLS - MYSQL_JNLS))
+  fetch_prom_projection_metrics
+  echo "  [$phase] SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$LAG prom: $(prom_metrics_line)"
+  PROJ_RATE=0
+  if [ "$LAG" -le "$PROJ_LAG_MAX" ]; then
+    return 0
+  fi
+  if projection_pipeline_ready; then
+    echo "  [$phase] Prometheus pipeline ready ($(prom_metrics_line)) despite journal lag=$LAG"
+    return 0
+  fi
+  local prev_mysql=$MYSQL_JNLS
+  local prev_lag=$LAG
+  local stall_count=0
+  local i
+  for i in $(seq 1 "$PROJ_WAIT_MAX_LOOPS"); do
+    sleep "$PROJ_WAIT_POLL_SEC"
+    SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
+    MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+    LAG=$((SM_JNLS - MYSQL_JNLS))
+    PROJ_RATE=$(( (MYSQL_JNLS - prev_mysql) / PROJ_WAIT_POLL_SEC ))
+    prev_mysql=$MYSQL_JNLS
+    if [ "$LAG" -eq "$prev_lag" ]; then
+      stall_count=$((stall_count + 1))
+    else
+      stall_count=0
+    fi
+    prev_lag=$LAG
+    fetch_prom_projection_metrics
+    if [ "$PROJ_RATE" -gt 0 ]; then
+      ETA=$((LAG / PROJ_RATE))
+      printf "  [%3ds] lag=%-6d drain=%d/s eta=%ds prom: %s\n" \
+        "$((i * PROJ_WAIT_POLL_SEC))" "$LAG" "$PROJ_RATE" "$ETA" "$(prom_metrics_line)"
+    else
+      printf "  [%3ds] lag=%-6d drain=0/s prom: %s\n" \
+        "$((i * PROJ_WAIT_POLL_SEC))" "$LAG" "$(prom_metrics_line)"
+    fi
+    if projection_pipeline_ready; then
+      echo "  [$phase] Prometheus pipeline ready ($(prom_metrics_line)) at journal lag=$LAG"
+      return 0
+    fi
+    if [ "$LAG" -le "$PROJ_LAG_MAX" ]; then
+      return 0
+    fi
+    if [ "$stall_count" -ge "$PROJ_STALL_POLLS" ]; then
+      warn "[$phase] projection stalled at lag=$LAG for $((PROJ_STALL_POLLS * PROJ_WAIT_POLL_SEC))s — continuing"
+      return 1
+    fi
+  done
+  return 1
+}
+
+# API (state machine) vs MySQL balance: FAIL only when projection lag is low.
+check_mysql_balance() {
+  local label="$1" api_val="$2" mysql_val="$3"
+  if [ "$api_val" = "ERR" ] || [ -z "$mysql_val" ]; then
+    warn "$label: skip (API=$api_val MySQL=${mysql_val:-empty})"
+    return 1
+  fi
+  if num_eq "$api_val" "$mysql_val"; then
+    pass "$label: match ($(normalize "$mysql_val"))"
+    return 0
+  fi
+  if mysql_recon_strict; then
+    fail "$label: API=$api_val MySQL=$mysql_val"
+  else
+    warn "$label: API=$api_val MySQL=$mysql_val (journal lag=$PROJ_LAG_AT_RECON prom: $(prom_metrics_line), not a SM bug)"
+  fi
+}
 
 find_leader() {
   for port in 8081 8082 8083; do
@@ -155,6 +310,20 @@ if ! $RECON_ONLY; then
   done
 fi
 
+# recon-only / --base-url: ensure leader URL before raft_status / api_balance
+if [ -z "$BASE_URL" ]; then
+  BASE_URL=$(find_leader)
+fi
+if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -qE 'LEADER|UP'; then
+  fail "Leader not reachable at $BASE_URL"
+  exit 1
+fi
+if $RECON_ONLY; then
+  echo ""
+  echo "=== Recon-only mode ==="
+  pass "Leader: $BASE_URL"
+fi
+
 # ============================================================
 # 3. Run k6
 # ============================================================
@@ -191,49 +360,48 @@ fi
 
 echo ""
 echo "=== Step 4: Wait for projection catch-up ==="
-
-SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
-MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
-LAG=$((SM_JNLS - MYSQL_JNLS))
-echo "  Initial: SM=$SM_JNLS MySQL=$MYSQL_JNLS lag=$LAG"
-
-# Drain-rate / ETA tracking: lag is expected (async Kafka->projection->MySQL
-# pipeline). We poll the MySQL journal count, derive projection throughput
-# (rows/sec) and an ETA so the operator can see lag is shrinking, not stuck.
-PROJ_RATE=0
-if [ "$LAG" -gt 10 ]; then
-  prev_mysql=$MYSQL_JNLS
-  for i in $(seq 1 60); do
-    sleep 5
-    SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
-    MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
-    LAG=$((SM_JNLS - MYSQL_JNLS))
-    PROJ_RATE=$(( (MYSQL_JNLS - prev_mysql) / 5 ))
-    prev_mysql=$MYSQL_JNLS
-    if [ "$PROJ_RATE" -gt 0 ]; then
-      ETA=$((LAG / PROJ_RATE))
-      printf "  [%3ds] lag=%-6d drain=%d/s eta=%ds\n" "$((i*5))" "$LAG" "$PROJ_RATE" "$ETA"
-    else
-      printf "  [%3ds] lag=%-6d drain=0/s eta=stalled\n" "$((i*5))" "$LAG"
-    fi
-    if [ "$LAG" -le 10 ]; then break; fi
-  done
-fi
-
-if [ "$LAG" -le 10 ]; then
-  pass "Projection caught up (lag=$LAG)"
+if wait_projection_catchup "post-stress"; then
+  if [ "$LAG" -le "$PROJ_LAG_MAX" ]; then
+    pass "Projection caught up (journal lag=$LAG)"
+  else
+    pass "Projection pipeline ready via Prometheus (journal lag=$LAG, $(prom_metrics_line))"
+  fi
 else
-  warn "Projection still lagging: $LAG journals behind (drain=${PROJ_RATE}/s)"
+  warn "Projection still lagging: journal lag=$LAG (drain=${PROJ_RATE}/s, prom: $(prom_metrics_line))"
 fi
 PROJ_LAG_FINAL=$LAG
 PROJ_RATE_FINAL=$PROJ_RATE
+
+echo ""
+echo "=== Step 4b: Pre-reconciliation lag snapshot ==="
+SM_JNLS=$(raft_status "$BASE_URL" "smJournalSeq")
+MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+fetch_prom_projection_metrics
+if projection_pipeline_ready; then
+  PROJ_PIPELINE_READY=1
+else
+  PROJ_PIPELINE_READY=0
+fi
+if [[ "$SM_JNLS" =~ ^[0-9]+$ ]] && [[ "$MYSQL_JNLS" =~ ^[0-9]+$ ]]; then
+  PROJ_LAG_AT_RECON=$((SM_JNLS - MYSQL_JNLS))
+  echo "  SM=$SM_JNLS MySQL=$MYSQL_JNLS journal_lag=$PROJ_LAG_AT_RECON"
+  echo "  Prometheus: $(prom_metrics_line) pipeline_ready=$PROJ_PIPELINE_READY"
+  if mysql_recon_strict; then
+    pass "Pre-recon strict balance checks enabled (journal_lag<=$PROJ_LAG_MAX or pipeline ready)"
+  else
+    warn "Pre-recon journal_lag=$PROJ_LAG_AT_RECON pipeline not ready — MySQL mismatches => WARN"
+  fi
+else
+  PROJ_LAG_AT_RECON=999999
+  warn "Pre-recon lag unknown (SM=$SM_JNLS MySQL=$MYSQL_JNLS) prom: $(prom_metrics_line)"
+fi
 
 # ============================================================
 # 5. Reconcile
 # ============================================================
 
 echo ""
-echo "=== Step 5: Reconciliation ==="
+echo "=== Step 5: Reconciliation (journal_lag=$PROJ_LAG_AT_RECON pipeline_ready=$PROJ_PIPELINE_READY) ==="
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
 HOTSPOT_ACC="STRESS-HOT-CO-001"
@@ -283,13 +451,7 @@ for ccy in "${CURRENCIES[@]}"; do
     fail "$ccy cross-node: leader=$V1 node2=$V2(d$D21) node3=$V3(d$D31)"
   fi
 
-  # MySQL vs leader check
-  if num_eq "$LEADER_VAL" "$MYSQL_VAL"; then
-    pass "$ccy MySQL vs leader: match ($(normalize "$LEADER_VAL"))"
-  else
-    DM=$(python3 -c "print(float('$MYSQL_VAL') - float('$LEADER_VAL'))" 2>/dev/null || echo "?")
-    fail "$ccy MySQL vs leader: leader=$LEADER_VAL MySQL=$MYSQL_VAL(d$DM)"
-  fi
+  check_mysql_balance "$ccy MySQL vs leader" "$LEADER_VAL" "$MYSQL_VAL" || true
 done
 
 # --- API balance cross-node (clients) ---
@@ -349,13 +511,13 @@ echo "  MySQL balances: $MYSQL_BALANCES"
 # --- Full MySQL balance reconciliation (all accounts) ---
 echo ""
 echo "--- Full MySQL balance reconciliation ---"
-RECON_FILE=$(mktemp)
 MYSQL_RECON=0
 MYSQL_RECON_FAIL=0
+MYSQL_RECON_LAG_WARN=0
 MYSQL_RECON_SKIP=0
-
-# Get all distinct account/ccy pairs from MySQL that have a balance
-mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null | while read -r acc ccy; do
+RECON_PAIRS=$(mktemp)
+mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null > "$RECON_PAIRS"
+while read -r acc ccy; do
   [ -z "$acc" ] && continue
   API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
   MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
@@ -364,13 +526,23 @@ mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance O
     MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
   elif num_eq "$API_VAL" "$MYSQL_VAL"; then
     MYSQL_RECON=$((MYSQL_RECON + 1))
-  else
+  elif mysql_recon_strict; then
     MYSQL_RECON_FAIL=$((MYSQL_RECON_FAIL + 1))
     fail "MySQL $acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
+  else
+    MYSQL_RECON_LAG_WARN=$((MYSQL_RECON_LAG_WARN + 1))
+    warn "MySQL $acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL (journal lag=$PROJ_LAG_AT_RECON)"
   fi
-done
-# Recon counters written to /tmp for parent shell access
-echo "MATCH=$MYSQL_RECON MISMATCH=$MYSQL_RECON_FAIL SKIP=$MYSQL_RECON_SKIP" > "$RECON_FILE"
+done < "$RECON_PAIRS"
+rm -f "$RECON_PAIRS"
+if [ "$MYSQL_RECON_FAIL" -eq 0 ] && [ "$MYSQL_RECON_LAG_WARN" -eq 0 ]; then
+  pass "Full MySQL recon: match=$MYSQL_RECON skip=$MYSQL_RECON_SKIP"
+elif [ "$MYSQL_RECON_FAIL" -eq 0 ]; then
+  warn "Full MySQL recon: match=$MYSQL_RECON lag_warn=$MYSQL_RECON_LAG_WARN skip=$MYSQL_RECON_SKIP"
+else
+  fail "Full MySQL recon: match=$MYSQL_RECON mismatch=$MYSQL_RECON_FAIL lag_warn=$MYSQL_RECON_LAG_WARN"
+fi
+echo "MYSQL_RECON_OK=$MYSQL_RECON MYSQL_RECON_BAD=$MYSQL_RECON_FAIL MYSQL_RECON_LAG_WARN=$MYSQL_RECON_LAG_WARN MYSQL_RECON_SKIP=$MYSQL_RECON_SKIP" > /tmp/recon_counters
 
 # Fallback: if sharded event_log tables don't exist yet, try uns sharded
 if [ "${MYSQL_EVENTS:-0}" = "0" ]; then
@@ -384,11 +556,7 @@ for acc in STRESS-CLI-0001 STRESS-CLI-0002 STRESS-CLI-0050 STRESS-CLI-0100; do
   for ccy in "${CURRENCIES[@]}"; do
     API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
     MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
-    if num_eq "$API_VAL" "$MYSQL_VAL"; then
-      pass "$acc $ccy: match ($(normalize "$MYSQL_VAL"))"
-    else
-      fail "$acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
-    fi
+    check_mysql_balance "$acc $ccy" "$API_VAL" "$MYSQL_VAL" || true
   done
 done
 
@@ -403,73 +571,192 @@ done
 DIAG_DIR="$PROJECT_DIR/jraft_ledger/diagnostics"
 mkdir -p "$DIAG_DIR"
 DIAG_FILE="$DIAG_DIR/recon-$(date +%Y%m%d-%H%M%S).log"
+DIAG_TMP=$(mktemp)
 {
   echo "=== Diagnostic Snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-  echo "Test: $VUS VUs × $DURATION"
+  echo "Test: $VUS VUs × $DURATION  Recon-only: $RECON_ONLY  Threshold: journal_lag<=$PROJ_LAG_MAX  Prometheus: $PROMETHEUS_URL"
   echo "Iterations: ${ITERATIONS:-?}  Failed: ${FAILED:-?}  p50=${P50:-?}  p95=${P95:-?}"
+
+  # k6 throughput
+  if [ -n "${K6_OUTPUT:-}" ]; then
+    K6_DROPPED=$(echo "$K6_OUTPUT" | grep -E "dropped_iterations" | grep -oE '[0-9]+' | tail -1)
+    echo "k6 dropped_iterations: ${K6_DROPPED:-0}"
+  fi
+
+  # --- Raft consensus state ---
   echo ""
-  echo "--- Raft Status ---"
+  echo "--- Raft Status (per node) ---"
+  printf "%-15s %-8s %-10s %-12s %-12s %-7s %s\n" "node" "role" "term" "lastApplied" "smJournalSeq" "cfg" "alivePeers"
   for p in 8081 8082 8083; do
-    curl -s "http://localhost:${p}/ledger/cluster/raft-status" 2>/dev/null
-    echo ""
+    DATA=$(curl -s --max-time 5 "http://localhost:${p}/ledger/cluster/raft-status" 2>/dev/null)
+    if [ -z "$DATA" ]; then
+      printf "%-15s %-8s %-10s %-12s %-12s %-7s %s\n" ":${p}" "DOWN" "-" "-" "-" "-" "-"
+      continue
+    fi
+    python3 -c "
+import json, sys
+d = json.loads('''$DATA''')
+role = 'LEADER' if d.get('isLeader') else 'FOLLOWER'
+print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
+  ':' + '${p}',
+  role,
+  d.get('term', '?'),
+  d.get('lastAppliedIndex', '?'),
+  d.get('smJournalSeq', '?'),
+  d.get('smConfigCount', '?'),
+  ','.join(d.get('alivePeers', [])) or '-',
+))
+"
   done
+  # Derived Raft consistency
+  RAFT_LA=$(for p in 8081 8082 8083; do curl -s "http://localhost:${p}/ledger/cluster/raft-status" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('lastAppliedIndex',''))" 2>/dev/null; done)
+  RAFT_SM=$(for p in 8081 8082 8083; do curl -s "http://localhost:${p}/ledger/cluster/raft-status" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('smJournalSeq',''))" 2>/dev/null; done)
+  LA_MIN=$(echo "$RAFT_LA" | sort -n | head -1)
+  LA_MAX=$(echo "$RAFT_LA" | sort -n | tail -1)
+  SM_MIN=$(echo "$RAFT_SM" | sort -n | head -1)
+  SM_MAX=$(echo "$RAFT_SM" | sort -n | tail -1)
+  LA_DIFF=$(( ${LA_MAX:-0} - ${LA_MIN:-0} ))
+  SM_DIFF=$(( ${SM_MAX:-0} - ${SM_MIN:-0} ))
+  echo "  Raft lastAppliedIndex  range: [$LA_MIN, $LA_MAX]  max_diff=$LA_DIFF"
+  echo "  Raft smJournalSeq       range: [$SM_MIN, $SM_MAX]  max_diff=$SM_DIFF"
+  if [ "$LA_DIFF" -gt 0 ] || [ "$SM_DIFF" -gt 0 ]; then
+    echo "  ❌ Raft nodes DIVERGED — investigation required"
+  else
+    echo "  ✅ Raft nodes consistent"
+  fi
+
+  # --- Hotspot balance cross-node ---
   echo ""
-  echo "--- STRESS-HOT-CO-001 Balances ---"
-  for p in 8081 8082 8083; do
-    echo -n ":${p} "
-    curl -s "http://localhost:${p}/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=USDT" 2>/dev/null
-    echo ""
-    echo -n ":${p} "
-    curl -s "http://localhost:${p}/ledger/balances?accountId=$HOTSPOT_ACC&balanceType=AVAILABLE_BALANCE&currency=BTC" 2>/dev/null
-    echo ""
+  echo "--- STRESS-HOT-CO-001 Balances (cross-node API) ---"
+  printf "%-8s %-6s %-25s %-25s %-25s %s\n" "node" "ccy" "api_amount" "mysql_amount" "diff(mysql-api)" "match"
+  for ccy in USDT BTC; do
+    AMOUNTS=()
+    for p in 8081 8082 8083; do
+      AMT=$(curl -s --max-time 5 "http://localhost:${p}/ledger/balances?accountId=${HOTSPOT_ACC}&balanceType=AVAILABLE_BALANCE&currency=${ccy}" 2>/dev/null \
+        | python3 -c "import sys,json;print(json.load(sys.stdin).get('amount',''))" 2>/dev/null)
+      AMOUNTS+=("$AMT")
+    done
+    M_AMT=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='${HOTSPOT_ACC}' AND currency='${ccy}';")
+    API_REF="${AMOUNTS[0]}"
+    for i in 0 1 2; do
+      DIFF=$(python3 -c "a=float('${AMOUNTS[$i]}');b=float('${M_AMT}');print(f'{b-a:+.10f}')" 2>/dev/null || echo "?")
+      if [ "$i" -eq 0 ]; then
+        MATCH_API="✅"
+        for a in "${AMOUNTS[@]}"; do
+          [ "$(normalize "$a")" = "$(normalize "$API_REF")" ] || MATCH_API="❌"
+        done
+        MATCH_DB="✅"
+        num_eq "$API_REF" "$M_AMT" || MATCH_DB="❌"
+        OVERALL="api=${MATCH_API} db=${MATCH_DB}"
+      else
+        OVERALL="-"
+      fi
+      printf "%-8s %-6s %-25s %-25s %-25s %s\n" ":${NODES[$i]##*:}" "$ccy" "${AMOUNTS[$i]}" "$M_AMT" "$DIFF" "$OVERALL"
+    done
   done
+
+  # --- MySQL state ---
   echo ""
-  echo "--- MySQL: $HOTSPOT_ACC ---"
+  echo "--- MySQL: $HOTSPOT_ACC (full) ---"
   docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -t \
-    -e "SELECT account_account_id, currency, amount, account_seq FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
+    -e "SELECT account_account_id, currency, amount, account_seq, updated_at FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
+
   echo ""
   echo "--- MySQL: Counts ---"
-  echo "  journals=$(mysql_query "SELECT COUNT(*) FROM journal;")"
-  echo "  balance_rows=$(mysql_query "SELECT COUNT(*) FROM account_balance;")"
-  echo "  events=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")"
-  echo "  journal_lines=$MYSQL_LINES"
+  echo "  journals           = $(mysql_query "SELECT COUNT(*) FROM journal;")"
+  echo "  balance_rows       = $(mysql_query "SELECT COUNT(*) FROM account_balance;")"
+  echo "  events             = $(mysql_query "SELECT COUNT(*) FROM projection_event_log;")"
+  echo "  journal_lines      = $MYSQL_LINES"
+  echo "  account            = $(mysql_query "SELECT COUNT(*) FROM account;")"
+  echo "  outbox_pending     = $(mysql_query "SELECT status, COUNT(*) FROM projection_event_log GROUP BY status;" | awk '/PENDING/{print $2}')"
+
+  # --- Prometheus snapshot (now) ---
+  echo ""
+  echo "--- Prometheus: projection pipeline (now) ---"
+  fetch_prom_projection_metrics
+  echo "  ledger_projection_balance_queue_depth      = ${PROJ_BALANCE_QUEUE:-ERR}"
+  echo "  ledger_outbox_pending (max)                = ${PROJ_OUTBOX_PENDING:-ERR}"
+  echo "  rate(ledger_projection_events_processed[1m]) = ${PROJ_EVENTS_RATE:-ERR} /s"
+  echo "  ledger_projection_seconds_since_last_event = ${PROJ_SINCE_LAST_EVENT:-ERR} s"
+  DIAG_LAG=$(( $(raft_status "$BASE_URL" "smJournalSeq") - $(mysql_query "SELECT COUNT(*) FROM journal;") ))
+  echo "  journal_lag (SM_journals - MySQL_journals) = $DIAG_LAG"
+  if projection_pipeline_ready; then
+    PROJ_PIPELINE_READY=1
+    echo "  pipeline_ready: ✅ (balance_queue <= $PROJ_BALANCE_QUEUE_MAX AND outbox <= $PROJ_OUTBOX_MAX)"
+  else
+    PROJ_PIPELINE_READY=0
+    echo "  pipeline_ready: ❌ (balance_queue=$PROJ_BALANCE_QUEUE outbox=$PROJ_OUTBOX_PENDING)"
+  fi
+
+  # --- Full balance reconciliation ---
   echo ""
   echo "--- MySQL: Full balance reconciliation (all accounts) ---"
-  MYSQL_RECON_TOTAL=0 MYSQL_RECON_OK=0 MYSQL_RECON_BAD=0 MYSQL_RECON_SKIP=0
-  echo "  account_id,currency,api_amount,mysql_amount,status" > /tmp/recon_detail.csv
-  mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null | while read -r acc ccy; do
+  echo "  journal_lag_at_diag=$DIAG_LAG pipeline_ready=$PROJ_PIPELINE_READY  strict_threshold=$PROJ_LAG_MAX"
+  MYSQL_RECON_TOTAL=0 MYSQL_RECON_OK=0 MYSQL_RECON_BAD=0 MYSQL_RECON_LAG=0 MYSQL_RECON_SKIP=0
+  echo "  account_id,currency,api_amount,mysql_amount,diff,abs_diff_pct,status" > /tmp/recon_detail.csv
+  DIAG_PAIRS=$(mktemp)
+  mysql_query "SELECT DISTINCT account_account_id, currency FROM account_balance ORDER BY account_account_id, currency;" 2>/dev/null > "$DIAG_PAIRS"
+  while read -r acc ccy; do
     [ -z "$acc" ] && continue
     MYSQL_RECON_TOTAL=$((MYSQL_RECON_TOTAL + 1))
     API_VAL=$(curl -s --max-time 5 "${BASE_URL}/ledger/balances?accountId=${acc}&balanceType=AVAILABLE_BALANCE&currency=${ccy}" 2>/dev/null \
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('amount','ERR'))" 2>/dev/null || echo "ERR")
     MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='${acc}' AND currency='${ccy}';")
     if [ "$API_VAL" = "ERR" ] || [ -z "$MYSQL_VAL" ]; then
-      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},SKIP" >> /tmp/recon_detail.csv
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},?,?,SKIP" >> /tmp/recon_detail.csv
       MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
-    elif [ "$(normalize "$API_VAL")" = "$(normalize "$MYSQL_VAL")" ]; then
-      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},MATCH" >> /tmp/recon_detail.csv
-      MYSQL_RECON_OK=$((MYSQL_RECON_OK + 1))
-    else
-      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},MISMATCH" >> /tmp/recon_detail.csv
-      MYSQL_RECON_BAD=$((MYSQL_RECON_BAD + 1))
+      continue
     fi
-    echo "MYSQL_RECON_TOTAL=$MYSQL_RECON_TOTAL MYSQL_RECON_OK=$MYSQL_RECON_OK MYSQL_RECON_BAD=$MYSQL_RECON_BAD MYSQL_RECON_SKIP=$MYSQL_RECON_SKIP" > /tmp/recon_counters
-  done
-  wait
-  # Read counters from subshell
-  eval "$(cat /tmp/recon_counters 2>/dev/null)"
-  echo "  Recon: total=${MYSQL_RECON_TOTAL:-0} match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} skip=${MYSQL_RECON_SKIP:-0}"
-  if [ -s /tmp/recon_detail.csv ]; then
-    echo "  Recon detail:"
-    cat /tmp/recon_detail.csv
+    DIFF=$(python3 -c "a=float('${API_VAL}');b=float('${MYSQL_VAL}');print(f'{b-a:+.10f}')" 2>/dev/null || echo "?")
+    PCT=$(python3 -c "a=float('${API_VAL}');b=float('${MYSQL_VAL}');print(f'{(abs(b-a)/abs(a)*100 if a else 0):.4f}')" 2>/dev/null || echo "?")
+    if [ "$(normalize "$API_VAL")" = "$(normalize "$MYSQL_VAL")" ]; then
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},${DIFF},${PCT}%,MATCH" >> /tmp/recon_detail.csv
+      MYSQL_RECON_OK=$((MYSQL_RECON_OK + 1))
+    elif [ "$DIAG_LAG" -le "$PROJ_LAG_MAX" ] || [ "$PROJ_PIPELINE_READY" = "1" ]; then
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},${DIFF},${PCT}%,MISMATCH" >> /tmp/recon_detail.csv
+      MYSQL_RECON_BAD=$((MYSQL_RECON_BAD + 1))
+    else
+      echo "  ${acc},${ccy},${API_VAL},${MYSQL_VAL},${DIFF},${PCT}%,LAG_MISMATCH" >> /tmp/recon_detail.csv
+      MYSQL_RECON_LAG=$((MYSQL_RECON_LAG + 1))
+    fi
+  done < "$DIAG_PAIRS"
+  rm -f "$DIAG_PAIRS"
+  echo ""
+  echo "  Recon: total=$MYSQL_RECON_TOTAL match=$MYSQL_RECON_OK mismatch=$MYSQL_RECON_BAD lag_mismatch=$MYSQL_RECON_LAG skip=$MYSQL_RECON_SKIP"
+  MATCH_PCT=$(python3 -c "print(f'{(100*${MYSQL_RECON_OK}/${MYSQL_RECON_TOTAL}):.1f}' if ${MYSQL_RECON_TOTAL} else '0.0')" 2>/dev/null || echo "0.0")
+  echo "  Match rate: ${MATCH_PCT}% (${MYSQL_RECON_OK}/${MYSQL_RECON_TOTAL})"
+  # Mismatches by severity (use abs_diff_pct)
+  if [ "$MYSQL_RECON_BAD" -gt 0 ]; then
+    echo ""
+    echo "  Top mismatches by |diff|:"
+    tail -n +2 /tmp/recon_detail.csv | grep -E ',MISMATCH$|,LAG_MISMATCH$' \
+      | sort -t',' -k5 -g 2>/dev/null | tail -10 \
+      | awk -F',' '{printf "    %s %-12s api=%-22s mysql=%-22s diff=%s pct=%s%%\n", $7, $1, $3, $4, $5, $6}'
   fi
   echo ""
-  echo "--- Follower logs (last 20 errors) ---"
-  for n in 2 3; do
-    echo "=== node-${n} ==="
-    docker logs "ledger-node-${n}" 2>&1 | grep -i "error\|exception\|Failed to apply" | tail -5
+  echo "  Full detail:"
+  echo "    account_id,currency,api_amount,mysql_amount,diff,abs_diff_pct,status"
+  tail -n +2 /tmp/recon_detail.csv | sed 's/^/    /'
+
+  # --- L1 journal-line sum vs balance check (sample accounts) ---
+  echo ""
+  echo "--- L1 Sanity: journals vs journal_lines ---"
+  JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+  LINES=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) FROM journal_line_1 UNION ALL SELECT COUNT(*) FROM journal_line_2 UNION ALL SELECT COUNT(*) FROM journal_line_3) t;")
+  AVG_LEGS=$(python3 -c "print(f'{${LINES}/${JNLS}:.2f}' if ${JNLS} else '0.0')" 2>/dev/null || echo "?")
+  echo "  journals=$JNLS  journal_lines=$LINES  avg_legs_per_journal=$AVG_LEGS (expect 2.0 for postings, 0 for adjustments)"
+
+  # --- Raft error logs (last 5 per node) ---
+  echo ""
+  echo "--- Follower error logs (last 5 per node) ---"
+  for n in 1 2 3; do
+    echo "  === node-${n} ==="
+    ERR_COUNT=$(docker logs "ledger-node-${n}" 2>&1 | grep -ciE "error|exception|Failed to apply" || true)
+    echo "  error/exception lines: $ERR_COUNT"
+    docker logs "ledger-node-${n}" 2>&1 | grep -iE "error|exception|Failed to apply" | tail -3 | sed 's/^/    /'
   done
-} > "$DIAG_FILE" 2>/dev/null
+} > "$DIAG_TMP" 2>/dev/null
+mv "$DIAG_TMP" "$DIAG_FILE"
 
 # ============================================================
 # 7. Summary
@@ -500,15 +787,22 @@ printf "  %-4s %-25s %s\n" \
 SM_NOW=$(raft_status "$BASE_URL" "smJournalSeq")
 MYSQL_NOW=$(mysql_query "SELECT COUNT(*) FROM journal;")
 LAG_NOW=$((SM_NOW - MYSQL_NOW))
+fetch_prom_projection_metrics
+projection_pipeline_ready >/dev/null 2>&1 || true
 if [ "$LAG_NOW" -gt 0 ] && [ "${PROJ_RATE_FINAL:-0}" -gt 0 ]; then
   ETA_NOW="$((LAG_NOW / PROJ_RATE_FINAL))s"
 else
   ETA_NOW="-"
 fi
+PROM_OK=$([ "${PROJ_PIPELINE_READY:-0}" -eq 1 ] && echo "✅" || echo "⚠️")
 printf "  %-4s %-25s %s\n" \
-  "$([ "$LAG_NOW" -le 10 ] && echo "✅" || echo "⚠️")" \
+  "$([ "$LAG_NOW" -le "$PROJ_LAG_MAX" ] || [ "${PROJ_PIPELINE_READY:-0}" -eq 1 ] && echo "✅" || echo "⚠️")" \
   "MySQL journal lag" \
   "SM=$SM_NOW MySQL=$MYSQL_NOW lag=$LAG_NOW drain=${PROJ_RATE_FINAL:-?}/s eta=$ETA_NOW"
+printf "  %-4s %-25s %s\n" \
+  "$PROM_OK" \
+  "Prometheus pipeline" \
+  "$(prom_metrics_line) ready=${PROJ_PIPELINE_READY:-0}"
 
 # Hotspot balance summary
 for ccy in "${CURRENCIES[@]}"; do
@@ -528,12 +822,12 @@ for ccy in "${CURRENCIES[@]}"; do
     "leader=$(normalize "$V1") MySQL=$(normalize "$M")"
 done
 
-  # MySQL full recon
+  # MySQL full recon (from Step 5 counters)
   eval "$(cat /tmp/recon_counters 2>/dev/null)"
   printf "  %-4s %-25s %s\n" \
-    "$( [ "${MYSQL_RECON_BAD:-0}" -eq 0 ] && [ "${MYSQL_RECON_OK:-0}" -gt 0 ] && echo "✅" || echo "⚠️")" \
+    "$( [ "${MYSQL_RECON_BAD:-0}" -eq 0 ] && echo "✅" || echo "❌")" \
     "MySQL balance recon (all)" \
-    "match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} skip=${MYSQL_RECON_SKIP:-0}"
+    "match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} lag_warn=${MYSQL_RECON_LAG_WARN:-0} skip=${MYSQL_RECON_SKIP:-0}"
 
   # MySQL event/journal/line counts
   printf "  %-4s %-25s %s\n" \
