@@ -25,6 +25,11 @@ logging:
   level:
     ShardingSphere-SQL: warn
 
+ledger:
+  projection:
+    balance:
+      workers: 2
+
 server:
   port: 8089
 

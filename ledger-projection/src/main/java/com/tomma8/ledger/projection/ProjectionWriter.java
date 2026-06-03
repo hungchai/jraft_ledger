@@ -12,6 +12,7 @@ import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -22,6 +23,9 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -45,7 +49,11 @@ public class ProjectionWriter {
     private final ConcurrentHashMap<String, Long> journalPkCache = new ConcurrentHashMap<>();
 
     private final ConflationQueue balanceQueue = new ConflationQueue();
-    private final Thread balanceWorker;
+    private final ExecutorService balanceWorkerPool;
+    private final int balanceWorkerCount;
+
+    @Value("${ledger.projection.balance.workers:2}")
+    private int configuredBalanceWorkerThreads;
 
     private final AtomicLong lastEventTimestamp = new AtomicLong(System.currentTimeMillis());
     private final LongAdder eventsProcessed = new LongAdder();
@@ -54,9 +62,17 @@ public class ProjectionWriter {
     public ProjectionWriter(SqlSessionFactory sqlSessionFactory, MeterRegistry meterRegistry) {
         this.sqlSessionFactory = sqlSessionFactory;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
-        this.balanceWorker = Thread.ofPlatform().daemon()
-                .name("projection-balance-worker")
-                .start(this::balanceWorkerLoop);
+
+        int threads = resolveBalanceWorkerCount(configuredBalanceWorkerThreads);
+        this.balanceWorkerCount = threads;
+        this.balanceWorkerPool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "projection-balance-worker");
+            t.setDaemon(true);
+            return t;
+        });
+        for (int i = 0; i < threads; i++) {
+            balanceWorkerPool.submit(this::balanceWorkerLoop);
+        }
 
         Gauge.builder("ledger.projection.seconds.since.last.event", this,
                 pw -> (System.currentTimeMillis() - pw.lastEventTimestamp.get()) / 1000.0)
@@ -71,6 +87,17 @@ public class ProjectionWriter {
 
         Gauge.builder("ledger.projection.balance.writes", balanceWrites, LongAdder::doubleValue)
                 .description("Total balance SQL writes after conflation.").register(meterRegistry);
+
+        Gauge.builder("ledger.projection.balance.workers", this, pw -> pw.balanceWorkerCount)
+                .description("Size of the balance worker pool draining the conflation queue.")
+                .baseUnit("threads").register(meterRegistry);
+    }
+
+    private static int resolveBalanceWorkerCount(int configured) {
+        int n = configured;
+        if (n < 1) n = 1;
+        if (n > 16) n = 16;
+        return n;
     }
 
     // ============================================================
@@ -206,7 +233,12 @@ public class ProjectionWriter {
     // ============================================================
 
     private void balanceWorkerLoop() {
-        log.info("Balance worker started");
+        log.info("Balance worker started: {}", Thread.currentThread().getName());
+        // Each worker owns its scratch list — no sharing, no synchronization.
+        // ConflationQueue.drainTo uses ConcurrentHashMap.remove(key, value), which
+        // is safe for multiple concurrent drainers: the entry is removed only if
+        // it still maps to the exact value reference we observed, so two workers
+        // can never grab the same (accountId, balanceType, currency) update.
         var batch = new ArrayList<BalanceUpdate>(200);
         while (!Thread.currentThread().isInterrupted()) {
             try {
@@ -238,7 +270,21 @@ public class ProjectionWriter {
                 log.error("Balance worker error", e);
             }
         }
-        log.info("Balance worker stopped");
+        log.info("Balance worker stopped: {}", Thread.currentThread().getName());
+    }
+
+    /** Graceful shutdown of the balance worker pool. */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() {
+        balanceWorkerPool.shutdown();
+        try {
+            if (!balanceWorkerPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                balanceWorkerPool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            balanceWorkerPool.shutdownNow();
+        }
     }
 
     /** Parsed balance-change event passed from {@link ProjectionConsumer}. */
