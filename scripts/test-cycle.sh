@@ -356,11 +356,15 @@ if ! $RECON_ONLY; then
     -e BASE_URL="$BASE_URL" \
     "$K6_SCRIPT" 2>&1) || true
 
+  # Strip ANSI color codes injected by handleSummary/textSummary so the metric
+  # greps below can match the embedded "iterations...........:" / "p(50)=..." rows.
+  K6_PLAIN=$(echo "$K6_OUTPUT" | sed -E $'s/\\x1b\\[[0-9;]*m//g')
+
   # Extract key metrics
-  ITERATIONS=$(echo "$K6_OUTPUT" | grep "iterations\.\.\." | grep -oE '[0-9]+' | head -1)
-  FAILED=$(echo "$K6_OUTPUT" | grep "http_req_failed" | tail -1 | grep -oE '[0-9.]+%' | head -1)
-  P50=$(echo "$K6_OUTPUT" | grep "p(50)=" | tail -1 | grep -oE 'p\(50\)=[0-9.]+ms' | head -1)
-  P95=$(echo "$K6_OUTPUT" | grep "p(95)=" | tail -1 | grep -oE 'p\(95\)=[0-9.]+ms' | head -1)
+  ITERATIONS=$(echo "$K6_PLAIN" | grep "iterations\.\.\." | grep -oE '[0-9]+' | head -1)
+  FAILED=$(echo "$K6_PLAIN" | grep "http_req_failed" | tail -1 | grep -oE '[0-9.]+%' | head -1)
+  P50=$(echo "$K6_PLAIN" | grep -E "p\(50\)=" | grep "http_req_duration" | tail -1 | grep -oE 'p\(50\)=[0-9.]+(ms|µs|s)' | head -1)
+  P95=$(echo "$K6_PLAIN" | grep -E "p\(95\)=" | grep "http_req_duration" | tail -1 | grep -oE 'p\(95\)=[0-9.]+(ms|µs|s)' | head -1)
 
   echo "  Iterations: ${ITERATIONS:-?}"
   echo "  Failed: ${FAILED:-?}"
