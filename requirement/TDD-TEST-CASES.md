@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.12
-**日期**: 2026-05-31
+**版本**: v0.13
+**日期**: 2026-06-03
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.13 變更摘要**：新增 Module 22（SnowflakeIdGenerator 時鐘回退容錯），新增 TC-SNOW-01~04。涵蓋 monotonic ID、序列號回捲、≤5ms 時鐘回退等待、>5ms 時鐘回退拒絕。
+>
 > **v0.12 變更摘要**：新增 Module 21（F-016 Micrometer Metrics & Observability），新增 TC-F016-01~10。涵蓋 Metrics 暴露、標籤正確性、Alert Rule 觸發、Histogram bucket SLO、Projection gauges 獨立暴露。
 >
 > **v0.11 變更摘要**：新增 TC-F011-10~12（Outbox callback-driven deletion）。驗證 KafkaEventPublisher send callback 刪除 outbox、AsyncOutboxPublisher 不再直接調用 markSent、熱路徑 callback 即時清理 outbox。
@@ -1316,4 +1318,35 @@ Phase 9 — Config Abstraction【v0.10 新增】
 
 Phase 10 — Micrometer Metrics & Observability【v0.11 新增】
   TC-F016-01~10（Metrics expose + tag correctness + alert firing + histogram bucket + projection gauges）
+
+Phase 11 — SnowflakeIdGenerator Clock Drift Tolerance【v0.13 新增】
+  TC-SNOW-01~04（monotonic ID + sequence rollover + ≤5ms backward wait + >5ms backward reject）
+
+---
+
+## Module 22：SnowflakeIdGenerator 時鐘回退容錯
+
+### 22.1 Monotonic ID Generation
+- **TC-SNOW-01**：連續調用 nextId() 產生嚴格遞增 ID
+  - Given：`workerId=1`，時鐘正常遞增
+  - When：連續呼叫 `nextId()` 三次
+  - Then：`id1 < id2 < id3`
+
+### 22.2 Sequence Rollover Within Same Millisecond
+- **TC-SNOW-02**：同一毫秒內序列號耗盡後自動進位到下一毫秒
+  - Given：`workerId=1`，固定毫秒戳 `T`
+  - When：連續產生 5000 個 ID（超過 4096 序列上限）
+  - Then：所有 ID 嚴格遞增，無重複，無死鎖
+
+### 22.3 Small Backwards Clock Drift Tolerance（≤5 ms）
+- **TC-SNOW-03**：NTP 微調導致時鐘回退 ≤5ms 時等待而非拋錯
+  - Given：`lastTimestamp = T`，模擬時鐘回退 3ms
+  - When：呼叫 `nextId()`
+  - Then：Busy-wait 直到時鐘回到 T，成功產生 `id > lastId`，不拋例外
+
+### 22.4 Large Backwards Clock Drift Rejection（>5 ms）
+- **TC-SNOW-04**：時鐘回退超過 5ms 仍應拒絕產生 ID
+  - Given：`lastTimestamp = T`，模擬時鐘回退 10ms
+  - When：呼叫 `nextId()`
+  - Then：拋出 `IllegalStateException`，訊息包含 "Clock moved backwards"
 ```
