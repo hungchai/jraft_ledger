@@ -433,8 +433,25 @@ echo "=== Step 5: Reconciliation (journal_lag=$PROJ_LAG_AT_RECON pipeline_ready=
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
 HOTSPOT_ACC="STRESS-HOT-CO-001"
-ACCOUNTS=("$HOTSPOT_ACC" "STRESS-CLI-0001" "STRESS-CLI-0002")
 CURRENCIES=("USDT" "BTC")
+
+# Discover accounts from MySQL account_balance (every account that has any row).
+# Fall back to a small set if MySQL isn't reachable yet (recon-only mode pre-warmup).
+ACCOUNTS_FILE=$(mktemp)
+mysql_query "SELECT DISTINCT account_account_id FROM account_balance ORDER BY account_account_id;" 2>/dev/null > "$ACCOUNTS_FILE" || true
+if [ -s "$ACCOUNTS_FILE" ]; then
+  # Build bash array from file
+  ACCOUNTS=()
+  while IFS= read -r acc; do
+    [ -z "$acc" ] && continue
+    ACCOUNTS+=("$acc")
+  done < "$ACCOUNTS_FILE"
+  echo "  Discovered ${#ACCOUNTS[@]} accounts from MySQL (sample: ${ACCOUNTS[0]:-} ${ACCOUNTS[1]:-} ${ACCOUNTS[2]:-})"
+else
+  ACCOUNTS=("$HOTSPOT_ACC" "STRESS-CLI-0001" "STRESS-CLI-0002")
+  echo "  MySQL account_balance not reachable — falling back to ${#ACCOUNTS[@]} hardcoded accounts"
+fi
+rm -f "$ACCOUNTS_FILE"
 
 # --- Raft consistency ---
 echo ""
@@ -482,21 +499,32 @@ for ccy in "${CURRENCIES[@]}"; do
   check_mysql_balance "$ccy MySQL vs leader" "$LEADER_VAL" "$MYSQL_VAL" || true
 done
 
-# --- API balance cross-node (clients) ---
+# --- API balance cross-node (clients) — runs over all accounts discovered from MySQL ---
 echo ""
-echo "--- API balance cross-node ---"
+echo "--- API balance cross-node (${#ACCOUNTS[@]} accounts × ${#CURRENCIES[@]} currencies) ---"
+XNODE_OK=0
+XNODE_BAD=0
+XNODE_TOTAL=0
 for acc in "${ACCOUNTS[@]}"; do
   for ccy in "${CURRENCIES[@]}"; do
+    XNODE_TOTAL=$((XNODE_TOTAL + 1))
     V1=$(api_balance "${NODES[0]}" "$acc" "AVAILABLE_BALANCE" "$ccy")
     V2=$(api_balance "${NODES[1]}" "$acc" "AVAILABLE_BALANCE" "$ccy")
     V3=$(api_balance "${NODES[2]}" "$acc" "AVAILABLE_BALANCE" "$ccy")
     if [ "$V1" = "$V2" ] && [ "$V2" = "$V3" ]; then
       pass "$acc $ccy: identical ($V1)"
+      XNODE_OK=$((XNODE_OK + 1))
     else
       fail "$acc $ccy: $V1 / $V2 / $V3"
+      XNODE_BAD=$((XNODE_BAD + 1))
     fi
   done
 done
+if [ "$XNODE_BAD" -eq 0 ]; then
+  pass "All-account cross-node API: $XNODE_OK/$XNODE_TOTAL identical"
+else
+  fail "All-account cross-node API: $XNODE_OK/$XNODE_TOTAL identical ($XNODE_BAD diverged)"
+fi
 
 # --- MySQL journal count vs SM ---
 echo ""
@@ -577,10 +605,38 @@ if [ "${MYSQL_EVENTS:-0}" = "0" ]; then
   MYSQL_EVENTS=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")
 fi
 
-# --- Sample client MySQL vs Leader ---
+# --- Sample client MySQL vs Leader (subset of discovered accounts) ---
 echo ""
-echo "--- Client MySQL vs Leader ---"
-for acc in STRESS-CLI-0001 STRESS-CLI-0002 STRESS-CLI-0050 STRESS-CLI-0100; do
+echo "--- Client MySQL vs Leader (sample of ${#ACCOUNTS[@]} accounts) ---"
+# Pick a few representative accounts from the discovered set (first / mid / last / hotspot)
+SAMPLE_ACCS=()
+N_ACCOUNTS=${#ACCOUNTS[@]}
+if [ "$N_ACCOUNTS" -gt 0 ]; then
+  SAMPLE_ACCS+=("${ACCOUNTS[0]}")
+  if [ "$N_ACCOUNTS" -gt 4 ]; then
+    MID=$(( N_ACCOUNTS / 2 ))
+    SAMPLE_ACCS+=("${ACCOUNTS[$MID]}")
+    # add MID+1 if distinct
+    NEXT=$((MID + 1))
+    if [ "$NEXT" -lt "$N_ACCOUNTS" ] && [ "${ACCOUNTS[$NEXT]}" != "${ACCOUNTS[$MID]}" ]; then
+      SAMPLE_ACCS+=("${ACCOUNTS[$NEXT]}")
+    fi
+  fi
+  LAST_IDX=$((N_ACCOUNTS - 1))
+  SAMPLE_ACCS+=("${ACCOUNTS[$LAST_IDX]}")
+fi
+# Always include the hotspot if present
+for acc in "${ACCOUNTS[@]}"; do
+  if [ "$acc" = "$HOTSPOT_ACC" ]; then
+    SAMPLE_ACCS+=("$HOTSPOT_ACC")
+    break
+  fi
+done
+# Dedupe
+if [ "${#SAMPLE_ACCS[@]}" -gt 0 ]; then
+  SAMPLE_ACCS=($(printf "%s\n" "${SAMPLE_ACCS[@]}" | sort -u))
+fi
+for acc in "${SAMPLE_ACCS[@]}"; do
   for ccy in "${CURRENCIES[@]}"; do
     API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
     MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
