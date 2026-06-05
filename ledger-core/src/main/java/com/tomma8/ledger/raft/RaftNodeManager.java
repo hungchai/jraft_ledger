@@ -44,7 +44,7 @@ public class RaftNodeManager implements AutoCloseable {
         stateMachine.setPendingCommands(pendingCommands);
 
         this.nodeOptions = new NodeOptions();
-        nodeOptions.setElectionTimeoutMs(5000);
+        nodeOptions.setElectionTimeoutMs(3000);
         nodeOptions.setInitialConf(conf);
         nodeOptions.setDisableCli(false);
         nodeOptions.setSnapshotIntervalSecs(600);
