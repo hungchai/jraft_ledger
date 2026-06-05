@@ -1,8 +1,8 @@
 package com.tomma8.ledger.rocksdb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
+import com.tomma8.ledger.util.LedgerMappers;
 import org.rocksdb.RocksIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,8 +20,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class OutboxStore {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxStore.class);
-    private static final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule());
+    private static final ObjectMapper mapper = LedgerMappers.get();
     private static final byte[] OUTBOX_PREFIX = "outbox:".getBytes(StandardCharsets.UTF_8);
 
     private final RocksDBManager rocksDBManager;

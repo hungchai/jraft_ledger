@@ -1,11 +1,11 @@
 package com.tomma8.ledger.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.domain.event.AccountCreatedEvent;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
 import com.tomma8.ledger.domain.event.LedgerEventListener;
 import com.tomma8.ledger.rocksdb.OutboxStore;
+import com.tomma8.ledger.util.LedgerMappers;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -24,9 +24,7 @@ import java.util.concurrent.Future;
 public class KafkaEventPublisher implements LedgerEventListener {
 
     private static final Logger log = LoggerFactory.getLogger(KafkaEventPublisher.class);
-    private static final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule())
-            .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final ObjectMapper mapper = LedgerMappers.get();
 
     private final KafkaProducer<String, String> producer;
     private final String balanceChangeTopic;

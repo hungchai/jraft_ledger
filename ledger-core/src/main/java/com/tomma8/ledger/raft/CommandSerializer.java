@@ -1,17 +1,14 @@
 package com.tomma8.ledger.raft;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.tomma8.ledger.domain.command.*;
+import com.tomma8.ledger.util.LedgerMappers;
 
 import java.nio.charset.StandardCharsets;
 
 public final class CommandSerializer {
 
-    private static final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule())
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final ObjectMapper mapper = LedgerMappers.get();
 
     public static byte[] serialize(RaftCommand command) {
         try {
