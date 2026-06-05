@@ -18,6 +18,7 @@ public class RocksDBManager implements AutoCloseable {
     private final DBOptions dbOptions;
     private final Map<String, ColumnFamilyHandle> columnFamilyHandles = new HashMap<>();
     private RocksDB rocksDB;
+    private WriteOptions writeOptionsInstance;
 
     public RocksDBManager(String dbPath) {
         this.dbPath = dbPath;
@@ -33,6 +34,11 @@ public class RocksDBManager implements AutoCloseable {
         if (!dbDir.exists()) {
             dbDir.mkdirs();
         }
+
+        // Initialize the cached WriteOptions after the JNI library is loaded —
+        // constructing a WriteOptions issues a JNI call (newWriteOptions) and
+        // would otherwise UnsatisfiedLinkError in <clinit>.
+        writeOptionsInstance = new WriteOptions().setSync(true);
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
 
@@ -84,8 +90,13 @@ public class RocksDBManager implements AutoCloseable {
         rocksDB.delete(getHandle(cfName), key);
     }
 
+    /**
+     * Cached WriteOptions (initialised in {@link #open()} after the JNI library
+     * is loaded). Avoids allocating a new WriteOptions per write — small but
+     * real allocation/GC win on the hot path.
+     */
     public void write(WriteBatch batch) throws Exception {
-        rocksDB.write(new WriteOptions(), batch);
+        rocksDB.write(writeOptionsInstance, batch);
     }
 
     public RocksDB getRocksDB() {
