@@ -1,70 +1,73 @@
 # CLAUDE.md
 
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+Guidelines cut common LLM coding mistakes. Merge with project instructions.
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+**Tradeoff:** bias caution over speed. Trivial tasks — use judgment.
 
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+Before implement:
+- State assumptions. Uncertain → ask.
+- Multiple interpretations → present all; don't pick silent.
+- Simpler approach → say so. Push back when warranted.
+- Unclear → stop, name confusion, ask.
 
 ## 2. Simplicity First
 
-**Minimum code that solves the problem. Nothing speculative.**
+**Minimum code solves problem. Nothing speculative.**
 
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+- No features beyond ask.
+- No single-use abstractions.
+- No unrequested flexibility/config.
+- No error handling for impossible cases.
+- 200 lines when 50 enough → rewrite.
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+Ask: senior engineer say overcomplicated? Yes → simplify.
 
 ## 3. Surgical Changes
 
-**Touch only what you must. Clean up only your own mess.**
+**Touch only must. Clean only own mess.**
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+Edit existing code:
+- Don't improve adjacent code/comments/format.
+- Don't refactor unbroken code.
+- Match existing style.
+- Unrelated dead code → mention, don't delete.
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
+Your changes create orphans:
+- Remove imports/vars/functions YOUR changes orphaned.
 - Don't remove pre-existing dead code unless asked.
 
-The test: Every changed line should trace directly to the user's request.
+Test: every changed line traces to user request.
 
 ## 4. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
+Transform tasks:
+- "Add validation" → tests for invalid inputs, then pass
+- "Fix bug" → test reproduces, then pass
+- "Refactor X" → tests pass before + after
 
-For multi-step tasks, state a brief plan:
+Multi-step → brief plan:
 ```
 1. [Step] → verify: [check]
 2. [Step] → verify: [check]
 3. [Step] → verify: [check]
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+Strong criteria → loop alone. Weak ("make it work") → need clarification.
 
----/
+---
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+**Working if:** fewer unnecessary diffs, fewer overcomplication rewrites, questions before implementation not after mistakes.
 
-Rules for Next-Gen Internal Ledger Platform
+---
+
+# Rules for Next-Gen Internal Ledger Platform
+
 1. Before Every Code Change
 2. Code-Change Rules
 3. After Every Code Change — Mandatory Updates
@@ -72,93 +75,96 @@ Rules for Next-Gen Internal Ledger Platform
 5. Audit & Traceability
 6. PR / Commit Gate Checklist
 7. Quick Feature-to-File Reference
-   claude.md — AI Coding Agent Rules for Next-Gen Internal Ledger Platform
-   This file governs every code-change session in this repository.
-   The AI agent must follow all rules below before, during, and after any code modification.
 
-1. Before Every Code Change
-   1.1 Requirement Review Checklist
-   Before writing or modifying any code, the agent must read and cross-check:
+claude.md — AI agent rules for Next-Gen Internal Ledger Platform. Follow before, during, after any code change.
 
-LEDGER-PLATFORM-FULL-REQUIREMENTS.md — confirm which Feature (F-001–F-011) and ADR(s) are in scope
+## 1. Before Every Code Change
 
-TDD-TEST-CASES.md — identify all test case IDs (TC-Fxxx-xx) that map to the affected feature(s)
+### 1.1 Requirement Review Checklist
 
-Confirm whether the change touches any of the following critical domains (extra scrutiny required):
+Before code, read + cross-check:
 
-Balance Type Registry (F-001)
+`LEDGER-PLATFORM-FULL-REQUIREMENTS.md` — Feature (F-001–F-011) + ADR(s) in scope
 
-Posting / Multi-Account Atomic Commit (F-002, ADR-001)
+`TDD-TEST-CASES.md` — TC-Fxxx-xx IDs for affected feature(s)
 
-Reversal (F-004)
+Critical domains (extra scrutiny):
 
-Manual Adjustment / Maker-Checker (F-003)
+- Balance Type Registry (F-001)
+- Posting / Multi-Account Atomic Commit (F-002, ADR-001)
+- Reversal (F-004)
+- Manual Adjustment / Maker-Checker (F-003)
+- State Machine (F-008)
+- Reconciliation L1/L2/L3 (F-007)
+- Accounting Period / EOD (F-009)
+- Account Management (F-010)
+- BalanceChangeEvent / Kafka Outbox (F-011)
 
-State Machine (F-008)
+## 2. Code-Change Rules
 
-Reconciliation L1/L2/L3 (F-007)
+### 2.1 Immutability & Append-Only Journal
 
-Accounting Period / EOD (F-009)
+Journal + JournalLines append-only. Never UPDATE/DELETE journal records.
 
-Account Management (F-010)
+Reversals → new `journalType=REVERSAL`; original `REVERSED` only via State Machine apply.
 
-BalanceChangeEvent / Kafka Outbox (F-011)
+`crossPeriod=true` when reversal `valueDate` crosses period boundary.
 
-2. Code-Change Rules
-   2.1 Immutability & Append-Only Journal
-   Journal entries and JournalLines are append-only. Never UPDATE or DELETE journal records.
+### 2.2 Idempotency
 
-All reversals must create a new journalType=REVERSAL journal; the original journal's status is set to REVERSED only via the State Machine apply path.
+All writes (Posting, Reversal, Adjustment, Account create) check `idempotencyStore` first.
 
-crossPeriod flag must be set when reversal valueDate crosses an accounting period boundary.
+Duplicate `requestId` → return cached result; never re-execute.
 
-2.2 Idempotency
-Every write path (Posting, Reversal, Adjustment, Account creation) must check idempotencyStore before execution.
+`requestId`: UUID v7.
 
-Return the cached result immediately on duplicate requestId; never re-execute.
+### 2.3 State Machine Integrity
 
-requestId format: UUID v7.
+Balance mutations: Raft Leader → Account Queue → State Machine apply only.
 
-2.3 State Machine Integrity
-All balance mutations go through the Raft Leader → Account Queue → State Machine apply path.
+Direct `balanceStore` / RocksDB writes outside `StateMachine.apply()` forbidden.
 
-Direct writes to balanceStore or RocksDB outside of StateMachine.apply() are forbidden.
+`accountSeq` atomic increment per `(accountId, balanceType, currency)` every apply.
 
-accountSeq must be incremented atomically per (accountId, balanceType, currency) key on every apply (Posting, Reversal, Adjustment).
+Every `JournalLine`: `balanceBefore` + `balanceAfter`.
 
-balanceBefore and balanceAfter must be recorded on every JournalLine.
+### 2.4 Balance Floor & Ceiling Enforcement
 
-2.4 Balance Floor & Ceiling Enforcement
-If allowNegative=false: reject if afterBalance < 0 → error INSUFFICIENT_BALANCE
+`allowNegative=false` + `afterBalance < 0` → `INSUFFICIENT_BALANCE`
 
-If allowNegative=true and CREDIT would push balance above 0 beyond limit: reject → error CREDIT_EXCEEDS_LIMIT
+`allowNegative=true` + CREDIT above 0 past limit → `CREDIT_EXCEEDS_LIMIT`
 
-zeroFloorEnforce flag must be respected as defined in BalanceTypeConfig.
+Respect `zeroFloorEnforce` from `BalanceTypeConfig`.
 
-2.5 Account Queue Ordering
-All operations targeting the same accountId must be serialised through its LinkedBlockingQueue.
+### 2.5 Account Queue Ordering
 
-Multi-account operations (e.g., RFQ CLIENT ↔ COMPANY) must acquire queues in deterministic order (sort by accountId lexicographically) to prevent deadlock.
+Same `accountId` → serialize via `LinkedBlockingQueue`.
 
-Back-pressure: reject enqueue if queue depth exceeds MAX_QUEUE_SIZE; return QUEUE_FULL error.
+Multi-account (RFQ CLIENT ↔ COMPANY): acquire queues lexicographic `accountId` order — no deadlock.
 
-2.6 RocksDB WriteBatch Atomicity
-Journal, JournalLine, and Balance updates must be committed in a single WriteBatch per command.
+Queue depth > `MAX_QUEUE_SIZE` → reject `QUEUE_FULL`.
 
-Never write partial state; crash-recovery relies on WAL atomicity.
+### 2.6 RocksDB WriteBatch Atomicity
 
-2.7 Maker-Checker Enforcement
-Adjustment drafts require a checkerId ≠ makerId; throw MakerCheckerSamePersonException otherwise.
+Journal + JournalLine + Balance in one `WriteBatch` per command.
 
-Draft.expiresAt must be checked before approval; throw DraftExpiredException for stale drafts.
+No partial state; crash recovery = WAL atomicity.
 
-2.8 Accounting Period Gates
-Block new Postings (non-reversal) when period status is CLOSING or CLOSED → PERIOD_CLOSED.
+### 2.7 Maker-Checker Enforcement
 
-Allow cross-period Reversals only with explicit crossPeriod=true in the request and approval.
+Adjustment: `checkerId ≠ makerId` or `MakerCheckerSamePersonException`.
 
-2.9 SQL Schema Documentation Standard
-Every table column in `init.sql` must carry an inline `COMMENT` describing the column's purpose, domain, and unit where applicable.
+Check `Draft.expiresAt` before approve; stale → `DraftExpiredException`.
+
+### 2.8 Accounting Period Gates
+
+Postings (non-reversal) when period `CLOSING`/`CLOSED` → `PERIOD_CLOSED`.
+
+Cross-period Reversals: `crossPeriod=true` + approval only.
+
+### 2.9 SQL Schema Documentation Standard
+
+Every `init.sql` column: inline `COMMENT` (purpose, domain, unit).
 
 ```sql
 -- ✅ Correct
@@ -172,113 +178,69 @@ status VARCHAR(16) NOT NULL,
 ```
 
 Rules:
-- Every column gets a `COMMENT` — no bare columns.
-- New table → all columns described immediately.
-- New column added to existing table → `ALTER TABLE ... ADD COLUMN ... COMMENT '...'` must include description.
-- Enum-like columns list valid values in comment (e.g., `'Account lifecycle status: ACTIVE | FROZEN | CLOSED'`).
-- Numeric columns specify unit/semantics (e.g., `'Transaction amount in the currency unit'`, `'Balance after posting in account currency'`).
-- Timestamp columns note precision and timezone (e.g., `'Record creation timestamp (UTC, microsecond precision)'`).
-- Foreign key columns reference the target (e.g., `'Foreign key to journal.journal_id'`).
-- Boolean columns describe what true/false mean.
+- Every column `COMMENT` — no bare columns.
+- New table → all columns described.
+- New column → `ALTER TABLE ... ADD COLUMN ... COMMENT '...'`
+- Enum columns: valid values in comment.
+- Numeric: unit/semantics in comment.
+- Timestamps: precision + timezone in comment.
+- FK columns: target in comment.
+- Boolean: true/false meaning in comment.
 
-2.10 Performance Non-Negotiables
-Operation	Target	Violation Action
-Posting P95	≤ 3 ms	Reject PR, profile hotspot
-Balance Query (live)	≤ 2 ms	Reject PR, check in-memory path
-Balance Query (as-of)	≤ 30 ms	Reject PR, check Learner/MySQL
-Journal Query	≤ 30 ms	Reject PR
-Reconciliation Report	≤ 2 min	Reject PR
-3. After Every Code Change — Mandatory Updates
-   The agent must complete all of the following steps after modifying code:
+### 2.10 Performance Non-Negotiables
 
-3.1 Update LEDGER-PLATFORM-FULL-REQUIREMENTS.md
-Check if the change affects:
+| Operation | Target | Violation Action |
+|---|---|---|
+| Posting P95 | ≤ 3 ms | Reject PR, profile hotspot |
+| Balance Query (live) | ≤ 2 ms | Reject PR, check in-memory path |
+| Balance Query (as-of) | ≤ 30 ms | Reject PR, check Learner/MySQL |
+| Journal Query | ≤ 30 ms | Reject PR |
+| Reconciliation Report | ≤ 2 min | Reject PR |
 
-Trigger	Required Update
-New API field or endpoint added	Add to the relevant Feature spec (request/response schema table)
-New error code introduced	Add to the error code enum/table in the relevant Feature section
-New Balance Type, alert rule, or config field	Update F-001 Balance Type Registry schema
-ADR decision revised	Update the relevant ADR section with rationale and date
-NFR target changed	Update NFR table
-New feature or sub-feature	Add a new Feature spec section (F-0xx) with acceptance criteria
-Requirement doc version must be incremented (patch bump, e.g. v0.2 → v0.3) and the change log row updated.
+## 3. After Every Code Change — Mandatory Updates
 
-3.2 Update TDD-TEST-CASES.md
-For every code change:
+Complete after any code change.
 
-Identify all existing test case IDs affected — update Given / When / Then if behaviour changes
+### 3.1 Update LEDGER-PLATFORM-FULL-REQUIREMENTS.md
 
-Add new test cases for:
+| Trigger | Required Update |
+|---|---|
+| New API field/endpoint | Feature spec request/response schema |
+| New error code | Error enum/table in Feature section |
+| New Balance Type, alert, config | F-001 schema |
+| ADR revised | ADR section + rationale + date |
+| NFR target changed | NFR table |
+| New feature | New F-0xx section + acceptance criteria |
 
-New happy-path behaviour
+Bump doc version (patch) + changelog.
 
-New error / rejection path
+### 3.2 Update TDD-TEST-CASES.md
 
-Any new idempotency scenario
+- Affected TC IDs → update Given/When/Then if behaviour changes
+- Add TCs: happy path, rejection, idempotency, edge cases
+- IDs: `TC-{MODULE}-{NN}` (e.g. `TC-F002-11`)
+- Update phase mapping table if new module/phase
+- Bump version + changelog
 
-Any new edge case identified during implementation
+| Change Type | Minimum New TCs |
+|---|---|
+| New happy path | 1 |
+| New rejection / error path | 1 per error code |
+| Idempotency | 1 |
+| Concurrency / hotspot | 1 (shared-account paths) |
+| Snapshot / replay | 1 (State Machine touched) |
 
-Assign IDs following the pattern TC-{MODULE}-{NN} (e.g. TC-F002-11)
+### 3.3 Update Postman Collection
 
-Update the TDD Phase mapping table at the bottom of the file if a new module or phase is added
+Update when: new/changed endpoint, schema change, new errors, auth change.
 
-Bump the TDD-TEST-CASES.md version header and change log
+### 3.4 Update Smoke Test Script
 
-Minimum test case coverage required per change:
+Update `scripts/smoke-test.sh` when: schema change, new required fields, API structure change, new validation.
 
-Change Type	Minimum New TCs
-New happy path	1
-New rejection / error path	1 per new error code
-Idempotency scenario	1
-Concurrency / hotspot scenario	1 (for any shared-account path)
-Snapshot / replay scenario	1 (if State Machine touched)
-3.3 Update Postman Collection
-The Postman collection file (or a postman/ directory) must be updated whenever:
+Per endpoint in Postman:
 
-A new REST endpoint is added or an existing one is modified
-
-Request/response schema changes (new fields, renamed fields, removed fields)
-
-New error codes are returned
-
-Authentication headers or parameters change
-
-3.5 Verify Compilation and Tests
-After any code change, the agent must:
-
-**Step 1: Compile**
-Run `mvn clean compile` — confirm zero compilation errors.
-
-**Step 2: Run ALL unit tests**
-Run `mvn test` — confirm ALL tests pass, zero failures, zero errors.
-
-**Step 3: Fix failures before concluding**
-If compilation or any test fails, fix the root cause before concluding the session. Do not leave failing tests behind.
-
-Common failure patterns to check:
-- Record constructors with new required fields → update all `new RecordName(...)` in tests
-- Method signature changes → update all callers in tests
-- New enum values → update test assertions if applicable
-- New required fields in API request/response → update Postman collection and smoke-test.sh
-- New validation rules → ensure existing test expectations align with new behavior
-
-Never skip test compilation with `-Dmaven.test.skip=true` unless explicitly instructed.
-Never conclude a session with failing tests unless the user explicitly asks to skip them.
-
-3.4 Update Smoke Test Script
-The scripts/smoke-test.sh must be updated whenever:
-
-Request/response schema changes (new fields, renamed fields, removed fields)
-
-New required fields added to existing endpoints
-
-API structure changes (e.g., amount/currency moved from line to leg level)
-
-New validation rules affect smoke test scenarios
-
-For each affected endpoint, ensure the Postman collection contains:
-
-text
+```
 POST   /ledger/postings                    → happy path + idempotency + insufficient balance
 POST   /ledger/journals/{id}/reversal      → confirmed + already-reversed + cross-period
 POST   /ledger/adjustments/drafts          → create draft + approve + reject + maker=checker error
@@ -289,90 +251,94 @@ GET    /ledger/reconciliation/reports      → report by date
 PATCH  /ledger/reconciliation/cases/{id}   → resolve case
 POST   /ledger/reconciliation/external-files → upload SWIFT/CSV
 POST   /ledger/accounts                    → create + duplicate + freeze + close
-Postman collection conventions:
+```
 
-Each folder maps to one Feature (F-001, F-002, …)
+Conventions:
+- Folder = one Feature (F-001, F-002, …)
+- Env: `{{baseUrl}}`, `{{authToken}}`, `{{requestId}}`, `{{accountId}}`
+- Pre-request: fresh UUID v7 `requestId` on writes
+- Tests: HTTP status, body status, key fields
+- Negative Cases sub-folder per Feature
+- Tag TC-Fxxx-xx in request description
 
-Use environment variables: {{baseUrl}}, {{authToken}}, {{requestId}}, {{accountId}}
+### 3.5 Verify Compilation and Tests
 
-Pre-request scripts must generate a fresh UUID v7 requestId for write operations
+**Step 1:** `mvn clean compile` — zero errors.
 
-Test scripts must assert: HTTP status code, status field in response body, key response fields
+**Step 2:** `mvn test` — all pass.
 
-Add a Negative Cases sub-folder per Feature for all rejection/error scenarios
+**Step 3:** fix failures before done.
 
-Tag each request with the corresponding TC-Fxxx-xx ID in the request description
+Common failures:
+- Record ctor new fields → fix `new RecordName(...)` in tests
+- Signature change → fix test callers
+- New enum → update assertions
+- New API fields → Postman + `smoke-test.sh`
+- New validation → align test expectations
 
-4. Monitoring & Observability Requirements
-   Every new code path must include:
+Never `-Dmaven.test.skip=true` unless user says.
+Never end with failing tests unless user says skip.
 
-4.1 Structured Logging
-All log entries must include these fields:
+## 4. Monitoring & Observability Requirements
 
-json
+Every new path needs:
+
+### 4.1 Structured Logging
+
+```json
 {
-"traceId": "...",
-"spanId": "...",
-"requestId": "...",
-"accountId": "...",
-"journalId": "...",
-"operationType": "POSTING | REVERSAL | ADJUSTMENT | QUERY | RECONCILIATION",
-"durationMs": 0,
-"outcome": "COMPLETED | REJECTED | ERROR",
-"errorCode": "...",
-"operator": "..."
+  "traceId": "...",
+  "spanId": "...",
+  "requestId": "...",
+  "accountId": "...",
+  "journalId": "...",
+  "operationType": "POSTING | REVERSAL | ADJUSTMENT | QUERY | RECONCILIATION",
+  "durationMs": 0,
+  "outcome": "COMPLETED | REJECTED | ERROR",
+  "errorCode": "...",
+  "operator": "..."
 }
-Log at INFO for completed operations
+```
 
-Log at WARN for rejected operations (business rule violations)
+- `INFO` completed
+- `WARN` rejected (business rules)
+- `ERROR` system + stack trace
+- No balance amounts or owner PII at `DEBUG` in prod
 
-Log at ERROR for system errors with full stack trace
+### 4.2 Metrics (Micrometer / Prometheus)
 
-Never log balance amounts or account owner PII at DEBUG level in production profile
+| Metric | Type | Labels |
+|---|---|---|
+| `ledger.posting.duration` | Histogram | outcome, balanceType |
+| `ledger.posting.rejected.count` | Counter | errorCode |
+| `ledger.balance.query.duration` | Histogram | queryType (live/asof/eod) |
+| `ledger.state_machine.queue.depth` | Gauge | accountId (sampled) |
+| `ledger.reconciliation.cases.open` | Gauge | reconType (L1/L2/L3) |
+| `ledger.raft.leader.election.count` | Counter | — |
+| `ledger.kafka.publish.lag` | Gauge | topic |
 
-4.2 Metrics (Micrometer / Prometheus)
-Instrument every new endpoint/service method with:
+### 4.3 Alerting Rules
 
-Metric	Type	Labels
-ledger.posting.duration	Histogram	outcome, balanceType
-ledger.posting.rejected.count	Counter	errorCode
-ledger.balance.query.duration	Histogram	queryType (live/asof/eod)
-ledger.state_machine.queue.depth	Gauge	accountId (sampled)
-ledger.reconciliation.cases.open	Gauge	reconType (L1/L2/L3)
-ledger.raft.leader.election.count	Counter	—
-ledger.kafka.publish.lag	Gauge	topic
-4.3 Alerting Rules
-Critical alerts (PagerDuty) must be in place for:
+PagerDuty critical:
+- Posting P95 > 3 ms sustained 2 min
+- `TRADEAHEADBALANCE` > `overdrawnAlertThreshold` (-500,000)
+- Unexpected Raft leader election
+- Recon OPEN cases > 0 after T+1 09:00
+- Kafka lag > 1,000 on `balance-change-events`
+- `JOURNAL_UNBALANCED` in L1 recon
 
-Posting P95 > 3 ms sustained for 2 minutes
+## 5. Audit & Traceability
 
-Any TRADEAHEADBALANCE crossing overdrawnAlertThreshold (-500,000)
+Every write:
+- `createdBy`, `createdAt`, `lastModifiedBy`, `lastModifiedAt`, `changeReason` on mutable registry
+- `operatorId`, `approvalRef` on Reversal + Adjustment
+- `configVersion` snapshot on every JournalLine
+- Maker-Checker log: draft create/approve/reject, operator IDs, timestamps
+- Recon case: `OPEN → IN_PROGRESS → RESOLVED / WAIVED` + `resolvedAt`, `resolutionAction`, `resolutionJournalId`
 
-Raft leader election triggered (unexpected)
+## 6. PR / Commit Gate Checklist
 
-Reconciliation OPEN cases > 0 after T+1 09:00
-
-Kafka consumer lag > 1,000 messages for balance-change-events topic
-
-Any JOURNAL_UNBALANCED case detected in L1 reconciliation
-
-5. Audit & Traceability
-   Every write operation must produce an auditable trail:
-
-createdBy, createdAt, lastModifiedBy, lastModifiedAt, changeReason on all mutable registry records
-
-operatorId and approvalRef on all Reversal and Adjustment requests
-
-configVersion snapshot on every JournalLine (records the Balance Type config active at posting time)
-
-Maker-Checker audit log: draft creation, approval/rejection, operator IDs, timestamps
-
-Reconciliation case lifecycle: OPEN → IN_PROGRESS → RESOLVED / WAIVED with resolvedAt, resolutionAction, resolutionJournalId
-
-6. PR / Commit Gate Checklist
-   The agent must confirm all items below before concluding a session:
-
-text
+```
 [ ] LEDGER-PLATFORM-FULL-REQUIREMENTS.md reviewed and updated if needed
 [ ] TDD-TEST-CASES.md updated with new/modified test cases
 [ ] Postman collection updated for all affected endpoints
@@ -385,28 +351,32 @@ text
 [ ] Prometheus metrics instrumented for new endpoints
 [ ] No PII or balance data logged at DEBUG in production profile
 [ ] Performance targets verified (P95 Posting ≤3ms, Balance Query ≤2ms)
-[ ] LEDGER-PLATFORM-FULL-REQUIREMENTS.md version bumped if doc was updated
-[ ] TDD-TEST-CASES.md version bumped if doc was updated
+[ ] LEDGER-PLATFORM-FULL-REQUIREMENTS.md version bumped if doc updated
+[ ] TDD-TEST-CASES.md version bumped if doc updated
 [ ] Postman collection updated for all affected endpoints
 [ ] smoke-test.sh updated if API structure changed
 [ ] Code compiles successfully (`mvn clean compile` passes)
 [ ] All tests pass (`mvn test` passes) — if test fails, fix before concluding
 [ ] All table/column changes in init.sql include COMMENT descriptions per 2.9
 [ ] No test files left with compilation errors from constructor/field changes
-7. Quick Feature-to-File Reference
-   Feature	Requirement Section	Test Case Prefix	Postman Folder
-   Balance Type Registry	F-001	TC-F001-	F-001 Balance Registry
-   Posting API v2	F-002, ADR-001	TC-F002-	F-002 Posting
-   Manual Adjustment	F-003	TC-F003-	F-003 Adjustment
-   Reversal	F-004	TC-F004-	F-004 Reversal
-   Balance Query v2	F-005	TC-F005-	F-005 Balance Query
-   Journal Query	F-006	TC-F006-	F-006 Journal Query
-   Reconciliation L1/L2/L3	F-007	TC-F007-	F-007 Reconciliation
-   State Machine	F-008, ADR-001	TC-F008-	— (internal)
-   Accounting Period / EOD	F-009	TC-F009-	F-009 EOD
-   Account Management	F-010	TC-F010-	F-010 Accounts
-   BalanceChangeEvent / Outbox	F-011	TC-F011-, TC-KAFKA-	— (internal)
-   RocksDB / WAL	ADR-001	TC-ROCKS-	— (internal)
-   Account Queue	ADR-001	TC-QUEUE-	— (internal)
-   Raft Cluster	ADR-001	TC-RAFT-	— (internal)
-   NFR	NFR section	TC-NFR-	— (load test)
+```
+
+## 7. Quick Feature-to-File Reference
+
+| Feature | Requirement Section | Test Case Prefix | Postman Folder |
+|---|---|---|---|
+| Balance Type Registry | F-001 | TC-F001- | F-001 Balance Registry |
+| Posting API v2 | F-002, ADR-001 | TC-F002- | F-002 Posting |
+| Manual Adjustment | F-003 | TC-F003- | F-003 Adjustment |
+| Reversal | F-004 | TC-F004- | F-004 Reversal |
+| Balance Query v2 | F-005 | TC-F005- | F-005 Balance Query |
+| Journal Query | F-006 | TC-F006- | F-006 Journal Query |
+| Reconciliation L1/L2/L3 | F-007 | TC-F007- | F-007 Reconciliation |
+| State Machine | F-008, ADR-001 | TC-F008- | — (internal) |
+| Accounting Period / EOD | F-009 | TC-F009- | F-009 EOD |
+| Account Management | F-010 | TC-F010- | F-010 Accounts |
+| BalanceChangeEvent / Outbox | F-011 | TC-F011-, TC-KAFKA- | — (internal) |
+| RocksDB / WAL | ADR-001 | TC-ROCKS- | — (internal) |
+| Account Queue | ADR-001 | TC-QUEUE- | — (internal) |
+| Raft Cluster | ADR-001 | TC-RAFT- | — (internal) |
+| NFR | NFR section | TC-NFR- | — (load test) |
