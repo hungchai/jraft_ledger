@@ -17,6 +17,7 @@ import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 import com.tomma8.ledger.store.IdempotencyStore;
 import com.tomma8.ledger.util.FastIdGenerator;
+import com.tomma8.ledger.util.LedgerMappers;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -135,9 +136,7 @@ public class LedgerStateMachine {
         }
     }
 
-    private static final ObjectMapper objectMapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule())
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final ObjectMapper objectMapper = LedgerMappers.get();
 
     public void setEventListener(LedgerEventListener listener) {
         this.eventListener = listener;
@@ -446,16 +445,8 @@ public class LedgerStateMachine {
                 BalanceTypeConfig config = balanceTypeConfigStore.get(line.balanceType())
                         .orElseThrow(() -> new BalanceTypeNotFoundException(line.balanceType()));
 
-                // DEBUG-DIVERGE: capture per-node config view for cross-node diff
-                String nodeId = System.getenv("HOSTNAME");
-                if (nodeId == null) nodeId = System.getenv("NODE_ID");
-                if (nodeId == null) nodeId = "unknown";
-                log.info("[DEBUG_APPLY] node={} reqId={} raftIndex={} cmd={} acc={} bt={} ccy={} cfgVer={} allowNeg={} curAmt={}",
-                        nodeId, requestId, raftIndex, commandLabel,
-                        line.accountId(), line.balanceType(), lwl.currency(),
-                        config.configVersion(), config.allowNegative(),
-                        balanceStore.get(new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency()))
-                                .orElse(BalanceEntry.zero()).amount().toPlainString());
+                // Perf: per-line INFO log removed (was emitting 4 INFO lines per posting under hotspot).
+                // Cross-node drift diagnostics should use SLOW_APPLY_NS / DEBUG level instead.
 
                 AccountBalanceKey key = new AccountBalanceKey(line.accountId(), line.balanceType(), line.position(), lwl.currency());
                 BalanceEntry current = balanceStore.get(key).orElse(BalanceEntry.zero());
