@@ -24,6 +24,10 @@ public class SnowflakeIdGenerator {
     private static final long WORKER_ID_BITS = 10L;
     private static final long SEQUENCE_BITS = 12L;
 
+    /** Tolerated backwards clock drift (ms). Small NTP adjustments wait it out;
+     *  larger drifts throw to prevent silent ID collisions. */
+    private static final long MAX_BACKWARDS_DRIFT_MS = 5L;
+
     private static final long MAX_WORKER_ID = ~(-1L << WORKER_ID_BITS);
     private static final long MAX_SEQUENCE = ~(-1L << SEQUENCE_BITS);
 
@@ -45,8 +49,14 @@ public class SnowflakeIdGenerator {
         long timestamp = currentTimeMillis();
 
         if (timestamp < lastTimestamp) {
-            throw new IllegalStateException(
-                    "Clock moved backwards. Refusing to generate ID for " + (lastTimestamp - timestamp) + " ms");
+            long drift = lastTimestamp - timestamp;
+            if (drift <= MAX_BACKWARDS_DRIFT_MS) {
+                // Small NTP correction — wait it out to preserve monotonicity
+                timestamp = waitNextMillis(lastTimestamp);
+            } else {
+                throw new IllegalStateException(
+                        "Clock moved backwards. Refusing to generate ID for " + drift + " ms");
+            }
         }
 
         if (timestamp == lastTimestamp) {
@@ -73,7 +83,7 @@ public class SnowflakeIdGenerator {
         return ts;
     }
 
-    private long currentTimeMillis() {
+    protected long currentTimeMillis() {
         return System.currentTimeMillis();
     }
 

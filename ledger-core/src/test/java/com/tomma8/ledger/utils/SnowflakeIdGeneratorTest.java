@@ -36,17 +36,19 @@ class SnowflakeIdGeneratorTest {
     }
 
     @Test
-    void nextId_sequenceRollofeWithinSameMillisecond() {
+    void nextId_sequenceRolloverWithinSameMillisecond() {
+        // 12-bit sequence: at most 4096 IDs per millisecond; more would spin in waitNextMillis.
         SnowflakeIdGenerator gen = new FixedTimestampGenerator(1, System.currentTimeMillis());
         long previous = 0;
-        for (int i = 0; i < 5000; i++) {
+        for (int i = 0; i < 4096; i++) {
             long id = gen.nextId();
             assertThat(id).isGreaterThan(previous);
             previous = id;
         }
     }
 
-    /** Generator that simulates a backwards clock jump on the N-th call. */
+    /** Generator that simulates a backwards clock jump on the 2nd call,
+     *  then returns real time on subsequent calls (so waitNextMillis can recover). */
     static class BackwardsClockGenerator extends SnowflakeIdGenerator {
         private final int jumpMs;
         private int callCount = 0;
@@ -64,7 +66,10 @@ class SnowflakeIdGeneratorTest {
                 baseTime = System.currentTimeMillis();
                 return baseTime;
             }
-            return baseTime - jumpMs;
+            if (callCount == 2) {
+                return baseTime - jumpMs; // simulate backwards jump
+            }
+            return System.currentTimeMillis(); // recover (real time, moves forward)
         }
     }
 
