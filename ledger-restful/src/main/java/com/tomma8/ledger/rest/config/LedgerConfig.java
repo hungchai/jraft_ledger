@@ -43,20 +43,25 @@ public class LedgerConfig {
 
     @Bean
     public MeterRegistryCustomizer<MeterRegistry> ledgerMetricsCustomizer() {
-        return registry -> registry.config().meterFilter(new MeterFilter() {
-            @Override
-            public DistributionStatisticConfig configure(io.micrometer.core.instrument.Meter.Id id, DistributionStatisticConfig config) {
-                if (id.getName().startsWith("ledger.")) {
-                    return DistributionStatisticConfig.builder()
-                            .percentilesHistogram(true)
-                            .minimumExpectedValue(1.0)
-                            .maximumExpectedValue(10000.0)
-                            .build()
-                            .merge(config);
+        return registry -> {
+            registry.config().meterFilter(new MeterFilter() {
+                @Override
+                public DistributionStatisticConfig configure(io.micrometer.core.instrument.Meter.Id id, DistributionStatisticConfig config) {
+                    if (id.getName().startsWith("ledger.")) {
+                        return DistributionStatisticConfig.builder()
+                                .percentilesHistogram(true)
+                                .minimumExpectedValue(1.0)
+                                .maximumExpectedValue(10000.0)
+                                .build()
+                                .merge(config);
+                    }
+                    return config;
                 }
-                return config;
-            }
-        });
+            });
+            // Initialise ledger-core hot-path timers as soon as the registry is
+            // available so they appear in /actuator/prometheus from boot.
+            com.tomma8.ledger.metrics.LedgerMetrics.init(registry);
+        };
     }
 
     @Bean
@@ -84,7 +89,9 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public RocksDBManager rocksDBManager(ConfigService cs) {
+    public RocksDBManager rocksDBManager(ConfigService cs, MeterRegistry meterRegistry) {
+        // Init ledger-core hot-path timers (idempotent).
+        com.tomma8.ledger.metrics.LedgerMetrics.init(meterRegistry);
         String dbPath = cs.get("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
         RocksDBManager mgr = new RocksDBManager(dbPath);
         try {

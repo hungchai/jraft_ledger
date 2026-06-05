@@ -171,6 +171,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
                     long tDeserEnd = System.nanoTime();
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordApplyDeserialize(tDeserEnd - tStart);
 
                     if (log.isDebugEnabled()) {
                         log.debug("[APPLY] index={} cmd={} reqId={} len={} deser={}us",
@@ -180,6 +181,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
                     CommandResult result = executeCommand(cmd, index);
                     long tExecEnd = System.nanoTime();
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
 
                     if (pendingCommands != null) {
                         var future = pendingCommands.remove(cmd.requestId());

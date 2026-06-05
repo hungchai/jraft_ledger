@@ -96,7 +96,12 @@ public class RocksDBManager implements AutoCloseable {
      * real allocation/GC win on the hot path.
      */
     public void write(WriteBatch batch) throws Exception {
-        rocksDB.write(writeOptionsInstance, batch);
+        long t0 = System.nanoTime();
+        try {
+            rocksDB.write(writeOptionsInstance, batch);
+        } finally {
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRocksWrite(System.nanoTime() - t0);
+        }
     }
 
     public RocksDB getRocksDB() {

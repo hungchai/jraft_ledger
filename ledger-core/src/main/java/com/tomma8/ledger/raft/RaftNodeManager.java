@@ -108,9 +108,15 @@ public class RaftNodeManager implements AutoCloseable {
 
         this.node.apply(task);
         long tApplied = System.nanoTime(); // S1 end: task enqueued to Raft Disruptor
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftEnqueue(tApplied - tSubmit);
         try {
+            long tWaitStart = System.nanoTime();
             CommandResult result = future.get(10, TimeUnit.SECONDS);
+            long tWaitEnd = System.nanoTime();
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(tWaitEnd - tWaitStart);
             long tReturn = System.nanoTime();
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(tReturn - tWaitEnd);
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(tReturn - tSubmit);
             long totalMs = (tReturn - tSubmit) / 1_000_000;
             long raftInternalMs = (tApplied - tSubmit) / 1_000_000;
             // S4 = total - S3 (S3 logged in LedgerRaftStateMachine.onApply)
@@ -121,6 +127,7 @@ public class RaftNodeManager implements AutoCloseable {
             return result;
         } catch (Exception e) {
             long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(elapsedMs * 1_000_000L);
             log.error("Raft command timeout: requestId={} elapsedMs={}", command.requestId(), elapsedMs);
             pendingCommands.remove(command.requestId());
             throw new RuntimeException("Raft command timeout: " + command.requestId() + " after " + elapsedMs + "ms", e);

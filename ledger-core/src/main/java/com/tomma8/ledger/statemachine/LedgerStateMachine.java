@@ -81,6 +81,7 @@ public class LedgerStateMachine {
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
                               IdempotencyEntry idempotencyEntry, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
+        long t0 = System.nanoTime();
         try {
             WriteBatch batch = new WriteBatch();
             byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
@@ -111,6 +112,8 @@ public class LedgerStateMachine {
             rocksDB.write(batch);
         } catch (Exception e) {
             log.error("RocksDB write failed for journalId={}", journal.journalId(), e);
+        } finally {
+            com.tomma8.ledger.metrics.LedgerMetrics.recordApplyPersist(System.nanoTime() - t0);
         }
     }
 
