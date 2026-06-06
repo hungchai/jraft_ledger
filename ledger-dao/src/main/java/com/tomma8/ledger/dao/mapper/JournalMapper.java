@@ -106,4 +106,35 @@ public interface JournalMapper {
 
     @Select("SELECT id FROM journal_line WHERE journal_line_id = #{journalLineId}")
     Long findIdByJournalLineId(@Param("journalLineId") String journalLineId);
+
+    @Insert("<script>" +
+            "INSERT IGNORE INTO journal_line (" +
+            "  id, journal_id, account_id, account_balance_id, journal_line_id, journal_journal_id, " +
+            "  account_account_id, leg_id, balance_type, position, currency, entry_type, " +
+            "  amount, balance_before, balance_after, config_version, created_at" +
+            ") VALUES " +
+            "<foreach collection='rows' item='r' separator=','>" +
+            "(#{r.id}, #{r.journalPk}, #{r.accountPk}, 0, #{r.journalLineId}, #{r.journalJournalId}, " +
+            " #{r.accountAccountId}, '', #{r.balanceType}, #{r.position}, #{r.currency}, #{r.entryType}, " +
+            " #{r.amount}, #{r.balanceBefore}, #{r.balanceAfter}, #{r.configVersion}, #{r.createdAt})" +
+            "</foreach>" +
+            "</script>")
+    int batchInsertJournalLines(@Param("rows") List<JournalLineBatchRow> rows);
+
+    record JournalLineBatchRow(
+            long id,
+            long journalPk,
+            long accountPk,
+            String journalLineId,
+            String journalJournalId,
+            String accountAccountId,
+            String balanceType,
+            String position,
+            String currency,
+            String entryType,
+            BigDecimal amount,
+            BigDecimal balanceBefore,
+            BigDecimal balanceAfter,
+            int configVersion,
+            LocalDateTime createdAt) {}
 }

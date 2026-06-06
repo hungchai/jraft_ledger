@@ -3,7 +3,6 @@ package com.tomma8.ledger.projection;
 import com.tomma8.ledger.dao.mapper.AccountBalanceMapper;
 import com.tomma8.ledger.dao.mapper.AccountMapper;
 import com.tomma8.ledger.dao.mapper.JournalMapper;
-import com.tomma8.ledger.dao.mapper.ProjectionEventLogMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -51,15 +50,17 @@ public class ProjectionWriter {
     private final ConflationQueue balanceQueue = new ConflationQueue();
     private final ExecutorService balanceWorkerPool;
     private final int balanceWorkerCount;
-
-    @Value("${ledger.projection.balance.workers:2}")
-    private int configuredBalanceWorkerThreads;
+    private final JournalFlushBuffer journalFlushBuffer;
 
     private final AtomicLong lastEventTimestamp = new AtomicLong(System.currentTimeMillis());
     private final LongAdder eventsProcessed = new LongAdder();
     private final LongAdder balanceWrites = new LongAdder();
 
-    public ProjectionWriter(SqlSessionFactory sqlSessionFactory, MeterRegistry meterRegistry) {
+    public ProjectionWriter(SqlSessionFactory sqlSessionFactory,
+                            MeterRegistry meterRegistry,
+                            @Value("${ledger.projection.balance.workers:2}") int configuredBalanceWorkerThreads,
+                            @Value("${ledger.projection.journal.flush-interval-ms:50}") int journalFlushIntervalMs,
+                            @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer) {
         this.sqlSessionFactory = sqlSessionFactory;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
 
@@ -73,6 +74,10 @@ public class ProjectionWriter {
         for (int i = 0; i < threads; i++) {
             balanceWorkerPool.submit(this::balanceWorkerLoop);
         }
+
+        this.journalFlushBuffer = new JournalFlushBuffer(
+                sqlSessionFactory, meterRegistry, journalFlushIntervalMs, journalMaxBuffer,
+                count -> eventsProcessed.add(count));
 
         Gauge.builder("ledger.projection.seconds.since.last.event", this,
                 pw -> (System.currentTimeMillis() - pw.lastEventTimestamp.get()) / 1000.0)
@@ -122,10 +127,9 @@ public class ProjectionWriter {
     // ============================================================
 
     /**
-     * Persist a whole poll batch. PKs are resolved per-batch (cache-first, only
-     * misses hit the DB), then all journal_line + event_log rows are written on
-     * a single connection committed once. Balance upserts are handed to the
-     * conflation queue and applied asynchronously off the consumer thread.
+     * Persist a whole poll batch. PKs are resolved per-batch, then journal_line +
+     * event_log rows are enqueued for the {@link JournalFlushBuffer} (50ms micro-batch
+     * multi-row INSERT per shard). Balance upserts go to the conflation queue.
      */
     public void writeBalanceBatch(List<BalanceEvent> parsed) {
         if (parsed == null || parsed.isEmpty()) return;
@@ -134,38 +138,25 @@ public class ProjectionWriter {
             resolveAccountPks(parsed);
             resolveJournalPks(parsed);
 
-            // One SIMPLE session for the whole poll. We do NOT use
-            // ExecutorType.BATCH: ShardingSphere's SINGLE-table route
-            // (projection_event_log) throws TableNotFound under the batch
-            // prepared-statement executor. This still collapses the old
-            // per-message session/commit churn into one session + one commit.
             LocalDateTime now = LocalDateTime.now();
-            try (SqlSession session = sqlSessionFactory.openSession()) {
-                JournalMapper jm = session.getMapper(JournalMapper.class);
-                ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
-                for (BalanceEvent pe : parsed) {
-                    Long accountPk = accountIdCache.get(pe.accountId());
-                    Long journalPk = journalPkCache.get(pe.journalId());
-                    if (accountPk == null || journalPk == null) continue;
-                    jm.insertJournalLine(idGenerator.nextId(), journalPk, accountPk, 0L,
-                            pe.journalLineId(), pe.journalId(), pe.accountId(), "",
-                            pe.balanceType(), pe.position(), pe.currency(), pe.entryType(),
-                            pe.amount(), pe.preBalance(), pe.postBalance(), pe.configVersion(), now);
-                    em.insertEvent(pe.accountId(), pe.balanceType(), pe.currency(), pe.accountSeq(),
-                            pe.journalLineId(), pe.journalId(), pe.eventId(), "APPLIED");
-                }
-                session.commit();
-            }
-
+            int enqueued = 0;
             for (BalanceEvent pe : parsed) {
                 Long accountPk = accountIdCache.get(pe.accountId());
-                if (accountPk == null) continue;
+                Long journalPk = journalPkCache.get(pe.journalId());
+                if (accountPk == null || journalPk == null) continue;
+
+                journalFlushBuffer.offer(new JournalFlushBuffer.PendingRow(
+                        ShardRouting.shardIndex(pe.accountId()),
+                        idGenerator.nextId(), journalPk, accountPk, pe, now));
+
                 balanceQueue.offer(new BalanceUpdate(accountPk, pe.accountId(), pe.balanceType(),
                         pe.currency(), pe.postBalance(), pe.position(), pe.accountSeq(), pe.journalId()));
+                enqueued++;
             }
 
-            lastEventTimestamp.set(System.currentTimeMillis());
-            eventsProcessed.add(parsed.size());
+            if (enqueued > 0) {
+                lastEventTimestamp.set(System.currentTimeMillis());
+            }
 
         } catch (Exception e) {
             log.error("Failed to project balance batch of {} events", parsed.size(), e);
@@ -276,6 +267,7 @@ public class ProjectionWriter {
     /** Graceful shutdown of the balance worker pool. */
     @jakarta.annotation.PreDestroy
     public void shutdown() {
+        journalFlushBuffer.close();
         balanceWorkerPool.shutdown();
         try {
             if (!balanceWorkerPool.awaitTermination(10, TimeUnit.SECONDS)) {

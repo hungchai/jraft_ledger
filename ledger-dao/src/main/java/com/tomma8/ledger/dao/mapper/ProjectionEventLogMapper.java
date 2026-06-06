@@ -2,6 +2,8 @@ package com.tomma8.ledger.dao.mapper;
 
 import org.apache.ibatis.annotations.*;
 
+import java.util.List;
+
 @Mapper
 public interface ProjectionEventLogMapper {
 
@@ -38,4 +40,24 @@ public interface ProjectionEventLogMapper {
     Long maxAccountSeq(@Param("accountAccountId") String accountAccountId,
                        @Param("balanceType") String balanceType,
                        @Param("currency") String currency);
+
+    @Insert("<script>" +
+            "INSERT IGNORE INTO projection_event_log (" +
+            "  account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status" +
+            ") VALUES " +
+            "<foreach collection='rows' item='r' separator=','>" +
+            "(#{r.accountAccountId}, #{r.balanceType}, #{r.currency}, #{r.accountSeq}, " +
+            " #{r.journalLineId}, #{r.journalJournalId}, #{r.eventId}, 'APPLIED')" +
+            "</foreach>" +
+            "</script>")
+    int batchInsertEvents(@Param("rows") List<EventLogBatchRow> rows);
+
+    record EventLogBatchRow(
+            String accountAccountId,
+            String balanceType,
+            String currency,
+            long accountSeq,
+            String journalLineId,
+            String journalJournalId,
+            String eventId) {}
 }
