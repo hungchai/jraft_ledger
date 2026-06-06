@@ -10,12 +10,12 @@ spring:
       group-id: ledger-projection
       auto-offset-reset: latest
       enable-auto-commit: true
-      max-poll-records: 500
+      max-poll-records: 2000
       fetch-min-size: 1048576
-      fetch-max-wait: 500ms
+      fetch-max-wait: 200ms
     listener:
       type: single
-      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:4}
+      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
 
 mybatis:
   configuration:
