@@ -474,6 +474,27 @@ export SNOWFLAKE_WORKER_ID=1
 - Schema changes on `journal_line` must be applied to **all** physical tables
 - Re-sharding (changing from 4 to 8 shards) requires a data migration; plan for it before production
 
+#### Write Path Compatibility: multi-row INSERT [added in v0.16]
+
+ShardingSphere 5.5.1 imposes the following constraints on multi-row
+INSERTs against `journal_line` / `projection_event_log`. The application
+layer must observe them:
+
+1. **MyBatis `<foreach>` MUST be wrapped in `<script>`** to be parsed as
+   dynamic SQL. Without it, ShardingSphere sees the raw `<foreach>` token
+   and throws `DialectSQLParsingException`.
+2. **Mappers MUST use the logical table name** (`journal_line`, not
+   `journal_line_${shardIndex}`); let ShardingSphere route each row by
+   `account_account_id` to the correct physical table. Injecting the
+   shard suffix inside the mapper is treated as an unknown logical table
+   and raises `TableNotFoundException`.
+3. **MyBatis `ExecutorType.BATCH` is not compatible with
+   ShardingSphere's single-table route on sharded tables.**
+   `ledger-projection` instead uses an in-process `JournalFlushBuffer`:
+   one `ScheduledExecutor` per shard; every 50ms (or when the per-shard
+   buffer hits 4 000 rows) it issues a single multi-row
+   `INSERT IGNORE` per shard. See [`F012-projection-service.md` §4.5](F012-projection-service.md).
+
 ---
 
 ### 6.4 Data Guarantee

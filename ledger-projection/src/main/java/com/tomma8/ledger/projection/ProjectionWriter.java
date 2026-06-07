@@ -17,22 +17,18 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Owns all MySQL persistence for the projection service: surrogate-PK caches,
- * the batched journal/journal_line/event_log writes, and the asynchronous
- * conflated balance upserts. {@link ProjectionConsumer} only parses Kafka
- * messages and delegates here.
+ * the batched journal/journal_line/event_log writes, and synchronous per-poll
+ * balance upserts. {@link ProjectionConsumer} only parses Kafka messages and
+ * delegates here.
  */
 @Service
 public class ProjectionWriter {
@@ -47,9 +43,6 @@ public class ProjectionWriter {
     // journalId → surrogate PK (INSERT IGNORE makes this optional but saves a SELECT)
     private final ConcurrentHashMap<String, Long> journalPkCache = new ConcurrentHashMap<>();
 
-    private final ConflationQueue balanceQueue = new ConflationQueue();
-    private final ExecutorService balanceWorkerPool;
-    private final int balanceWorkerCount;
     private final JournalFlushBuffer journalFlushBuffer;
 
     private final AtomicLong lastEventTimestamp = new AtomicLong(System.currentTimeMillis());
@@ -58,22 +51,10 @@ public class ProjectionWriter {
 
     public ProjectionWriter(SqlSessionFactory sqlSessionFactory,
                             MeterRegistry meterRegistry,
-                            @Value("${ledger.projection.balance.workers:2}") int configuredBalanceWorkerThreads,
                             @Value("${ledger.projection.journal.flush-interval-ms:50}") int journalFlushIntervalMs,
                             @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer) {
         this.sqlSessionFactory = sqlSessionFactory;
         this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
-
-        int threads = resolveBalanceWorkerCount(configuredBalanceWorkerThreads);
-        this.balanceWorkerCount = threads;
-        this.balanceWorkerPool = Executors.newFixedThreadPool(threads, r -> {
-            Thread t = new Thread(r, "projection-balance-worker");
-            t.setDaemon(true);
-            return t;
-        });
-        for (int i = 0; i < threads; i++) {
-            balanceWorkerPool.submit(this::balanceWorkerLoop);
-        }
 
         this.journalFlushBuffer = new JournalFlushBuffer(
                 sqlSessionFactory, meterRegistry, journalFlushIntervalMs, journalMaxBuffer,
@@ -87,22 +68,8 @@ public class ProjectionWriter {
         Gauge.builder("ledger.projection.events.processed", eventsProcessed, LongAdder::doubleValue)
                 .description("Total projection events processed.").register(meterRegistry);
 
-        Gauge.builder("ledger.projection.balance.queue.depth", balanceQueue, ConflationQueue::size)
-                .description("Pending conflated balance updates.").register(meterRegistry);
-
         Gauge.builder("ledger.projection.balance.writes", balanceWrites, LongAdder::doubleValue)
-                .description("Total balance SQL writes after conflation.").register(meterRegistry);
-
-        Gauge.builder("ledger.projection.balance.workers", this, pw -> pw.balanceWorkerCount)
-                .description("Size of the balance worker pool draining the conflation queue.")
-                .baseUnit("threads").register(meterRegistry);
-    }
-
-    private static int resolveBalanceWorkerCount(int configured) {
-        int n = configured;
-        if (n < 1) n = 1;
-        if (n > 16) n = 16;
-        return n;
+                .description("Total balance SQL writes after in-batch conflation.").register(meterRegistry);
     }
 
     // ============================================================
@@ -127,40 +94,92 @@ public class ProjectionWriter {
     // ============================================================
 
     /**
-     * Persist a whole poll batch. PKs are resolved per-batch, then journal_line +
-     * event_log rows are enqueued for the {@link JournalFlushBuffer} (50ms micro-batch
-     * multi-row INSERT per shard). Balance upserts go to the conflation queue.
+     * Persist a whole poll batch. PKs are resolved per-batch, then:
+     * <ol>
+     *   <li>balance rows are conflated in-memory (highest {@code accountSeq}
+     *       per account/balanceType/currency) and upserted synchronously in one
+     *       JDBC batch — durable before this method returns;</li>
+     *   <li>journal_line + projection_event_log rows are enqueued for the
+     *       {@link JournalFlushBuffer}; the caller must invoke
+     *       {@link #flushJournalPending()} before acking Kafka.</li>
+     * </ol>
+     *
+     * <p><b>Throws</b> on any error. The caller must NOT acknowledge the offset
+     * — the broker will redeliver the same poll batch (idempotent via
+     * {@code INSERT IGNORE} / accountSeq-guarded upsert).
      */
     public void writeBalanceBatch(List<BalanceEvent> parsed) {
         if (parsed == null || parsed.isEmpty()) return;
 
-        try {
-            resolveAccountPks(parsed);
-            resolveJournalPks(parsed);
+        resolveAccountPks(parsed);
+        resolveJournalPks(parsed);
 
-            LocalDateTime now = LocalDateTime.now();
-            int enqueued = 0;
-            for (BalanceEvent pe : parsed) {
-                Long accountPk = accountIdCache.get(pe.accountId());
-                Long journalPk = journalPkCache.get(pe.journalId());
-                if (accountPk == null || journalPk == null) continue;
+        LocalDateTime now = LocalDateTime.now();
+        var conflated = conflateBalanceUpdates(parsed);
+        upsertBalancesSync(conflated);
 
-                journalFlushBuffer.offer(new JournalFlushBuffer.PendingRow(
-                        ShardRouting.shardIndex(pe.accountId()),
-                        idGenerator.nextId(), journalPk, accountPk, pe, now));
-
-                balanceQueue.offer(new BalanceUpdate(accountPk, pe.accountId(), pe.balanceType(),
-                        pe.currency(), pe.postBalance(), pe.position(), pe.accountSeq(), pe.journalId()));
-                enqueued++;
+        for (BalanceEvent pe : parsed) {
+            Long accountPk = accountIdCache.get(pe.accountId());
+            Long journalPk = journalPkCache.get(pe.journalId());
+            if (accountPk == null || journalPk == null) {
+                throw new IllegalStateException("Missing surrogate PK for account=" + pe.accountId()
+                        + " or journal=" + pe.journalId()
+                        + " after resolve phase — cannot enqueue for journal flush");
             }
 
-            if (enqueued > 0) {
-                lastEventTimestamp.set(System.currentTimeMillis());
-            }
-
-        } catch (Exception e) {
-            log.error("Failed to project balance batch of {} events", parsed.size(), e);
+            journalFlushBuffer.offer(new JournalFlushBuffer.PendingRow(
+                    ShardRouting.shardIndex(pe.accountId()),
+                    idGenerator.nextId(), journalPk, accountPk, pe, now));
         }
+
+        lastEventTimestamp.set(System.currentTimeMillis());
+    }
+
+    /**
+     * Block until all currently-queued journal_line + projection_event_log rows
+     * have been flushed to MySQL across every shard. The Kafka listener MUST
+     * call this before {@code ack.acknowledge()}. Re-throws on flush failure so
+     * the listener can skip the ack and let Kafka redeliver.
+     */
+    public void flushJournalPending() throws InterruptedException {
+        journalFlushBuffer.flushAll();
+    }
+
+    /**
+     * Reduce a poll batch to one row per (accountId, balanceType, currency),
+     * keeping the entry with the highest {@code accountSeq}.
+     */
+    private LinkedHashMap<BalanceUpdate, BalanceUpdate> conflateBalanceUpdates(List<BalanceEvent> parsed) {
+        var latest = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
+        for (BalanceEvent pe : parsed) {
+            Long accountPk = accountIdCache.get(pe.accountId());
+            if (accountPk == null) {
+                throw new IllegalStateException("Missing account PK for " + pe.accountId()
+                        + " after resolve phase");
+            }
+            var bu = new BalanceUpdate(accountPk, pe.accountId(), pe.balanceType(), pe.currency(),
+                    pe.postBalance(), pe.position(), pe.accountSeq(), pe.journalId());
+            BalanceUpdate prev = latest.get(bu);
+            if (prev == null || bu.accountSeq() >= prev.accountSeq()) {
+                latest.put(bu, bu);
+            }
+        }
+        return latest;
+    }
+
+    /** Synchronous JDBC batch upsert; throws on SQL failure (no silent loss). */
+    private void upsertBalancesSync(LinkedHashMap<BalanceUpdate, BalanceUpdate> conflated) {
+        if (conflated.isEmpty()) return;
+        try (SqlSession session = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
+            AccountBalanceMapper bm = session.getMapper(AccountBalanceMapper.class);
+            for (BalanceUpdate bu : conflated.values()) {
+                bm.upsertBalance(bu.accountPk(), bu.accountId(), bu.balanceType(), bu.currency(),
+                        bu.amount(), bu.position(), bu.accountSeq(), bu.lastJournalId());
+            }
+            session.flushStatements();
+            session.commit();
+        }
+        balanceWrites.add(conflated.size());
     }
 
     /** Resolve account surrogate PKs for the batch; only cache misses hit the DB, in one session. */
@@ -219,64 +238,9 @@ public class ProjectionWriter {
         }
     }
 
-    // ============================================================
-    // Balance worker — drains conflation queue, batch upserts MySQL
-    // ============================================================
-
-    private void balanceWorkerLoop() {
-        log.info("Balance worker started: {}", Thread.currentThread().getName());
-        // Each worker owns its scratch list — no sharing, no synchronization.
-        // ConflationQueue.drainTo uses ConcurrentHashMap.remove(key, value), which
-        // is safe for multiple concurrent drainers: the entry is removed only if
-        // it still maps to the exact value reference we observed, so two workers
-        // can never grab the same (accountId, balanceType, currency) update.
-        var batch = new ArrayList<BalanceUpdate>(200);
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                if (balanceQueue.isEmpty()) {
-                    Thread.sleep(5);
-                    continue;
-                }
-                batch.clear();
-                int drained = balanceQueue.drainTo(batch, 200);
-                if (drained == 0) continue;
-
-                try (SqlSession session = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
-                    AccountBalanceMapper bm = session.getMapper(AccountBalanceMapper.class);
-                    for (var bu : batch) {
-                        bm.upsertBalance(bu.accountPk(), bu.accountId(), bu.balanceType(), bu.currency(),
-                                bu.amount(), bu.position(), bu.accountSeq(), bu.lastJournalId());
-                    }
-                    session.flushStatements();
-                    session.commit();
-                }
-                balanceWrites.add(drained);
-                log.info("[BALANCE] drained={} queueSize={} offered={} conflated={}",
-                        drained, balanceQueue.size(),
-                        balanceQueue.offeredCount(), balanceQueue.conflatedCount());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                log.error("Balance worker error", e);
-            }
-        }
-        log.info("Balance worker stopped: {}", Thread.currentThread().getName());
-    }
-
-    /** Graceful shutdown of the balance worker pool. */
     @jakarta.annotation.PreDestroy
     public void shutdown() {
         journalFlushBuffer.close();
-        balanceWorkerPool.shutdown();
-        try {
-            if (!balanceWorkerPool.awaitTermination(10, TimeUnit.SECONDS)) {
-                balanceWorkerPool.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            balanceWorkerPool.shutdownNow();
-        }
     }
 
     /** Parsed balance-change event passed from {@link ProjectionConsumer}. */

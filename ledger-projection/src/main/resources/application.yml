@@ -9,13 +9,18 @@ spring:
     consumer:
       group-id: ledger-projection
       auto-offset-reset: latest
-      enable-auto-commit: true
+      enable-auto-commit: false
       max-poll-records: 2000
       fetch-min-size: 1048576
       fetch-max-wait: 200ms
     listener:
       type: single
       concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
+      # MANUAL_IMMEDIATE: offset is committed only when the listener explicitly
+      # calls ack.acknowledge() and that commit is flushed synchronously. This
+      # is the prerequisite for at-least-once: the consumer must not return
+      # from a poll until the projection write has hit MySQL.
+      ack-mode: manual_immediate
 
 mybatis:
   configuration:

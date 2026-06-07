@@ -10,6 +10,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -88,12 +89,16 @@ public class ProjectionConsumer {
         this.writer = writer;
     }
 
-    @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection")
-    public void onAccountCreated(String message) {
+    @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection",
+            containerFactory = "singleFactory")
+    public void onAccountCreated(String message, Acknowledgment ack) {
         try (JsonParser p = JSON_FACTORY.createParser(message)) {
             String accountId = null, accountType = null, displayName = "",
                     ownerId = null, status = null, createdAtRaw = null;
-            if (p.nextToken() != JsonToken.START_OBJECT) return;
+            if (p.nextToken() != JsonToken.START_OBJECT) {
+                ack.acknowledge();
+                return;
+            }
             while (p.nextToken() != JsonToken.END_OBJECT) {
                 String field = p.currentName();
                 p.nextToken();
@@ -107,11 +112,15 @@ public class ProjectionConsumer {
                     default            -> p.skipChildren();
                 }
             }
-            if (accountId == null || accountType == null || status == null) return;
+            if (accountId == null || accountType == null || status == null) {
+                ack.acknowledge();
+                return;
+            }
             writer.writeAccount(accountId, accountType, displayName, ownerId, status,
                     toLocalDateTime(createdAtRaw));
+            ack.acknowledge();
         } catch (Exception e) {
-            log.error("Failed to project account event", e);
+            log.error("Failed to project account event — not acking, will redeliver", e);
         }
     }
 
@@ -120,18 +129,35 @@ public class ProjectionConsumer {
      * in ProjectionConfig). Parses each message with a streaming {@link JsonParser}
      * — no {@link JsonNode} tree, no per-field intermediate objects beyond the
      * final {@link ProjectionWriter.BalanceEvent} record. Hands the batch to the
-     * writer, which persists it in a single transaction.
+     * writer, which persists it, then blocks on
+     * {@link ProjectionWriter#flushJournalPending()} so that a successful ack
+     * corresponds to "rows are in MySQL".
+     *
+     * <p>At-least-once: any exception (parse, enqueue, or MySQL flush) leaves
+     * the offset un-acked, and Kafka redelivers the same poll batch on the
+     * next fetch. {@code INSERT IGNORE} + {@code ON DUPLICATE KEY UPDATE}
+     * make the redelivery idempotent.
      */
     @KafkaListener(topics = "ledger.balance.change.v1", groupId = "ledger-projection",
             containerFactory = "batchFactory")
-    public void onBalanceChange(List<String> messages) {
-        if (messages == null || messages.isEmpty()) return;
-        var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size());
-        for (String m : messages) {
-            ProjectionWriter.BalanceEvent pe = parseBalanceEvent(m);
-            if (pe != null) parsed.add(pe);
+    public void onBalanceChange(List<String> messages, Acknowledgment ack) {
+        if (messages == null || messages.isEmpty()) {
+            ack.acknowledge();
+            return;
         }
-        writer.writeBalanceBatch(parsed);
+        try {
+            var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size());
+            for (String m : messages) {
+                ProjectionWriter.BalanceEvent pe = parseBalanceEvent(m);
+                if (pe != null) parsed.add(pe);
+            }
+            writer.writeBalanceBatch(parsed);
+            writer.flushJournalPending();
+            ack.acknowledge();
+        } catch (Exception e) {
+            log.error("Balance batch projection failed (size={}) — not acking, will redeliver",
+                    messages.size(), e);
+        }
     }
 
     private ProjectionWriter.BalanceEvent parseBalanceEvent(String message) {

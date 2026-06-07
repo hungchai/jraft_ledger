@@ -482,6 +482,24 @@ export SNOWFLAKE_WORKER_ID=1
 - `journal_line` 的結構變更必須同步應用到**所有**物理表
 - 重新分片（例如從 4 片改為 8 片）需要數據遷移；請在投產前規劃
 
+#### 寫入路徑相容性：multi-row INSERT [v0.16 新增]
+
+ShardingSphere 5.5.1 對 `journal_line` / `projection_event_log` 的
+multi-row INSERT 有以下約束，應用層需注意：
+
+1. **MyBatis `<foreach>` 必須用 `<script>` 包裹**才會被 MyBatis 解析
+   為動態 SQL，否則 ShardingSphere 解析器會看到原始 `<foreach>` 字面
+   量並拋 `DialectSQLParsingException`。
+2. **Mapper 必須使用邏輯表名**（`journal_line`，不可
+   `journal_line_${shardIndex}`），由 ShardingSphere 根據每行
+   `account_account_id` 路由到正確的物理表。Mapper 內注入 shard
+   後綴會被 ShardingSphere 視為未知邏輯表，拋 `TableNotFoundException`。
+3. **MyBatis `ExecutorType.BATCH` 與 ShardingSphere 的 single-table
+   route 在分片表上不兼容**。`ledger-projection` 改用自行管理的
+   `JournalFlushBuffer`：每分片 1 個 ScheduledExecutor，每 50ms（或
+   buffer 滿 4000 條）對該分片做 1 條 multi-row `INSERT IGNORE`。
+   詳見 [`F012-projection-service.md` §4.5](F012-projection-service.md)。
+
 ---
 
 ### 6.4 資料保證

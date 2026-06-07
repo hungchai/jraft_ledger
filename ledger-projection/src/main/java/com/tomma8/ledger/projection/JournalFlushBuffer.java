@@ -79,7 +79,12 @@ public class JournalFlushBuffer implements AutoCloseable {
                 this.flushIntervalMs, this.maxBuffer, ShardRouting.SHARD_COUNT);
     }
 
-    /** Enqueue one resolved row. Routes to the per-shard queue and may trigger an early flush. */
+    /**
+     * Enqueue one resolved row. Routes to the per-shard queue and may trigger
+     * an early flush. Does NOT wait for the SQL write to complete; the caller
+     * is expected to invoke {@link #flushAll()} (or rely on the scheduled
+     * flusher) before acknowledging its Kafka poll batch.
+     */
     public void offer(PendingRow row) {
         int shard = row.shardIndex();
         if (shard < 0 || shard >= shardQueues.size()) shard = 0;
@@ -99,7 +104,51 @@ public class JournalFlushBuffer implements AutoCloseable {
         }
     }
 
-    /** Drain one shard's queue and write all pending rows. */
+    /**
+     * Synchronously flush every shard. Used by the Kafka listener right before
+     * {@code ack.acknowledge()} so that a successful return from the listener
+     * actually corresponds to "rows are in MySQL". Triggers an immediate
+     * flush on each shard's executor and waits for all of them to finish.
+     *
+     * <p>Important: re-throws the first flush exception so the listener can
+     * refuse to ack and let Kafka redeliver the same poll batch. The
+     * not-yet-flushed rows stay in their shard queues; the periodic
+     * flusher will retry them on the next tick.
+     */
+    public void flushAll() throws InterruptedException {
+        var latch = new java.util.concurrent.CountDownLatch(ShardRouting.SHARD_COUNT);
+        java.util.concurrent.atomic.AtomicReference<Throwable> firstError = new java.util.concurrent.atomic.AtomicReference<>();
+        for (int shard = 0; shard < ShardRouting.SHARD_COUNT; shard++) {
+            final int targetShard = shard;
+            flushers.get(targetShard).execute(() -> {
+                try {
+                    flushShard(targetShard);
+                } catch (Throwable t) {
+                    firstError.compareAndSet(null, t);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
+            throw new RuntimeException("JournalFlushBuffer.flushAll timed out after 30s");
+        }
+        Throwable err = firstError.get();
+        if (err != null) {
+            if (err instanceof RuntimeException re) throw re;
+            if (err instanceof Error e) throw e;
+            throw new RuntimeException("Journal flush failed", err);
+        }
+    }
+
+    /**
+     * Drain one shard's queue and write all pending rows.
+     *
+     * <p>Crash-safe: rows are first moved to a local snapshot list (drained
+     * from the queue up-front), then SQL is executed; on failure the snapshot
+     * is re-enqueued at the head so the next scheduled flush will retry.
+     * Throws on failure so {@link #flushAll()} can propagate to the caller.
+     */
     public void flushShard(int shard) {
         ConcurrentLinkedQueue<PendingRow> q = shardQueues.get(shard);
         if (q.isEmpty()) return;
@@ -122,7 +171,17 @@ public class JournalFlushBuffer implements AutoCloseable {
             flushRows.add(pending.size());
             onFlushedEventCount.accept(pending.size());
         } catch (Exception e) {
-            log.error("Journal micro-batch flush failed (shard={}, rows={})", shard, pending.size(), e);
+            // SQL failed — put the rows back at the head so the next scheduled
+            // flush will retry. They are re-offered in their original order;
+            // if a newer offer races ahead that's fine, the consumer is
+            // crash-safe via PK uniqueness (INSERT IGNORE / ON DUPLICATE KEY).
+            for (int i = pending.size() - 1; i >= 0; i--) {
+                q.offer(pending.get(i));
+            }
+            totalBuffered.addAndGet(pending.size());
+            log.error("Journal micro-batch flush failed (shard={}, rows={}) — re-queued for retry",
+                    shard, pending.size(), e);
+            throw new RuntimeException("Journal micro-batch flush failed (shard=" + shard + ")", e);
         }
     }
 

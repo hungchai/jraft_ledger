@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.listener.ContainerProperties;
 
 import java.time.LocalDateTime;
 
@@ -13,10 +14,21 @@ import java.time.LocalDateTime;
 public class ProjectionConfig {
 
     /**
+     * Single-record listener factory for account-created events.
+     */
+    @Bean
+    ConcurrentKafkaListenerContainerFactory<String, String> singleFactory(
+            ConsumerFactory<String, String> consumerFactory) {
+        var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
+        factory.setConsumerFactory(consumerFactory);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        return factory;
+    }
+
+    /**
      * Batch listener factory for the balance-change consumer: delivers a whole
      * poll batch (up to max-poll-records) as a {@code List<String>} so it can be
-     * written in one BATCH transaction. The account listener keeps the default
-     * (single-record) factory.
+     * written in one BATCH transaction.
      */
     @Bean
     ConcurrentKafkaListenerContainerFactory<String, String> batchFactory(
@@ -24,6 +36,7 @@ public class ProjectionConfig {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(consumerFactory);
         factory.setBatchListener(true);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         return factory;
     }
 

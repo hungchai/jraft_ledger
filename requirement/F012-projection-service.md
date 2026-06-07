@@ -143,6 +143,83 @@ INSERT INTO account_balance (...) VALUES (...)
 ON DUPLICATE KEY UPDATE amount = VALUES(amount), account_seq = VALUES(account_seq), last_journal_id = VALUES(last_journal_id);
 ```
 
+### 4.5 寫入路徑：50ms Micro-batch Flush（v0.16 變更）
+
+`projection_event_log` 與 `journal_line` 在第 4.2 節描述中是「逐條
+INSERT」，實際上線後觀察到這是 MySQL projection 落後的主因：每個
+Kafka poll 最多 2000 個 event，每個 event 一條 `insertJournalLine` +
+一條 `insertEvent`，合計 ~4000 次 single-row execute。
+
+`ExecutorType.BATCH`（MyBatis batch executor）在 ShardingSphere
+5.5.1 跟這兩張分片表 `journal_line_0..3` /
+`projection_event_log_0..3` 撞 — 報 `TableNotFoundException` —
+所以不能簡單打開。
+
+**新設計（commit `e2ab551`，2026-06-06）**：50ms micro-batch。
+
+```
+Kafka consumer thread
+        │ (enqueue, non-blocking)
+        ▼
+JournalFlushBuffer.shardQueues[0..3]  ──  ConcurrentLinkedQueue<PendingRow>
+        │ (per-shard, 按 account_account_id.hashCode() % 4 路由)
+        ▼
+[per-shard flusher thread, 4 個]
+   scheduledAtFixedRate(50ms)  OR  triggered on maxBuffer=4000
+        │ (drain, 1 session, 1 transaction)
+        ▼
+Multi-row INSERT per shard:
+  INSERT IGNORE INTO journal_line(...)         VALUES (?,?,...), (?,?,...), ...;
+  INSERT IGNORE INTO projection_event_log(...) VALUES (?,...,...), (?,...,...), ...;
+```
+
+關鍵設計點：
+
+1. **每 shard 1 個 flusher thread**。互不搶資源，4 shard 並行寫，
+   寫入吞吐量 ~4×。
+2. **Multi-row VALUES 用 ShardingSphere 邏輯表名**。MyBatis mapper 寫
+   `journal_line` / `projection_event_log`（不加 `_${shard}`），讓
+   ShardingSphere binder 按每行的 `account_account_id` 路由到
+   `journal_line_${shardIndex}`。MyBatis 的 `<foreach>` 必須用
+   `<script>` 包裹才生效。
+3. **account / journal PK 仍單條寫**。它們不在分片表內，cache 命中
+   後無 DB round-trip，不需 batch。
+4. **Balance upsert 維持現狀**（`ConflationQueue` + per-worker
+   `ExecutorType.BATCH`，單表無 SS 衝突）。
+
+**Tuning knobs**（`application.yml`）：
+
+| Property | Default | 說明 |
+|---|---|---|
+| `ledger.projection.journal.flush-interval-ms` | `50` | 每 shard flusher 排程週期 |
+| `ledger.projection.journal.max-buffer` | `4000` | 任一 shard 滿就立即觸發 flush |
+| `ledger.projection.balance.workers` | `2` | balance worker pool 大小（建構子注入，避免 field-injection 時序陷阱） |
+
+**Prometheus 指標**（新增）：
+
+| Metric | 說明 |
+|---|---|
+| `ledger_projection_journal_buffer_depth` | 4 shard queue 合計待寫入條數 |
+| `ledger_projection_journal_flush_batches` | 累計 flush 次數 |
+| `ledger_projection_journal_flush_rows` | 累計 multi-row INSERT 條數 |
+
+**測試結果**（`./scripts/test-cycle.sh --vus 10 --duration 2m`，重複 3 次）：
+
+| Metric | 前 | 後 |
+|---|---|---|
+| Projection 寫入速率 | ~50/s | ~430/s |
+| `events_processed` / `journal_flush_rows` | drift | 完全相等 |
+| k6 send TPS | ~100 | ~106 |
+| MySQL recon（all-account × 2 ccy） | 182/204, 22 lag_warn | 204/204, 0 lag_warn |
+
+**已知 trade-off**：
+
+- Kafka consumer 結束後最多 **50ms** 內可見性延遲（async write）。
+  對 projection 而言可接受；`Raft state machine` 不受影響（它是
+  source of truth）。
+- 單 shard 內仍保持插入順序，跨 shard 不保證（已透過 `accountSeq`
+  排序，consumer side 處理）。
+
 ---
 
 ## 5. 部署

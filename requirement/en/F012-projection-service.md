@@ -143,6 +143,85 @@ INSERT INTO account_balance (...) VALUES (...)
 ON DUPLICATE KEY UPDATE amount = VALUES(amount), account_seq = VALUES(account_seq), last_journal_id = VALUES(last_journal_id);
 ```
 
+### 4.5 Write Path: 50ms Micro-batch Flush (v0.16 change)
+
+In §4.2 the `projection_event_log` and `journal_line` writes are
+described as single-row INSERTs. In production this turned out to be
+the dominant cause of MySQL projection lag: each Kafka poll contains up
+to 2 000 events, each event triggers one `insertJournalLine` and one
+`insertEvent` — ~4 000 individual single-row executes per poll.
+
+`ExecutorType.BATCH` (MyBatis batch executor) clashes with the
+sharded tables `journal_line_0..3` / `projection_event_log_0..3` on
+ShardingSphere 5.5.1 (it raises `TableNotFoundException`), so we cannot
+just turn the batch flag on.
+
+**New design (commit `e2ab551`, 2026-06-06)**: 50ms micro-batch.
+
+```
+Kafka consumer thread
+        │ (enqueue, non-blocking)
+        ▼
+JournalFlushBuffer.shardQueues[0..3]  ──  ConcurrentLinkedQueue<PendingRow>
+        │ (per-shard, routed by account_account_id.hashCode() % 4)
+        ▼
+[per-shard flusher thread, 4 total]
+   scheduledAtFixedRate(50ms)  OR  triggered on maxBuffer=4000
+        │ (drain, 1 session, 1 transaction)
+        ▼
+Multi-row INSERT per shard:
+  INSERT IGNORE INTO journal_line(...)          VALUES (?,?,...), (?,?,...), ...;
+  INSERT IGNORE INTO projection_event_log(...)  VALUES (?,...,...), (?,...,...), ...;
+```
+
+Key design points:
+
+1. **One flusher thread per shard.** No contention, 4 shards write
+   in parallel — write throughput ~4× the single-threaded prior design.
+2. **Use ShardingSphere logical table names in the multi-row
+   VALUES.** MyBatis mappers reference `journal_line` /
+   `projection_event_log` (no `_${shard}` suffix); ShardingSphere
+   routes each row to the correct physical table by
+   `account_account_id`. MyBatis `<foreach>` MUST be wrapped in
+   `<script>` in annotation SQL.
+3. **`account` and `journal` PKs remain single-row writes.** They are
+   not sharded; cache hit means no DB round-trip — not worth batching.
+4. **Balance upsert unchanged** (`ConflationQueue` + per-worker
+   `ExecutorType.BATCH`, single table, no SS conflict).
+
+**Tuning knobs** (`application.yml`):
+
+| Property | Default | Description |
+|---|---|---|
+| `ledger.projection.journal.flush-interval-ms` | `50` | Per-shard flusher schedule period |
+| `ledger.projection.journal.max-buffer` | `4000` | Trigger immediate flush when any shard buffer is full |
+| `ledger.projection.balance.workers` | `2` | Balance worker pool size (constructor injection, avoids the field-injection timing trap) |
+
+**Prometheus metrics (new)**:
+
+| Metric | Description |
+|---|---|
+| `ledger_projection_journal_buffer_depth` | Pending rows across 4 shard queues |
+| `ledger_projection_journal_flush_batches` | Total flushes |
+| `ledger_projection_journal_flush_rows` | Total multi-row INSERTs |
+
+**Test results** (`./scripts/test-cycle.sh --vus 10 --duration 2m`, 3 runs):
+
+| Metric | Before | After |
+|---|---|---|
+| Projection write rate | ~50/s | ~430/s |
+| `events_processed` / `journal_flush_rows` | drift | match exactly |
+| k6 send TPS | ~100 | ~106 |
+| MySQL recon (all-account × 2 ccy) | 182/204, 22 lag_warn | 204/204, 0 lag_warn |
+
+**Known trade-offs**:
+
+- Up to **50ms** end-to-end visibility delay after the Kafka consumer
+  commit. Acceptable for projection; the `Raft state machine` is
+  unaffected (it is the source of truth).
+- Insert order is preserved **within a shard**; cross-shard order is not
+  (consumer side already sorts by `accountSeq`).
+
 ---
 
 ## 5. Deployment
