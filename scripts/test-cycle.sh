@@ -105,7 +105,7 @@ except Exception:
 # Fetch projection pipeline gauges from Prometheus (more reliable than journal
 # count alone: balance queue + outbox reflect actual pipeline backlog).
 fetch_prom_projection_metrics() {
-  PROJ_BALANCE_QUEUE=$(prom_scalar 'ledger_projection_balance_queue_depth')
+  PROJ_BALANCE_QUEUE=$(prom_scalar 'ledger_projection_journal_buffer_depth')
   PROJ_OUTBOX_PENDING=$(prom_scalar 'max(ledger_outbox_pending)')
   PROJ_EVENTS_RATE=$(prom_scalar 'rate(ledger_projection_events_processed[1m])')
   PROJ_SINCE_LAST_EVENT=$(prom_scalar 'ledger_projection_seconds_since_last_event_seconds')
@@ -683,7 +683,7 @@ while read -r acc ccy; do
 
   if [ "$API_VAL" = "ERR" ] || [ -z "$MYSQL_VAL" ]; then
     MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
-  elif num_eq "$API_VAL" "$MYSQL_VAL"; then
+  elif mysql_recon_match "$API_VAL" "$MYSQL_VAL" "$ccy"; then
     MYSQL_RECON=$((MYSQL_RECON + 1))
   elif mysql_recon_strict; then
     MYSQL_RECON_FAIL=$((MYSQL_RECON_FAIL + 1))
@@ -1023,7 +1023,7 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   echo ""
   echo "--- Prometheus: projection pipeline (now) ---"
   fetch_prom_projection_metrics
-  echo "  ledger_projection_balance_queue_depth      = ${PROJ_BALANCE_QUEUE:-ERR}"
+  echo "  ledger_projection_journal_buffer_depth     = ${PROJ_BALANCE_QUEUE:-ERR}"
   echo "  ledger_outbox_pending (max)                = ${PROJ_OUTBOX_PENDING:-ERR}"
   echo "  rate(ledger_projection_events_processed[1m]) = ${PROJ_EVENTS_RATE:-ERR} /s"
   echo "  ledger_projection_seconds_since_last_event = ${PROJ_SINCE_LAST_EVENT:-ERR} s"
