@@ -129,9 +129,8 @@ public class ProjectionConsumer {
      * in ProjectionConfig). Parses each message with a streaming {@link JsonParser}
      * — no {@link JsonNode} tree, no per-field intermediate objects beyond the
      * final {@link ProjectionWriter.BalanceEvent} record. Hands the batch to the
-     * writer, which persists it, then blocks on
-     * {@link ProjectionWriter#flushJournalPending()} so that a successful ack
-     * corresponds to "rows are in MySQL".
+     * writer, which persists it synchronously (balance upsert + per-poll
+     * journal flush) before the listener acks.
      *
      * <p>At-least-once: any exception (parse, enqueue, or MySQL flush) leaves
      * the offset un-acked, and Kafka redelivers the same poll batch on the
@@ -152,7 +151,6 @@ public class ProjectionConsumer {
                 if (pe != null) parsed.add(pe);
             }
             writer.writeBalanceBatch(parsed);
-            writer.flushJournalPending();
             ack.acknowledge();
         } catch (Exception e) {
             log.error("Balance batch projection failed (size={}) — not acking, will redeliver",

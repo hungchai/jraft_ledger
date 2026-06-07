@@ -5,6 +5,7 @@
 # Procedure:
 #   1. Flush MySQL + RocksDB + Raft log
 #   2. Start stack (if not running)
+#   2b. Wait for projection (health + end-to-end Kafka probe)
 #   3. Run k6 stress test
 #   4. Reconcile: balances + journals across 3 nodes API + MySQL
 #   5. Report findings
@@ -34,6 +35,9 @@ PROJ_RATE_IDLE_MAX=1.0    # events/s threshold; below = "no new work"
 PROJ_IDLE_READY_SEC=3     # seconds since last event before pipeline is "quiet"
 PROJ_IDLE_REQUIRED_POLLS=2  # need N consecutive idle polls before ready=true
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
+PROJECTION_URL="${PROJECTION_URL:-http://localhost:8089}"
+PROJ_PRE_K6_POLL_SEC=2
+PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
 
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
@@ -213,6 +217,76 @@ wait_projection_catchup() {
   return 1
 }
 
+# Block k6 setup until projection is consuming Kafka (auto-offset-reset=latest
+# drops messages published before the consumer joins). Health UP alone is not
+# enough — wait for partition assignment, then prove API -> Kafka -> MySQL.
+wait_projection_before_k6() {
+  local i attempt probe_acc probe_req cnt assigned=0
+
+  echo ""
+  echo "=== Step 2b: Wait for projection before k6 setup ==="
+
+  for i in $(seq 1 "$PROJ_PRE_K6_MAX_LOOPS"); do
+    if curl -s --max-time 3 "$PROJECTION_URL/actuator/health" 2>/dev/null \
+       | grep -q '"status":"UP"'; then
+      pass "Projection health UP"
+      break
+    fi
+    sleep "$PROJ_PRE_K6_POLL_SEC"
+    if [ "$i" -eq "$PROJ_PRE_K6_MAX_LOOPS" ]; then
+      fail "Projection not healthy after $((PROJ_PRE_K6_MAX_LOOPS * PROJ_PRE_K6_POLL_SEC))s"
+      exit 1
+    fi
+  done
+
+  for i in $(seq 1 "$PROJ_PRE_K6_MAX_LOOPS"); do
+    if docker logs ledger-projection 2>&1 \
+       | grep -q 'partitions assigned: \[ledger\.account'; then
+      pass "Kafka consumer partitions assigned (ledger.account.v1)"
+      assigned=1
+      break
+    fi
+    sleep "$PROJ_PRE_K6_POLL_SEC"
+  done
+  if [ "$assigned" -eq 0 ]; then
+    fail "Kafka consumer not assigned after $((PROJ_PRE_K6_MAX_LOOPS * PROJ_PRE_K6_POLL_SEC))s"
+    exit 1
+  fi
+  sleep "$PROJ_PRE_K6_POLL_SEC"
+
+  for attempt in $(seq 1 5); do
+    probe_acc="CYCLE-PROBE-$(date +%s)-${attempt}"
+    probe_req="cycle-probe-${probe_acc}"
+    curl -s --max-time 10 -X POST "$BASE_URL/ledger/accounts" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"requestId\": \"${probe_req}\",
+        \"accountId\": \"${probe_acc}\",
+        \"accountType\": \"CLIENT\",
+        \"displayName\": \"Cycle probe\",
+        \"ownerId\": \"CYCLE-PROBE\",
+        \"balanceInitializations\": [
+          {\"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USDT\"}
+        ]
+      }" >/dev/null || true
+
+    for i in $(seq 1 15); do
+      cnt=$(mysql_query "SELECT COUNT(*) FROM account WHERE account_id='${probe_acc}';")
+      if [ "$cnt" = "1" ]; then
+        pass "Projection consuming Kafka (probe account ${probe_acc} in MySQL)"
+        fetch_prom_projection_metrics
+        echo "  prom: $(prom_metrics_line)"
+        return 0
+      fi
+      sleep "$PROJ_PRE_K6_POLL_SEC"
+    done
+    warn "Probe ${probe_acc} not projected — retry $attempt/5"
+  done
+
+  fail "Projection did not project probe account — aborting k6 (seed journals would be lost)"
+  exit 1
+}
+
 # API (state machine) vs MySQL balance: FAIL only when projection lag is low.
 check_mysql_balance() {
   local label="$1" api_val="$2" mysql_val="$3"
@@ -259,6 +333,22 @@ normalize() {
 # Compare two numeric strings after normalization.
 num_eq() {
   [ "$(normalize "$1")" = "$(normalize "$2")" ]
+}
+
+# Decimal-precision comparison: API returns float64 while MySQL returns
+# DECIMAL(34,16). USDT tolerance 1e-6 (sub-cent), BTC tolerance 1e-9
+# (sub-satoshi). Sub-cent is acceptable for an 8dp / 16dp double-entry
+# ledger (the underlying amount itself is integer in cents/satoshis).
+mysql_recon_match() {
+  local api="$1" mysql="$2" ccy="$3"
+  if num_eq "$api" "$mysql"; then return 0; fi
+  local tol
+  if [ "$ccy" = "BTC" ]; then tol="1e-9"; else tol="1e-6"; fi
+  python3 -c "
+a = float('${api}'); b = float('${mysql}')
+import sys
+sys.exit(0 if abs(a - b) < ${tol} else 1)
+" 2>/dev/null
 }
 
 api_balance() {
@@ -341,6 +431,14 @@ if $RECON_ONLY; then
   echo ""
   echo "=== Recon-only mode ==="
   pass "Leader: $BASE_URL"
+fi
+
+# ============================================================
+# 2b. Projection ready before k6 setup (auto-offset-reset=latest)
+# ============================================================
+
+if ! $RECON_ONLY; then
+  wait_projection_before_k6
 fi
 
 # ============================================================
@@ -437,6 +535,7 @@ echo "=== Step 5: Reconciliation (journal_lag=$PROJ_LAG_AT_RECON pipeline_ready=
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
 HOTSPOT_ACC="STRESS-HOT-CO-001"
+CLIENT_PREFIX="STRESS-CLI-"
 CURRENCIES=("USDT" "BTC")
 
 # Discover accounts from MySQL account_balance (every account that has any row).
@@ -609,6 +708,170 @@ if [ "${MYSQL_EVENTS:-0}" = "0" ]; then
   MYSQL_EVENTS=$(mysql_query "SELECT COUNT(*) FROM projection_event_log;")
 fi
 
+# ============================================================
+# 5b. Reconstructed balance verification (source of truth = journal_line)
+# ============================================================
+# Trust NOTHING from MySQL `account_balance` or Raft SM. Re-compute every
+# balance from the append-only `journal_line_*` shards:
+#     reconstructed = SUM(DEBIT) - SUM(CREDIT)  per (account, balance_type, currency)
+# Then compare against API (leader) and MySQL `account_balance.amount`.
+# This catches:
+#   - Lost/wrongly-applied journal_lines
+#   - Projection bugs that wrote the wrong amount to account_balance
+#   - Any drift between state-machine state and durable journal history
+# Disagreement here is a real bug, not a lag warning.
+# ============================================================
+
+echo ""
+echo "=== Step 5b: Reconstructed balance from journal_line (source of truth) ==="
+# Wait for journal_line shards to fully drain to MySQL before reconstructing.
+# Each posting produces exactly 2 journal_lines (1 DEBIT + 1 CREDIT).
+# We wait until MySQL `journal` count catches up to Raft smJournalSeq
+# (within 10). Once MySQL journals are current, journal_line drains
+# essentially in lockstep.
+echo "  Waiting for journal_line shards to drain to MySQL..."
+RECON_SETTLED=0
+for jl_i in $(seq 1 120); do
+  JNLS_NOW=$(raft_status "$BASE_URL" "smJournalSeq")
+  MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+  JL_TOTAL=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) FROM journal_line_1 UNION ALL SELECT COUNT(*) FROM journal_line_2 UNION ALL SELECT COUNT(*) FROM journal_line_3) t;")
+  JNLS_NOW=${JNLS_NOW:-0}
+  MYSQL_JNLS=${MYSQL_JNLS:-0}
+  JL_TOTAL=${JL_TOTAL:-0}
+  if ! [[ "$JNLS_NOW" =~ ^[0-9]+$ ]]; then JNLS_NOW=0; fi
+  if ! [[ "$MYSQL_JNLS" =~ ^[0-9]+$ ]]; then MYSQL_JNLS=0; fi
+  if ! [[ "$JL_TOTAL" =~ ^[0-9]+$ ]]; then JL_TOTAL=0; fi
+  EXPECTED_LINES=$((MYSQL_JNLS * 2))
+  JL_LAG=$((EXPECTED_LINES - JL_TOTAL))
+  if [ "$JL_LAG" -le 0 ] && [ $((JNLS_NOW - MYSQL_JNLS)) -le 10 ]; then
+    pass "journal_line caught up: $JL_TOTAL lines (MySQL journals=$MYSQL_JNLS, smJournalSeq=$JNLS_NOW)"
+    RECON_SETTLED=1
+    break
+  fi
+  if [ "$jl_i" -eq 120 ]; then
+    warn "journal_line still lagging after 120s: $JL_TOTAL lines / MySQL journals=$MYSQL_JNLS smJournalSeq=$JNLS_NOW (lag=$((JNLS_NOW - MYSQL_JNLS))) — Step 5b will treat as LAG, not as bug"
+  fi
+  sleep 1
+done
+
+RECON_TMP=$(mktemp)
+mysql_query "
+  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+         COALESCE(btr.sign_convention, 'NORMAL_CREDIT') AS sign_convention
+  FROM journal_line_0 jl
+  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+  UNION ALL
+  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+  FROM journal_line_1 jl
+  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+  UNION ALL
+  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+  FROM journal_line_2 jl
+  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+  UNION ALL
+  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+  FROM journal_line_3 jl
+  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+" 2>/dev/null > "$RECON_TMP"
+
+RECON_LINES=$(wc -l < "$RECON_TMP" | tr -d ' ')
+echo "  journal_line rows for STRESS scope: $RECON_LINES"
+
+RECON_AGGR=$(python3 - <<PYEOF
+import csv
+from collections import defaultdict
+sums = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+signs = {}
+with open("$RECON_TMP", newline='') as f:
+    r = csv.reader(f, delimiter='\t')
+    for row in r:
+        if len(row) < 6 or not row[0]:
+            continue
+        acc, btype, ccy, etype, amt, sign = row[0], row[1], row[2], row[3], row[4], row[5]
+        try:
+            v = float(amt)
+        except ValueError:
+            continue
+        signs[btype] = sign
+        if etype == 'CREDIT':
+            if sign == 'NORMAL_DEBIT':
+                sums[acc][btype][ccy] -= v
+            else:
+                sums[acc][btype][ccy] += v
+        elif etype == 'DEBIT':
+            if sign == 'NORMAL_DEBIT':
+                sums[acc][btype][ccy] += v
+            else:
+                sums[acc][btype][ccy] -= v
+for acc in sorted(sums):
+    for btype in sorted(sums[acc]):
+        for ccy in sorted(sums[acc][btype]):
+            print(f"{acc}\t{btype}\t{ccy}\t{sums[acc][btype][ccy]}")
+PYEOF
+)
+rm -f "$RECON_TMP"
+
+RECON_MATCH=0
+RECON_MISMATCH=0
+RECON_TOTAL=0
+RECON_DETAIL=$(mktemp)
+echo "  account_id,balance_type,currency,reconstructed,api,mysql,status" > "$RECON_DETAIL"
+while IFS=$'\t' read -r acc btype ccy reconstructed; do
+  [ -z "$acc" ] && continue
+  RECON_TOTAL=$((RECON_TOTAL + 1))
+  API_VAL=$(api_balance "$BASE_URL" "$acc" "$btype" "$ccy")
+  MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND balance_type='$btype' AND currency='$ccy';")
+  if [ "$API_VAL" = "ERR" ]; then API_VAL=""; fi
+  STATUS="OK"
+  # Tolerance: float64 accumulation drift ~ 1e-6 USDT, 1e-9 BTC
+  RECON_TOL="1e-6"
+  [ "$ccy" = "BTC" ] && RECON_TOL="1e-9"
+  if [ -n "$MYSQL_VAL" ]; then
+    DIFF_M=$(python3 -c "print(abs(float('$reconstructed') - float('$MYSQL_VAL')))")
+    if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_M') < $RECON_TOL else 1)"; then
+      STATUS="MYSQL_MISMATCH(diff=$DIFF_M)"
+    fi
+  else
+    STATUS="MYSQL_MISSING"
+  fi
+  if [ -n "$API_VAL" ]; then
+    DIFF_A=$(python3 -c "print(abs(float('$reconstructed') - float('$API_VAL')))")
+    if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_A') < $RECON_TOL else 1)"; then
+      if [ "$STATUS" = "OK" ]; then STATUS="API_MISMATCH(diff=$DIFF_A)"
+      else STATUS="${STATUS}+API_MISMATCH(diff=$DIFF_A)"; fi
+    fi
+  fi
+  if [ "$STATUS" = "OK" ]; then
+    RECON_MATCH=$((RECON_MATCH + 1))
+  else
+    RECON_MISMATCH=$((RECON_MISMATCH + 1))
+  fi
+  echo "  ${acc},${btype},${ccy},${reconstructed},${API_VAL},${MYSQL_VAL},${STATUS}" >> "$RECON_DETAIL"
+done <<< "$RECON_AGGR"
+
+if [ "$RECON_MISMATCH" -eq 0 ]; then
+  pass "Reconstruction: $RECON_MATCH/$RECON_TOTAL (account,balance_type,currency) tuples match API & MySQL"
+elif [ "$RECON_SETTLED" -ne 1 ]; then
+  # journal_line was still draining when we tried to reconstruct — mismatches
+  # are lag, not bugs. Downgrade to WARN so the cycle can still report PASS.
+  warn "Reconstruction (lag): $RECON_MATCH/$RECON_TOTAL match, $RECON_MISMATCH MISMATCH (projection still draining — not a bug)"
+  echo "  Sample of unmatched (lag) tuples:"
+  grep -vE ',OK$' "$RECON_DETAIL" | head -5 | sed 's/^/    /'
+else
+  fail "Reconstruction: $RECON_MATCH/$RECON_TOTAL match, $RECON_MISMATCH MISMATCH (real bug, projection already settled)"
+  echo "  Mismatched tuples:"
+  grep -vE ',OK$' "$RECON_DETAIL" | head -20 | sed 's/^/    /'
+fi
+echo "RECON_OK=$RECON_MATCH RECON_BAD=$RECON_MISMATCH RECON_TOTAL=$RECON_TOTAL RECON_SETTLED=$RECON_SETTLED" > /tmp/recon_counters_extra
+rm -f "$RECON_DETAIL"
+
 # --- Sample client MySQL vs Leader (subset of discovered accounts) ---
 echo ""
 echo "--- Client MySQL vs Leader (sample of ${#ACCOUNTS[@]} accounts) ---"
@@ -732,7 +995,7 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
           [ "$(normalize "$a")" = "$(normalize "$API_REF")" ] || MATCH_API="❌"
         done
         MATCH_DB="✅"
-        num_eq "$API_REF" "$M_AMT" || MATCH_DB="❌"
+        mysql_recon_match "$API_REF" "$M_AMT" "$ccy" >/dev/null 2>&1 || MATCH_DB="❌"
         OVERALL="api=${MATCH_API} db=${MATCH_DB}"
       else
         OVERALL="-"
@@ -831,6 +1094,97 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   LINES=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) FROM journal_line_1 UNION ALL SELECT COUNT(*) FROM journal_line_2 UNION ALL SELECT COUNT(*) FROM journal_line_3) t;")
   AVG_LEGS=$(python3 -c "print(f'{${LINES}/${JNLS}:.2f}' if ${JNLS} else '0.0')" 2>/dev/null || echo "?")
   echo "  journals=$JNLS  journal_lines=$LINES  avg_legs_per_journal=$AVG_LEGS (expect 2.0 for postings, 0 for adjustments)"
+
+  # --- Reconstructed balance from journal_line (source of truth, fresh snapshot) ---
+  echo ""
+  echo "--- Reconstructed balance from journal_line (source of truth) ---"
+  RECON_DIAG_TMP=$(mktemp)
+  mysql_query "
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT') AS sign_convention
+    FROM journal_line_0 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_1 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_2 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_3 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
+  " 2>/dev/null > "$RECON_DIAG_TMP"
+  RECON_DIAG_LINES=$(wc -l < "$RECON_DIAG_TMP" | tr -d ' ')
+  echo "  journal_line rows for STRESS scope: $RECON_DIAG_LINES"
+  RECON_DIAG_OK=0; RECON_DIAG_BAD=0
+  echo "  account_id,balance_type,currency,reconstructed,api,mysql,status" > /tmp/recon_diag_detail.csv
+  RECON_DIAG_AGGR=$(python3 - <<PYEOF
+import csv
+from collections import defaultdict
+sums = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+signs = {}
+with open("$RECON_DIAG_TMP", newline='') as f:
+    r = csv.reader(f, delimiter='\t')
+    for row in r:
+        if len(row) < 6 or not row[0]: continue
+        acc, btype, ccy, etype, amt, sign = row[0], row[1], row[2], row[3], row[4], row[5]
+        try: v = float(amt)
+        except ValueError: continue
+        signs[btype] = sign
+        if etype == 'CREDIT':
+            sums[acc][btype][ccy] += v if sign != 'NORMAL_DEBIT' else -v
+        elif etype == 'DEBIT':
+            sums[acc][btype][ccy] += v if sign == 'NORMAL_DEBIT' else -v
+for acc in sorted(sums):
+    for btype in sorted(sums[acc]):
+        for ccy in sorted(sums[acc][btype]):
+            print(f"{acc}\t{btype}\t{ccy}\t{sums[acc][btype][ccy]}")
+PYEOF
+)
+  rm -f "$RECON_DIAG_TMP"
+  while IFS=$'\t' read -r acc btype ccy reconstructed; do
+    [ -z "$acc" ] && continue
+    DAPI_VAL=$(curl -s --max-time 5 "${BASE_URL}/ledger/balances?accountId=${acc}&balanceType=${btype}&currency=${ccy}" 2>/dev/null \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('amount','ERR'))" 2>/dev/null || echo "ERR")
+    DMYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND balance_type='$btype' AND currency='$ccy';")
+    STATUS="OK"
+    # Tolerance: float64 accumulation drift ~ 1e-6 USDT, 1e-9 BTC
+    RECON_DIAG_TOL="1e-6"
+    [ "$ccy" = "BTC" ] && RECON_DIAG_TOL="1e-9"
+    if [ -n "$DMYSQL_VAL" ]; then
+      DIFF_M=$(python3 -c "print(abs(float('$reconstructed') - float('$DMYSQL_VAL')))")
+      if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_M') < $RECON_DIAG_TOL else 1)"; then
+        STATUS="MYSQL_MISMATCH(diff=$DIFF_M)"
+      fi
+    else
+      STATUS="MYSQL_MISSING"
+    fi
+    if [ -n "$DAPI_VAL" ] && [ "$DAPI_VAL" != "ERR" ]; then
+      DIFF_A=$(python3 -c "print(abs(float('$reconstructed') - float('$DAPI_VAL')))")
+      if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_A') < $RECON_DIAG_TOL else 1)"; then
+        if [ "$STATUS" = "OK" ]; then STATUS="API_MISMATCH(diff=$DIFF_A)"
+        else STATUS="${STATUS}+API_MISMATCH(diff=$DIFF_A)"; fi
+      fi
+    fi
+    if [ "$STATUS" = "OK" ]; then RECON_DIAG_OK=$((RECON_DIAG_OK+1))
+    else RECON_DIAG_BAD=$((RECON_DIAG_BAD+1)); fi
+    echo "  ${acc},${btype},${ccy},${reconstructed},${DAPI_VAL},${DMYSQL_VAL},${STATUS}" >> /tmp/recon_diag_detail.csv
+  done <<< "$RECON_DIAG_AGGR"
+  echo "  Reconstructed: ok=$RECON_DIAG_OK bad=$RECON_DIAG_BAD"
+  if [ "$RECON_DIAG_BAD" -gt 0 ]; then
+    echo "  Mismatches:"
+    grep -vE ',OK$' /tmp/recon_diag_detail.csv | head -20 | sed 's/^/    /'
+  fi
 
   # --- TPS snapshot (instantaneous rates from Prometheus) ---
   echo ""
@@ -941,7 +1295,7 @@ for ccy in "${CURRENCIES[@]}"; do
   V3=$(api_balance "${NODES[2]}" "$HOTSPOT_ACC" "AVAILABLE_BALANCE" "$ccy")
   M=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$HOTSPOT_ACC' AND currency='$ccy';")
   MATCH=$(num_eq "$V1" "$V2" && num_eq "$V2" "$V3" && echo "✅" || echo "❌")
-  M_MATCH=$(num_eq "$V1" "$M" && echo "✅" || echo "⚠️")
+  M_MATCH=$(mysql_recon_match "$V1" "$M" "$ccy" >/dev/null 2>&1 && echo "✅" || echo "⚠️")
   printf "  %-4s %-25s %s\n" \
     "$MATCH" \
     "Hotspot $ccy cross-node" \
@@ -958,6 +1312,24 @@ done
     "$( [ "${MYSQL_RECON_BAD:-0}" -eq 0 ] && echo "✅" || echo "❌")" \
     "MySQL balance recon (all)" \
     "match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} lag_warn=${MYSQL_RECON_LAG_WARN:-0} skip=${MYSQL_RECON_SKIP:-0}"
+
+  # Reconstructed-from-journal_line verification (source of truth = append-only journal_line)
+  eval "$(cat /tmp/recon_counters_extra 2>/dev/null)"
+  RECON_BAD_LAG=$([ "${RECON_SETTLED:-0}" -ne 1 ] && [ "${RECON_BAD:-0}" -gt 0 ] && echo 1 || echo 0)
+  if [ "${RECON_BAD:-0}" -eq 0 ]; then
+    RECON_ICON="✅"
+    RECON_LABEL="Reconstructed (from journal_line)"
+    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0}"
+  elif [ "$RECON_BAD_LAG" -eq 1 ]; then
+    RECON_ICON="⚠️"
+    RECON_LABEL="Reconstructed (lag, not bug)"
+    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0} (projection still draining)"
+  else
+    RECON_ICON="❌"
+    RECON_LABEL="Reconstructed (from journal_line)"
+    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0} (real bug, settled)"
+  fi
+  printf "  %-4s %-25s %s\n" "$RECON_ICON" "$RECON_LABEL" "$RECON_DETAIL_STR"
 
   # MySQL event/journal/line counts
   printf "  %-4s %-25s %s\n" \

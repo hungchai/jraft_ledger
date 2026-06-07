@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -99,24 +100,24 @@ public class ProjectionWriter {
      *   <li>balance rows are conflated in-memory (highest {@code accountSeq}
      *       per account/balanceType/currency) and upserted synchronously in one
      *       JDBC batch — durable before this method returns;</li>
-     *   <li>journal_line + projection_event_log rows are enqueued for the
-     *       {@link JournalFlushBuffer}; the caller must invoke
-     *       {@link #flushJournalPending()} before acking Kafka.</li>
+     *   <li>journal_line + projection_event_log rows are written via
+     *       {@link JournalFlushBuffer#flushPollBatch} — per-poll, per-shard
+     *       multi-row INSERT in parallel, without the shared async queue;</li>
      * </ol>
      *
      * <p><b>Throws</b> on any error. The caller must NOT acknowledge the offset
      * — the broker will redeliver the same poll batch (idempotent via
      * {@code INSERT IGNORE} / accountSeq-guarded upsert).
      */
-    public void writeBalanceBatch(List<BalanceEvent> parsed) {
+    public void writeBalanceBatch(List<BalanceEvent> parsed) throws InterruptedException {
         if (parsed == null || parsed.isEmpty()) return;
 
         resolveAccountPks(parsed);
         resolveJournalPks(parsed);
 
         LocalDateTime now = LocalDateTime.now();
-        var conflated = conflateBalanceUpdates(parsed);
-        upsertBalancesSync(conflated);
+        var conflated = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
+        var journalRows = new ArrayList<JournalFlushBuffer.PendingRow>(parsed.size());
 
         for (BalanceEvent pe : parsed) {
             Long accountPk = accountIdCache.get(pe.accountId());
@@ -124,47 +125,25 @@ public class ProjectionWriter {
             if (accountPk == null || journalPk == null) {
                 throw new IllegalStateException("Missing surrogate PK for account=" + pe.accountId()
                         + " or journal=" + pe.journalId()
-                        + " after resolve phase — cannot enqueue for journal flush");
+                        + " after resolve phase — cannot persist batch");
             }
 
-            journalFlushBuffer.offer(new JournalFlushBuffer.PendingRow(
+            var bu = new BalanceUpdate(accountPk, pe.accountId(), pe.balanceType(), pe.currency(),
+                    pe.postBalance(), pe.position(), pe.accountSeq(), pe.journalId());
+            BalanceUpdate prev = conflated.get(bu);
+            if (prev == null || bu.accountSeq() >= prev.accountSeq()) {
+                conflated.put(bu, bu);
+            }
+
+            journalRows.add(new JournalFlushBuffer.PendingRow(
                     ShardRouting.shardIndex(pe.accountId()),
                     idGenerator.nextId(), journalPk, accountPk, pe, now));
         }
 
+        upsertBalancesSync(conflated);
+        journalFlushBuffer.flushPollBatch(journalRows);
+
         lastEventTimestamp.set(System.currentTimeMillis());
-    }
-
-    /**
-     * Block until all currently-queued journal_line + projection_event_log rows
-     * have been flushed to MySQL across every shard. The Kafka listener MUST
-     * call this before {@code ack.acknowledge()}. Re-throws on flush failure so
-     * the listener can skip the ack and let Kafka redeliver.
-     */
-    public void flushJournalPending() throws InterruptedException {
-        journalFlushBuffer.flushAll();
-    }
-
-    /**
-     * Reduce a poll batch to one row per (accountId, balanceType, currency),
-     * keeping the entry with the highest {@code accountSeq}.
-     */
-    private LinkedHashMap<BalanceUpdate, BalanceUpdate> conflateBalanceUpdates(List<BalanceEvent> parsed) {
-        var latest = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
-        for (BalanceEvent pe : parsed) {
-            Long accountPk = accountIdCache.get(pe.accountId());
-            if (accountPk == null) {
-                throw new IllegalStateException("Missing account PK for " + pe.accountId()
-                        + " after resolve phase");
-            }
-            var bu = new BalanceUpdate(accountPk, pe.accountId(), pe.balanceType(), pe.currency(),
-                    pe.postBalance(), pe.position(), pe.accountSeq(), pe.journalId());
-            BalanceUpdate prev = latest.get(bu);
-            if (prev == null || bu.accountSeq() >= prev.accountSeq()) {
-                latest.put(bu, bu);
-            }
-        }
-        return latest;
     }
 
     /** Synchronous JDBC batch upsert; throws on SQL failure (no silent loss). */
