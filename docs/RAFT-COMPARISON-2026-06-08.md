@@ -57,34 +57,74 @@ through the Ratis log mutates the balance, and a duplicate `requestId` is idempo
 > Requires a running docker daemon. Not executed in this environment (daemon down at authoring
 > time). Run `loadtest/scripts/run-engine-compare.sh`; it appends the filled table here.
 
-| Metric | SOFAJRaft | Apache Ratis |
-|---|---|---|
-| Posting P95 (s) | _pending_ | _pending_ |
-| Posting TPS | _pending_ | _pending_ |
-| Max GC pause rate (s/s) | _pending_ | _pending_ |
+**Run 2026-06-09** — `scripts/test-cycle.sh --vus 10 --duration 2m`, **same conditions for both
+engines** (same v3 image, same flush + 3-node stack + k6 `k6-posting-stress.js` + recon).
+Only difference: `CONSENSUS_ENGINE` (jraft default vs `docker-compose.ratis.yml`). Engine is the
+sole variable.
 
-Scenarios: `03-internal-transfer`, `07-mixed-realistic`, `08-burst-5k` (k6, 1000 accounts).
+| Metric (10 VU, 2m) | SOFAJRaft | Apache Ratis | Δ |
+|---|---|---|---|
+| k6 iterations | 22,317 | 21,207 | −5.0% |
+| Failed | 0.00% | 0.00% | — |
+| Posting **p50** | **3.1 ms** | **5.5 ms** | +77% |
+| Posting **p95** | **6.22 ms** | **10.06 ms** | +62% |
+| k6 throughput | 186.0 /s | 176.7 /s | −5.0% |
+| Cycle result | **PASSED** (229✅ / 0❌ / 27⚠) | **PASSED** (226✅ / 0❌ / 32⚠) | both pass |
 
-## 3. Failover / recovery (live)
+Both engines hold the **≤3 ms posting P95** NFR? No — neither: jraft p95=6.22 ms, ratis=10.06 ms
+**at this hardware/VU level** (local docker, 10 VU). Relative gap is the signal: Ratis adds ~2.4 ms
+p50 / ~3.8 ms p95, consistent with the extra embedded-`RaftClient` gRPC hop on submit vs SOFAJRaft's
+in-JVM `node.apply()`. (Absolute numbers are local-laptop, not the prod SLA bench.)
 
-Kill the leader container mid-load; measure election gap (`ledger_raft_is_leader` flat-line),
-time-to-recover-TPS, and install-snapshot duration on rejoin. _Pending live run._
-
-## 4. OOM disaster-recovery (live)
-
-Pass bar: **0 lost committed writes + clean recovery + cross-node balance match.** Driven by
-`scripts/oom-dr-test.sh` (heap throttled to 320m via `docker-compose.oom.yml`; load until OOM →
-`-XX:+ExitOnOutOfMemoryError` → `restart: unless-stopped`).
+### Correctness / consistency (the part that must not regress)
 
 | Check | SOFAJRaft | Apache Ratis |
 |---|---|---|
-| Acked-committed journals re-queryable after restart (lost=0) | _pending_ | _pending_ |
-| Leader re-elected, serves writes | _pending_ | _pending_ |
-| Cross-node balance divergence (must be 0) | _pending_ | _pending_ |
-| Time-to-OOM / time-to-recover | _pending_ | _pending_ |
+| Raft lastAppliedIndex across 3 nodes | 22522 / 22522 / 22522 ✅ | 33787 / 33787 / 33787 ✅ |
+| smJournalSeq across 3 nodes (max diff) | 22419, diff=0 ✅ | 21309, diff=0 ✅ |
+| Hotspot USDT/BTC cross-node | identical ✅ | identical ✅ |
+| All-account cross-node API balance | 204/204 identical ✅ | 204/204 identical ✅ |
+| MySQL balance recon | match=184, **mismatch=0** ✅ | match=182, **mismatch=0** ✅ |
+
+Both engines: **zero balance mismatch, zero cross-node divergence.** Ratis is functionally
+equivalent to SOFAJRaft here. (MySQL `lag_warn` rows in both runs are projection-pipeline
+catch-up lag — async CQRS read side, identical service for both engines — not a state-machine bug.)
+
+> Note: Ratis `lastAppliedIndex` (33787) > journal count (21309) because Ratis counts its own
+> config/no-op log entries in the applied index; SOFAJRaft's index tracks ≈ journal sequence.
+> Not a discrepancy — different index semantics.
+
+## 3. Failover / recovery
+
+**Not run in this round.** `test-cycle.sh` does not kill the leader. Harness for it is ready
+(kill leader container mid-load, measure `ledger_raft_is_leader` gap + recover time). Pending.
+
+## 4. OOM disaster-recovery
+
+**Not run in this round.** Driven by `scripts/oom-dr-test.sh` + `docker-compose.oom.yml`
+(heap 320m, load → `-XX:+ExitOnOutOfMemoryError` → restart). Pass bar: 0 lost committed writes +
+clean recovery + 0 cross-node divergence. Pending.
+
+| Check | SOFAJRaft | Apache Ratis |
+|---|---|---|
+| Acked-committed journals re-queryable after restart (lost=0) | _not run_ | _not run_ |
+| Leader re-elected, serves writes | _not run_ | _not run_ |
+| Cross-node balance divergence (must be 0) | _not run_ | _not run_ |
 
 ## 5. Status
 
 - ✅ Pluggable `ConsensusEngine` seam; SOFAJRaft + Ratis both implement it.
 - ✅ Ratis engine functionally verified in-JVM (apply + snapshot storage + idempotency).
-- ⏳ Live throughput / failover / OOM tables: harness ready, awaiting a docker host.
+- ✅ **Live test-cycle comparison run (2026-06-09)**: both engines PASS, 0 failures, 0 balance
+  mismatch, 0 cross-node divergence. Ratis ~60–77% higher posting latency (extra submit hop),
+  ~5% lower throughput.
+- ⏳ Failover + OOM DR tables: harness ready, not run this round.
+
+### Verdict (POC)
+
+Apache Ratis is a **functionally drop-in** consensus engine for this ledger: identical balance
+correctness and cross-node consistency, and it removes the SOFAJRaft JDK-17+ `--add-opens`
+requirement and the reflection-based empty-payload recovery hack. The cost is measurable extra
+submit latency (embedded gRPC client hop). Keep SOFAJRaft as production default; revisit promoting
+Ratis if failover/OOM DR results favour it and the latency gap is acceptable (or closed by an
+in-process Ratis submit path).

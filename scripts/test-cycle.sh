@@ -15,6 +15,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Compose file list — override to swap consensus engine (e.g. add docker-compose.ratis.yml).
+# Default keeps the original single-file behaviour byte-identical.
+COMPOSE_FILES="${COMPOSE_FILES:--f $PROJECT_DIR/docker-compose.yml}"
+
 VUS=10
 DURATION=2m
 FLUSH=true
@@ -369,7 +373,7 @@ raft_status() {
 
 if $FLUSH && ! $RECON_ONLY; then
   echo "=== Step 1: Flush data ==="
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" down 2>/dev/null || true
+  docker compose $COMPOSE_FILES down 2>/dev/null || true
   rm -rf "$PROJECT_DIR/jraft_ledger/mysql" \
          "$PROJECT_DIR/jraft_ledger/node1/rocksdb" "$PROJECT_DIR/jraft_ledger/node1/raft" \
          "$PROJECT_DIR/jraft_ledger/node2/rocksdb" "$PROJECT_DIR/jraft_ledger/node2/raft" \
@@ -385,7 +389,7 @@ fi
 if ! $RECON_ONLY; then
   echo ""
   echo "=== Step 2: Start stack ==="
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d 2>&1 | tail -1
+  docker compose $COMPOSE_FILES up -d 2>&1 | tail -1
 
   # Wait for leader
   echo -n "Waiting for leader"
