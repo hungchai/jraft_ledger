@@ -20,6 +20,12 @@
             <artifactId>ledger-service</artifactId>
         </dependency>
 
+        <!-- Apache Ratis consensus engine (selected via ledger.consensus.engine=ratis) -->
+        <dependency>
+            <groupId>com.tomma8</groupId>
+            <artifactId>ledger-raft-ratis</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>

@@ -1,7 +1,7 @@
 package com.tomma8.ledger.rest.controller;
 
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
-import com.tomma8.ledger.raft.RaftNodeManager;
+import com.tomma8.ledger.raft.ConsensusEngine;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -14,10 +14,10 @@ import java.util.Map;
 @RequestMapping("/raft")
 public class RaftLeaderController {
 
-    private final RaftNodeManager raftNodeManager;
+    private final ConsensusEngine raftNodeManager;
     private final String nodeId;
 
-    public RaftLeaderController(@org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager) {
+    public RaftLeaderController(@org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager) {
         this.raftNodeManager = raftNodeManager;
         this.nodeId = System.getenv().getOrDefault("NODE_ID", "standalone");
     }

@@ -21,6 +21,7 @@
         <module>ledger-projection</module>
         <module>ledger-client-sdk</module>
         <module>ledger-perf-tests</module>
+        <module>ledger-raft-ratis</module>
     </modules>
 
     <parent>
@@ -37,6 +38,9 @@
 
         <!-- SOFAJRaft -->
         <sofa.jraft.version>1.4.0</sofa.jraft.version>
+
+        <!-- Apache Ratis (alternative consensus engine — POC, see ADR-003) -->
+        <ratis.version>3.1.0</ratis.version>
 
         <!-- SOFA Common Tools (must be 2.x for Spring Boot 3.x logback 1.5 compatibility;
              sofa-common-tools 1.0.x uses ContextInitializer.configureByResource(URL)
@@ -96,6 +100,34 @@
                 <groupId>com.tomma8</groupId>
                 <artifactId>ledger-perf-tests</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.tomma8</groupId>
+                <artifactId>ledger-raft-ratis</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- Apache Ratis (alternative consensus engine — POC) -->
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-server</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-grpc</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-client</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <!-- Runtime metrics SPI impl — required at server start (MetricRegistriesImpl) -->
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-metrics-default</artifactId>
+                <version>${ratis.version}</version>
             </dependency>
 
             <!-- SOFAJRaft -->
@@ -182,7 +214,14 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <configuration>
-                        <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                        <!-- SOFAJRaft + Netty reflect into JDK internals (SegmentList →
+                             java.util.ArrayList.elementData, ThrowUtil → java.lang.Throwable.cause,
+                             Netty → nio buffers); JDK 17+ strong encapsulation needs these add-opens. -->
+                        <argLine>-XX:+EnableDynamicAgentLoading
+                            --add-opens=java.base/java.util=ALL-UNNAMED
+                            --add-opens=java.base/java.lang=ALL-UNNAMED
+                            --add-opens=java.base/java.nio=ALL-UNNAMED
+                            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
                     </configuration>
                 </plugin>
             </plugins>

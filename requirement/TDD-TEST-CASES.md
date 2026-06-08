@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.13
-**日期**: 2026-06-03
+**版本**: v0.14
+**日期**: 2026-06-08
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.14 變更摘要**：新增 Module 15.1（Apache Ratis Engine，ADR-003），新增 TC-RAFT-RATIS-01~04 與 TC-NFR-OOM-01。涵蓋 Ratis log 提交餘額變更、冪等重放、snapshot 還原、引擎可切換，以及 OOM 災難復原（0 已提交遺失 + 乾淨復原 + 無跨節點分歧）。
+>
 > **v0.13 變更摘要**：新增 Module 22（SnowflakeIdGenerator 時鐘回退容錯），新增 TC-SNOW-01~04。涵蓋 monotonic ID、序列號回捲、≤5ms 時鐘回退等待、>5ms 時鐘回退拒絕。
 >
 > **v0.12 變更摘要**：新增 Module 21（F-016 Micrometer Metrics & Observability），新增 TC-F016-01~10。涵蓋 Metrics 暴露、標籤正確性、Alert Rule 觸發、Histogram bucket SLO、Projection gauges 獨立暴露。
@@ -959,6 +961,38 @@ TC-RAFT-02  cluster_survivesFollowerRestart
             Given: 3-node cluster with elected leader
             When:  follower 關閉後重啟
             Then:  follower 重新加入 cluster，無錯誤
+```
+
+### 15.1 Apache Ratis Engine（ADR-003 — pluggable ConsensusEngine）
+
+```
+TC-RAFT-RATIS-01  posting_committedThroughRatisLog_mutatesBalance
+                  Given: single-node embedded Ratis cluster wrapping LedgerStateMachine,
+                         CLIENT_ACC_001 AVAILABLE_BALANCE=1000.00
+                  When:  RatisNodeManager.submit(PostingCommand DEBIT 300)
+                  Then:  result COMPLETED，balance=700.00，lastAppliedIndex > 0
+                  (impl: RatisEngineIntegrationTest — passing, no docker)
+
+TC-RAFT-RATIS-02  duplicateRequestId_isIdempotent
+                  Given: same single-node Ratis cluster
+                  When:  submit same PostingCommand (requestId) twice
+                  Then:  both COMPLETED，balance debited once only (idempotencyStore hit)
+
+TC-RAFT-RATIS-03  snapshotTakenAndReloaded_stateRestored  (harness-ready)
+                  Given: Ratis node with N applied commands
+                  When:  takeSnapshot() → restart → loadSnapshot via SimpleStateMachineStorage
+                  Then:  balances + accountSeq restored from snapshot, no log-replay gap
+
+TC-RAFT-RATIS-04  engineSelectable_viaConsensusEngineProperty
+                  Given: CONSENSUS_ENGINE=ratis|jraft
+                  When:  Spring context boot (LedgerConfig.raftNodeManager)
+                  Then:  ConsensusEngine bean is RatisNodeManager | RaftNodeManager respectively
+
+TC-NFR-OOM-01     leaderOOM_zeroCommittedLoss_cleanRecovery  (DR harness — scripts/oom-dr-test.sh)
+                  Given: heap-throttled 3-node cluster (docker-compose.oom.yml), per engine
+                  When:  sustained load drives leader OOM → ExitOnOutOfMemoryError → restart
+                  Then:  every API-acked journalId still queryable (lost=0)，leader re-elected，
+                         seeded-account balances identical across all 3 nodes (divergence=0)
 ```
 
 ---

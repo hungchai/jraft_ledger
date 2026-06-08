@@ -1,8 +1,7 @@
 package com.tomma8.ledger.rest.controller;
 
-import com.alipay.sofa.jraft.entity.PeerId;
+import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.raft.NodeRole;
-import com.tomma8.ledger.raft.RaftNodeManager;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -19,9 +18,9 @@ public class ClusterController {
 
     private final NodeRole nodeRole;
     private final String nodeId;
-    private final RaftNodeManager raftNodeManager;
+    private final ConsensusEngine raftNodeManager;
 
-    public ClusterController(NodeRole nodeRole, RaftNodeManager raftNodeManager) {
+    public ClusterController(NodeRole nodeRole, ConsensusEngine raftNodeManager) {
         this.nodeRole = nodeRole;
         this.nodeId = System.getenv().getOrDefault("NODE_ID", "standalone");
         this.raftNodeManager = raftNodeManager;
@@ -60,18 +59,18 @@ public class ClusterController {
 
     @GetMapping("/raft-status")
     public ResponseEntity<?> raftStatus() {
-        if (raftNodeManager == null || raftNodeManager.getNode() == null) {
+        if (raftNodeManager == null || !raftNodeManager.isRunning()) {
             var body = new HashMap<String, Object>();
             body.put("mode", "standalone");
             return ResponseEntity.ok(body);
         }
 
-        long appliedIndex = raftNodeManager.getStateMachine().getLastAppliedIndex();
-        long smRaftLogIndex = raftNodeManager.getStateMachine().getLedgerStateMachine().getRaftLogIndex();
-        long smJournalSeq = raftNodeManager.getStateMachine().getLedgerStateMachine().getJournalSequence();
-        long smAccountCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getAccountMetaStore().size();
-        long smBalanceCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getBalanceStore().size();
-        long smConfigCount = raftNodeManager.getStateMachine().getLedgerStateMachine().getBalanceTypeConfigStore().size();
+        long appliedIndex = raftNodeManager.getLastAppliedIndex();
+        long smRaftLogIndex = raftNodeManager.getLedgerStateMachine().getRaftLogIndex();
+        long smJournalSeq = raftNodeManager.getLedgerStateMachine().getJournalSequence();
+        long smAccountCount = raftNodeManager.getLedgerStateMachine().getAccountMetaStore().size();
+        long smBalanceCount = raftNodeManager.getLedgerStateMachine().getBalanceStore().size();
+        long smConfigCount = raftNodeManager.getLedgerStateMachine().getBalanceTypeConfigStore().size();
 
         Map<String, Object> status = new HashMap<>();
         status.put("nodeId", nodeId);
@@ -90,14 +89,7 @@ public class ClusterController {
                 : List.of(nodeId + ":28080");
         status.put("peers", peers);
 
-        try {
-            List<String> alivePeers = raftNodeManager.getNode().listAlivePeers().stream()
-                    .map(PeerId::toString)
-                    .toList();
-            status.put("alivePeers", alivePeers);
-        } catch (Exception e) {
-            status.put("alivePeers", List.of());
-        }
+        status.put("alivePeers", raftNodeManager.getAlivePeers());
 
         return ResponseEntity.ok(status);
     }

@@ -6,9 +6,12 @@ import com.tomma8.ledger.domain.model.NegativeSemantics;
 import com.tomma8.ledger.domain.model.SignConvention;
 import com.tomma8.ledger.event.AsyncOutboxPublisher;
 import com.tomma8.ledger.event.KafkaEventPublisher;
+import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.raft.LedgerRaftStateMachine;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.RaftNodeManager;
+import com.tomma8.ledger.raft.ratis.RatisLedgerStateMachine;
+import com.tomma8.ledger.raft.ratis.RatisNodeManager;
 import com.tomma8.ledger.rocksdb.OutboxStore;
 import com.tomma8.ledger.rocksdb.RocksDBManager;
 import com.tomma8.ledger.service.*;
@@ -207,12 +210,12 @@ public class LedgerConfig {
     @Bean
     public ClusterController clusterController(NodeRole nodeRole,
             MeterRegistry meterRegistry,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager) {
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager) {
         return new ClusterController(nodeRole, raftNodeManager);
     }
 
     @Bean(destroyMethod = "close")
-    public RaftNodeManager raftNodeManager(
+    public ConsensusEngine raftNodeManager(
             LedgerStateMachine ledgerStateMachine,
             NodeRole nodeRole,
             MeterRegistry meterRegistry,
@@ -222,10 +225,17 @@ public class LedgerConfig {
         String peers    = cs.get("PEER_NODES", null);
         String raftPath = cs.get("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
         int raftPort    = cs.getInt("RAFT_SERVER_PORT", 28080);
+        String engineRaw = cs.get("CONSENSUS_ENGINE", "jraft");
+        String engine   = (engineRaw == null ? "jraft" : engineRaw).toLowerCase();
 
         if (nodeId == null || peers == null) {
             log.info("Raft cluster not configured — running standalone");
             return null;
+        }
+
+        if (engine.equals("ratis")) {
+            return buildRatisEngine(ledgerStateMachine, nodeRole, meterRegistry,
+                    groupId, nodeId, peers, raftPath, raftPort);
         }
 
         LedgerRaftStateMachine fsm = new LedgerRaftStateMachine(ledgerStateMachine)
@@ -260,9 +270,45 @@ public class LedgerConfig {
         return mgr;
     }
 
+    /**
+     * Build the Apache Ratis consensus engine (ADR-003 POC). Peer ids default to the
+     * docker service hostname (== NODE_ID for self), so the peer string is
+     * "host:host:raftPort" per node. Selected via CONSENSUS_ENGINE=ratis.
+     */
+    private ConsensusEngine buildRatisEngine(
+            LedgerStateMachine ledgerStateMachine, NodeRole nodeRole, MeterRegistry meterRegistry,
+            String groupId, String nodeId, String peers, String raftPath, int raftPort) {
+        RatisLedgerStateMachine fsm = new RatisLedgerStateMachine(ledgerStateMachine, nodeRole);
+
+        StringBuilder ratisPeers = new StringBuilder();
+        for (String p : peers.split(",")) {
+            String host = p.split(":")[0].trim();
+            if (ratisPeers.length() > 0) ratisPeers.append(",");
+            ratisPeers.append(host).append(":").append(host).append(":").append(raftPort);
+        }
+
+        String ratisDataPath = raftPath + File.separator + "ratis";
+        new File(ratisDataPath).mkdirs();
+        RatisNodeManager mgr = new RatisNodeManager(
+                groupId, nodeId, ratisPeers.toString(), ratisDataPath, raftPort, fsm);
+        mgr.init();
+
+        Gauge.builder("ledger.raft.is_leader", () -> mgr.isLeader() ? 1.0 : 0.0)
+                .description("Raft leader status: 1 = leader, 0 = follower")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
+        Gauge.builder("ledger.raft.last_applied_index", mgr::getLastAppliedIndex)
+                .description("Raft last applied index (monotonic, per node)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
+
+        log.info("Ratis node started: {} peers={} engine=ratis", nodeId, ratisPeers);
+        return mgr;
+    }
+
     @Bean(destroyMethod = "close")
     public AccountQueueManager accountQueueManager(
-            @org.springframework.beans.factory.annotation.Autowired(required = false) RaftNodeManager raftNodeManager,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
                                                    MeterRegistry meterRegistry) {
         if (raftNodeManager == null) {
             log.info("AccountQueueManager not created — standalone mode");

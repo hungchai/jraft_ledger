@@ -6,7 +6,7 @@ import com.tomma8.ledger.domain.command.AccountCreateCommand.BalanceInitializati
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.model.*;
 import com.tomma8.ledger.raft.NodeRole;
-import com.tomma8.ledger.raft.RaftNodeManager;
+import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.service.AccountService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -21,11 +21,11 @@ import java.util.Map;
 public class AccountController {
 
     private final AccountService accountService;
-    private final RaftNodeManager raftNodeManager;
+    private final ConsensusEngine raftNodeManager;
     private final NodeRole nodeRole;
 
     public AccountController(AccountService accountService,
-                              @Autowired(required = false) RaftNodeManager raftNodeManager,
+                              @Autowired(required = false) ConsensusEngine raftNodeManager,
                               NodeRole nodeRole) {
         this.accountService = accountService;
         this.raftNodeManager = raftNodeManager;

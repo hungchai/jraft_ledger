@@ -18,7 +18,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-public class RaftNodeManager implements AutoCloseable {
+public class RaftNodeManager implements ConsensusEngine {
 
     private static final Logger log = LoggerFactory.getLogger(RaftNodeManager.class);
 
@@ -138,6 +138,28 @@ public class RaftNodeManager implements AutoCloseable {
     public LedgerRaftStateMachine getStateMachine() { return stateMachine; }
     public PeerId getServerId() { return serverId; }
     public boolean isLeader() { return node != null && node.isLeader(); }
+
+    // ── ConsensusEngine ────────────────────────────────────────
+    @Override
+    public long getLastAppliedIndex() { return stateMachine.getLastAppliedIndex(); }
+
+    @Override
+    public com.tomma8.ledger.statemachine.LedgerStateMachine getLedgerStateMachine() {
+        return stateMachine.getLedgerStateMachine();
+    }
+
+    @Override
+    public boolean isRunning() { return node != null; }
+
+    @Override
+    public java.util.List<String> getAlivePeers() {
+        if (node == null) return java.util.List.of();
+        try {
+            return node.listAlivePeers().stream().map(PeerId::toString).toList();
+        } catch (Exception e) {
+            return java.util.List.of();
+        }
+    }
 
     public String getLeaderEndpoint() {
         if (node == null) return "unknown";

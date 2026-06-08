@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.15  
-**日期**: 2026-06-04  
+**版本**: v0.16  
+**日期**: 2026-06-08  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -38,6 +38,7 @@
 | v0.11 | 2026-05-31 | 文件一致性修復：統一錯誤碼（INSUFFICIENT_BALANCE / CREDIT_EXCEEDS_LIMIT / POSITION_BALANCE_FLOOR_BREACH）、AccountBalanceKey 三維鍵 v0.7 修正、F-002/F-004 失敗 Response 升級為 v0.9 `errorCodes[]` + `errorDetails`、F-010 補充 freeze/unfreeze/close 冪等鍵、NFR-1 Posting P95 修正為 ≤3ms、docs 更新 snapshot/WriteBatch/balance query 一致性說明 | Ledger Platform Team |
 | v0.9 | 2026-05-30 | F-002/F-004/F-008/F-010: 強化錯誤回應 — REJECTED 狀態的 CommandResult 新增 `errorDetails` Map，提供觸發錯誤的實體上下文（如 `accountId`、`journalId`、`balanceType`、`currency`）。`errorCodes` 字串陣列保留以維持向後相容。更新 §7.2 Response 結構與 TDD-TEST-CASES.md | Ledger Platform Team |
 | v0.8 | 2026-05-25 | F-012 Projection MySQL View Layer v2：重構 MySQL schema 加入 surrogate BIGINT FK（{table}_id → {table}.id）+ denormalized 業務鍵（{table}_{column}）；移除所有 FOREIGN KEY constraints（效能，integrity 由 RocksDB State Machine 保證）；新增 projection_event_log 表（idempotency guard，UK on account_id+balanceType+currency+accountSeq）；account_balance.upsertBalance 加入 accountSeq guard（IF incoming >= stored）；JournalMapper/AccountBalanceMapper/AccountMapper API 重構以匹配新 schema；所有表欄位補齊 COMMENT 註釋 | Ledger Platform Team |
+| v0.16 | 2026-06-08 | 新增 ADR-003 Pluggable Consensus Engine：抽出 `ConsensusEngine` 介面，SOFAJRaft（預設）與 Apache Ratis 3.1.0（POC，新模組 `ledger-raft-ratis`）並存，由 `CONSENSUS_ENGINE` 切換；共用 engine-agnostic `LedgerStateMachine`。TDD 新增 Module 15.1（TC-RAFT-RATIS-01~04）與 TC-NFR-OOM-01（OOM 災難復原：0 已提交遺失 + 乾淨復原）。新增 bench/OOM harness 與 `docs/RAFT-COMPARISON-2026-06-08.md` | Ledger Platform Team |
 
 ---
 
@@ -47,6 +48,7 @@
 |---|---|---|
 | Core Concepts | 核心概念 | Account、BalanceType、Position 定義與關係 |
 | ADR-001 | 架構決策 | Raft + CQRS + Account-Level Queue 選型理由 |
+| ADR-003 | 架構決策 | Pluggable Consensus Engine：SOFAJRaft（預設）\| Apache Ratis（POC） |
 | F-001 | Balance Type Registry | Balance Type 配置化管理，不改代碼新增 type |
 | F-002 | Posting API v2 | 核心入帳 API，支持 Multi-Account 原子 Posting |
 | F-003 | Manual Adjustment | 人工調帳，強制 Maker-Checker 審批 |

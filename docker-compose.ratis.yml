@@ -1,0 +1,17 @@
+# Override that switches the consensus engine from SOFAJRaft (default) to Apache Ratis.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ratis.yml up -d ledger1 ledger2 ledger3
+#
+# Each node reads CONSENSUS_ENGINE=ratis (see LedgerConfig.buildRatisEngine). The Ratis gRPC
+# server reuses RAFT_SERVER_PORT (28080) — only one engine runs per process, so no conflict.
+# Peer ids default to the docker hostname (== NODE_ID), so PEER_NODES is unchanged.
+services:
+  ledger1:
+    environment:
+      CONSENSUS_ENGINE: ratis
+  ledger2:
+    environment:
+      CONSENSUS_ENGINE: ratis
+  ledger3:
+    environment:
+      CONSENSUS_ENGINE: ratis
