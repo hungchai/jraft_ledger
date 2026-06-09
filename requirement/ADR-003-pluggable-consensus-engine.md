@@ -63,8 +63,8 @@ lets us benchmark apples-to-apples before any migration decision.
 
 - **Functional (no docker)**: `RatisEngineIntegrationTest` (TC-RAFT-RATIS-01/02) — posting commits
   through the Ratis log and mutates balance; duplicate `requestId` is idempotent. Passing.
-- **Throughput / failover / GC / snapshot model**: `loadtest/scripts/run-engine-compare.sh` →
-  `docs/RAFT-COMPARISON-2026-06-08.md`.
+- **Throughput / correctness**: `scripts/test-cycle.sh` per engine (jraft default; ratis via
+  `COMPOSE_FILES="-f docker-compose.yml -f docker-compose.ratis.yml"`) → `docs/RAFT-COMPARISON-2026-06-08.md`.
 - **OOM DR (pass bar: 0 committed-write loss + clean recovery + no cross-node divergence)**:
   `scripts/oom-dr-test.sh` with `docker-compose.oom.yml`, run per engine.
 

@@ -13,10 +13,12 @@ behind the same `ConsensusEngine` interface, sharing the identical engine-agnost
 # Build image once
 docker compose --profile build build ledger-base
 
-# Throughput / P95 / GC, both engines, side-by-side (appends results table below):
-loadtest/scripts/run-engine-compare.sh
+# Throughput / P95 + full cross-node & MySQL reconciliation, per engine (same conditions):
+./scripts/test-cycle.sh --vus 10 --duration 2m                          # SOFAJRaft (default)
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.ratis.yml" \
+  ./scripts/test-cycle.sh --vus 10 --duration 2m                        # Apache Ratis
 
-# OOM disaster-recovery, per engine:
+# OOM disaster-recovery, per engine (harness ready, not yet run):
 ENGINE=jraft scripts/oom-dr-test.sh
 ENGINE=ratis scripts/oom-dr-test.sh
 ```
@@ -52,10 +54,7 @@ through the Ratis log mutates the balance, and a duplicate `requestId` is idempo
   Expect higher *base* per-command latency for Ratis; at the system level (network + quorum
   dominated) the gap should shrink. Reported both ways below.
 
-## 2. Throughput + latency (live)
-
-> Requires a running docker daemon. Not executed in this environment (daemon down at authoring
-> time). Run `loadtest/scripts/run-engine-compare.sh`; it appends the filled table here.
+## 2. Throughput + latency
 
 **Run 2026-06-09** — `scripts/test-cycle.sh --vus 10 --duration 2m`, **same conditions for both
 engines** (same v3 image, same flush + 3-node stack + k6 `k6-posting-stress.js` + recon).
