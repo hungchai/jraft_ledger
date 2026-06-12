@@ -58,7 +58,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket{balanceType=~\"$balanceType\"}[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m])) * 1000",
           "legendFormat": "P95 (ms)",
           "refId": "A"
         }
@@ -104,7 +104,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(ledger_posting_duration_seconds_bucket{balanceType=~\"$balanceType\"}[5m])) * 1000",
+          "expr": "histogram_quantile(0.50, rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m])) * 1000",
           "legendFormat": "P50 (ms)",
           "refId": "A"
         }
@@ -241,7 +241,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "sum(rate(ledger_posting_rejected_count[5m]))",
+          "expr": "sum(rate(ledger_posting_rejected_count_total[5m]))",
           "legendFormat": "Rejections/min",
           "refId": "A"
         }
@@ -475,16 +475,16 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_reversal_duration_seconds_bucket[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, rate(ledger_raft_total_seconds_bucket{node_id=~\"$node\"}[5m])) * 1000",
           "legendFormat": "P95 (ms)",
           "refId": "A"
         }
       ],
-      "title": "Reversal Duration P95",
+      "title": "Raft Total Latency P95",
       "type": "gauge"
     },
     {
-      "description": "Manual adjustment (draft+approve) P95 latency. Includes maker-checker validation step. Yellow: 5-15ms. Red: > 15ms.",
+      "description": "Apply (state machine) P95 latency — includes deserialize + persist + RocksDB write. Yellow: 5-15ms. Red: > 15ms.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -520,12 +520,12 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_adjustment_duration_seconds_bucket[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, rate(ledger_apply_total_seconds_bucket[5m])) * 1000",
           "legendFormat": "P95 (ms)",
           "refId": "A"
         }
       ],
-      "title": "Adjustment Duration P95",
+      "title": "Apply (State Machine) Duration P95",
       "type": "gauge"
     },
     {
@@ -607,7 +607,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "sum(rate(ledger_posting_duration_seconds_count{balanceType=~\"$balanceType\"}[1m]))",
+          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))",
           "legendFormat": "Total TPS",
           "refId": "A"
         }
@@ -650,7 +650,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "sum(rate(ledger_posting_rejected_count[1m])) by (errorCode)",
+          "expr": "sum(rate(ledger_posting_rejected_count_total[1m])) by (errorCode)",
           "legendFormat": "{{errorCode}}",
           "refId": "A"
         }
@@ -698,8 +698,8 @@
           "refId": "A"
         },
         {
-          "expr": "rate(ledger_outbox_published[1m])",
-          "legendFormat": "Publish rate",
+          "expr": "ledger_outbox_published",
+          "legendFormat": "Published (cumulative)",
           "refId": "B"
         }
       ],
@@ -794,13 +794,13 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "jvm_memory_used_bytes{area=\"heap\",node_id=~\"$node\"}",
-          "legendFormat": "{{node_id}} - Used",
+          "expr": "jvm_memory_used_bytes{area=\"heap\"}",
+          "legendFormat": "{{instance}} - Used",
           "refId": "A"
         },
         {
-          "expr": "jvm_memory_max_bytes{area=\"heap\",node_id=~\"$node\"}",
-          "legendFormat": "{{node_id}} - Max",
+          "expr": "jvm_memory_max_bytes{area=\"heap\"}",
+          "legendFormat": "{{instance}} - Max",
           "refId": "B"
         }
       ],
@@ -836,12 +836,12 @@
           "value": "$__all"
         },
         "datasource": "Prometheus",
-        "definition": "label_values(ledger_posting_duration_seconds_count, balanceType)",
+        "definition": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
         "includeAll": true,
         "multi": true,
-        "name": "balanceType",
+        "name": "businessEventType",
         "options": [],
-        "query": "label_values(ledger_posting_duration_seconds_count, balanceType)",
+        "query": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
         "refresh": 1,
         "sort": 1,
         "type": "query"
@@ -856,5 +856,5 @@
   "timezone": "browser",
   "title": "Ledger Platform Overview",
   "uid": "ledger-overview",
-  "version": 1
+  "version": 2
 }
