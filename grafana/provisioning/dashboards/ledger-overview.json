@@ -58,8 +58,8 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m])) * 1000",
-          "legendFormat": "P95 (ms)",
+          "expr": "histogram_quantile(0.95, sum by (le, businessEventType) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000",
+          "legendFormat": "{{businessEventType}}",
           "refId": "A"
         }
       ],
@@ -104,8 +104,8 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m])) * 1000",
-          "legendFormat": "P50 (ms)",
+          "expr": "histogram_quantile(0.50, sum by (le, businessEventType) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000",
+          "legendFormat": "{{businessEventType}}",
           "refId": "A"
         }
       ],
@@ -149,7 +149,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_account_queue_active",
+          "expr": "sum(ledger_account_queue_active)",
           "legendFormat": "Active",
           "refId": "A"
         }
@@ -286,7 +286,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"live\"}[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_balance_query_duration_seconds_bucket{queryType=\"live\"}[5m]))) * 1000",
           "legendFormat": "P95 Live (ms)",
           "refId": "A"
         }
@@ -331,7 +331,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_balance_query_duration_seconds_bucket{queryType=\"asof\"}[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_balance_query_duration_seconds_bucket{queryType=\"asof\"}[5m]))) * 1000",
           "legendFormat": "P95 As-of (ms)",
           "refId": "A"
         }
@@ -475,7 +475,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_raft_total_seconds_bucket{node_id=~\"$node\"}[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_raft_total_seconds_bucket[5m]))) * 1000",
           "legendFormat": "P95 (ms)",
           "refId": "A"
         }
@@ -520,7 +520,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(ledger_apply_total_seconds_bucket[5m])) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_apply_total_seconds_bucket[5m]))) * 1000",
           "legendFormat": "P95 (ms)",
           "refId": "A"
         }
@@ -564,7 +564,7 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_outbox_pending",
+          "expr": "sum(ledger_outbox_pending)",
           "legendFormat": "Pending",
           "refId": "A"
         }
@@ -693,12 +693,12 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_outbox_pending",
+          "expr": "sum(ledger_outbox_pending)",
           "legendFormat": "Pending",
           "refId": "A"
         },
         {
-          "expr": "ledger_outbox_published",
+          "expr": "sum(ledger_outbox_published)",
           "legendFormat": "Published (cumulative)",
           "refId": "B"
         }
