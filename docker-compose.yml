@@ -261,6 +261,20 @@ services:
       KAFKA_CONSUMER_CONCURRENCY: 4
       SNOWFLAKE_WORKER_ID: 9
       LEDGER_PROJECTION_BALANCE_WORKERS: 2
+      JAVA_OPTS: >-
+        -Xms2g
+        -Xmx2g
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=50
+        -XX:+ExitOnOutOfMemoryError
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/projection/
+        -XX:ErrorFile=/var/lib/projection/hs_err_pid_%p.log
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
+    volumes:
+      - ./jraft_ledger/projection:/var/lib/projection
     depends_on:
       mysql:
         condition: service_healthy
