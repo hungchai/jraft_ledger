@@ -32,8 +32,6 @@ logging:
 
 ledger:
   projection:
-    balance:
-      workers: 2
     journal:
       flush-interval-ms: 50
       max-buffer: 4000
