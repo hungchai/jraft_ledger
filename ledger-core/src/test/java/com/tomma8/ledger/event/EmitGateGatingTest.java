@@ -98,7 +98,7 @@ class EmitGateGatingTest {
     }
 
     @Test
-    @DisplayName("TC-EMIT-02 gate open: applyPosting DOES call eventListener")
+    @DisplayName("TC-EMIT-02 gate open: applyPosting fires onPosting envelope (not per-event)")
     void gateOpen_applyPosting_emits() {
         emitGate.setEnabled(true);
 
@@ -111,7 +111,9 @@ class EmitGateGatingTest {
 
         stateMachine.applyPosting(cmd);
 
-        assertThat(listener.balanceEvents.get()).isEqualTo(1);
+        // v0.3 envelope: 1 envelope call, NOT 1 per-event call
+        assertThat(listener.envelopes.get()).isEqualTo(1);
+        assertThat(listener.balanceEvents.get()).isZero();
     }
 
     @Test
@@ -143,9 +145,9 @@ class EmitGateGatingTest {
     @Test
     @DisplayName("TC-EMIT-05 gate closed: AsyncOutboxPublisher.scanAndPublish is a no-op")
     void gateClosed_outboxPublisher_skipsScan() throws Exception {
-        // Seed outbox so there's something to publish if gate were open
-        BalanceChangeEvent event = new BalanceChangeEvent(
-                "evt-gate-001", "BALANCE_CHANGE", "1.2", Instant.now(),
+        // Seed CF_OUTBOX with a journal envelope so there's something to publish if gate were open
+        BalanceChangeEvent ev1 = new BalanceChangeEvent(
+                "evt-gate-001-a", "BALANCE_CHANGE", "1.2", Instant.now(),
                 "req-gate-001", "POSTING", "JNL-0001", "JL-01",
                 "req-gate-001", "BEV-001", null,
                 "CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", "USD",
@@ -155,9 +157,14 @@ class EmitGateGatingTest {
                 1L, 1L, 2L, 1L,
                 LocalDate.now(), LocalDate.now(),
                 Map.of("sourceSystem", "LEDGER"));
-        outboxStore.enqueue(event);
-        outboxStore.flush();
-        assertThat(outboxStore.readPending(10)).hasSize(1);
+        com.tomma8.ledger.domain.event.JournalEventEnvelope env =
+                new com.tomma8.ledger.domain.event.JournalEventEnvelope(
+                        com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
+                        "JNL-0001", List.of(ev1));
+        com.fasterxml.jackson.databind.ObjectMapper m = new com.fasterxml.jackson.databind.ObjectMapper()
+                .findAndRegisterModules();
+        outboxStore.enqueueJournal("JNL-0001", m.writeValueAsBytes(env));
+        assertThat(outboxStore.readPendingJournals(10)).hasSize(1);
 
         CountingKafkaPublisher kafkaPublisher = new CountingKafkaPublisher();
         AsyncOutboxPublisher asyncPublisher = new AsyncOutboxPublisher(
@@ -168,18 +175,18 @@ class EmitGateGatingTest {
         scanMethod.setAccessible(true);
         scanMethod.invoke(asyncPublisher);
 
-        assertThat(kafkaPublisher.calls.get())
+        assertThat(kafkaPublisher.onPostingCalls.get())
                 .as("publisher must not be called while gate is closed")
                 .isZero();
 
         // Outbox entry should still be there (publisher never ran)
-        assertThat(outboxStore.readPending(10)).hasSize(1);
+        assertThat(outboxStore.readPendingJournals(10)).hasSize(1);
 
         // Flip gate open → next scan publishes
         emitGate.setEnabled(true);
         scanMethod.invoke(asyncPublisher);
 
-        assertThat(kafkaPublisher.calls.get())
+        assertThat(kafkaPublisher.onPostingCalls.get())
                 .as("publisher must be called after gate is opened")
                 .isEqualTo(1);
 
@@ -225,9 +232,9 @@ class EmitGateGatingTest {
         );
         stateMachine.applyPosting(cmd);
 
-        assertThat(listener.balanceEvents.get()).isEqualTo(1);
-        assertThat(outboxStore.readPending(100))
-                .as("leader (gate open) MUST write to CF_OUTBOX for at-least-once delivery")
+        assertThat(listener.envelopes.get()).isEqualTo(1);
+        assertThat(outboxStore.readPendingJournals(100))
+                .as("leader (gate open) MUST write 1 envelope per journal to CF_OUTBOX")
                 .hasSize(1);
     }
 
@@ -236,13 +243,21 @@ class EmitGateGatingTest {
     static class CountingListener implements LedgerEventListener {
         final AtomicInteger balanceEvents = new AtomicInteger(0);
         final AtomicInteger accountEvents = new AtomicInteger(0);
+        final AtomicInteger envelopes = new AtomicInteger(0);
         final List<BalanceChangeEvent> balanceSeen = new ArrayList<>();
         final List<AccountCreatedEvent> accountSeen = new ArrayList<>();
+        final List<com.tomma8.ledger.domain.event.JournalEventEnvelope> envelopeSeen = new ArrayList<>();
 
         @Override
         public void onEvent(BalanceChangeEvent event) {
             balanceEvents.incrementAndGet();
             balanceSeen.add(event);
+        }
+
+        @Override
+        public void onPosting(com.tomma8.ledger.domain.event.JournalEventEnvelope envelope) {
+            envelopes.incrementAndGet();
+            envelopeSeen.add(envelope);
         }
 
         @Override
@@ -254,8 +269,11 @@ class EmitGateGatingTest {
 
     static class CountingKafkaPublisher extends KafkaEventPublisher {
         final AtomicInteger calls = new AtomicInteger(0);
+        final AtomicInteger onPostingCalls = new AtomicInteger(0);
         CountingKafkaPublisher() { super("localhost:9999", "fake-topic"); }
         @Override
         public void onEvent(BalanceChangeEvent event) { calls.incrementAndGet(); }
+        @Override
+        public void onPosting(com.tomma8.ledger.domain.event.JournalEventEnvelope envelope) { onPostingCalls.incrementAndGet(); }
     }
 }

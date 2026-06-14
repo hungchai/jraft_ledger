@@ -1,11 +1,13 @@
 # F-011 Balance Change Event — Kafka Output
 
-**文件版本**: v0.2
+**文件版本**: v0.3
 **功能**: F-011 Balance Change Event（餘額變動 Kafka 事件）
 **系統**: Next-Gen Internal Ledger Platform
 **狀態**: Draft for Review
 **依賴**: ADR-001、F-008 State Machine、F-002 Posting、F-003 Manual Adjustment、F-004 Reversal
 
+> **v0.3 變更摘要**：Kafka 發送模型由「一筆 BalanceChangeEvent 一個 record」改為「一筆 Journal 一個 envelope record」。新增 `JournalEventEnvelope` 包裝類（type / journalId / events），將同一 Journal 的所有 BalanceChangeEvent 綑綁發送；Kafka 流量降為原 1/N（N = 平均每筆 Journal 的 JournalLine 數）。Producer 端由 `LedgerStateMachine.applyPosting` / `applyReversal` 收集 events 後呼叫 `eventListener.onPosting(envelope)`；Consumer 端（`ProjectionConsumer`）透過 `type` 判別 envelope 與否（向後相容單一事件 record）。新增章節 11 與 AC-15 / AC-16。
+>
 > **v0.2 變更摘要**：Event schema 新增 `accountSeq` / `prevAccountSeq` 欄位（eventVersion 升至 1.1），補充 5.4 帳務時序欄位說明，新增 AC-12 / AC-13 / AC-14。
 
 ---
@@ -259,7 +261,138 @@ Kafka 發出 **2 個獨立事件**（假設各自上一條 seq 為 41 和 99）�
 
 ---
 
-## 8. Schema Evolution 策略
+## 8. Envelope 發送（v0.3 新增）
+
+### 8.1 設計動機
+
+v0.2 模型下，一筆 N-line Journal 會發出 N 個 Kafka record（N 通常 = 2 ~ 8）。在高吞吐量場景中，這造成 Kafka 流量、partition 元數據與 consumer 端 batch 開銷都隨 line 數線性放大。v0.3 改為**一筆 Journal 一個 envelope record**，所有 BalanceChangeEvent 透過 envelope 內的 `events` 陣列一次投遞。
+
+| 指標 | v0.2（per-line） | v0.3（envelope） | 改善 |
+|---|---|---|---|
+| 4-line Posting 對應 record 數 | 4 | 1 | 4× ↓ |
+| Producer 端序列化開銷 | 4× record metadata | 1× record + N events | 降低 |
+| Consumer 端 batch 效率 | 每 record 1 parse | 每 record 1 envelope parse → N events | 提高 |
+| Per-journal 原子語義 | 跨多 record，無強保證 | 1 record 即一筆 Journal | 強化 |
+
+### 8.2 Envelope Schema
+
+```json
+{
+  "type": "JOURNAL",
+  "journalId": "JNL-01JWXYZ000000001",
+  "events": [
+    { "eventId": "evt-...", "eventType": "BALANCE_CHANGE", ... },
+    { "eventId": "evt-...", "eventType": "BALANCE_CHANGE", ... },
+    { "eventId": "evt-...", "eventType": "BALANCE_CHANGE", ... },
+    { "eventId": "evt-...", "eventType": "BALANCE_CHANGE", ... }
+  ]
+}
+```
+
+| 欄位 | 類型 | 必填 | 說明 |
+|---|---|---|---|
+| `type` | `string` | ✅ | 事件類型判別子；當前固定值 `"JOURNAL"`（由 `JournalEventEnvelope.TYPE` 常數定義）；保留給未來其他 envelope 類型（如 `SNAPSHOT`、`CORRECTION`）擴展用 |
+| `journalId` | `string` | ✅ | 對應的 Journal ID；envelope 內所有 events 共享同一 journalId |
+| `events` | `array<BalanceChangeEvent>` | ✅ | 同一 Journal 的所有 BalanceChangeEvent 列表；`events.length >= 1`；欄位 schema 沿用 §4 |
+
+**Type class**：`com.tomma8.ledger.domain.event.JournalEventEnvelope`（record，`type` / `journalId` / `events` 三欄位；`TYPE` 常數為 `"JOURNAL"`）。
+
+### 8.3 內層 BalanceChangeEvent
+
+`events[]` 內每個元素的 schema 與 §4 / §5 完全一致（eventVersion `"1.1"`，含 `accountSeq` / `prevAccountSeq`）。`journalId` / `journalLineId` / `commandType` / `requestId` 等欄位在每個 event 上仍獨立攜帶，便於下游針對單一 line 處理。
+
+### 8.4 發送與消費
+
+```
+Producer（State Machine）
+    │
+    │  applyPosting / applyReversal
+    │   ├─ 對每條 JournalLine 構建 BalanceChangeEvent
+    │   └─ 收集到 List<BalanceChangeEvent> events
+    ▼
+JournalEventEnvelope{ type="JOURNAL", journalId, events }
+    │
+    │  eventListener.onPosting(envelope)
+    ▼
+Kafka Record（partition key = accountId:balanceType:currency，value = envelope JSON）
+    │
+    ▼
+Consumer（ProjectionConsumer）
+    │
+    │  解析 JSON
+    ├─ 若 root.type == "JOURNAL" → envelope 走法：process 每個 event
+    └─ 否則視為 legacy 單一 BalanceChangeEvent（向後相容）
+    ▼
+    MySQL 投影（idempotent insert）
+```
+
+關鍵設計：
+
+1. **Producer 端**：`LedgerStateMachine.applyPosting` 與 `applyReversal` 在收集完所有 events 後，呼叫 `eventListener.onPosting(envelope)`，**不再逐 line 呼叫 `onBalanceChange(event)`**。
+2. **Consumer 端**：`ProjectionConsumer` 透過 envelope 頂層 `type` 欄位判別：
+   - `type == "JOURNAL"` → 解析為 envelope，迭代 `events[]` 處理
+   - 無 `type` 欄位或 `type` 缺失 → 視為 legacy 單一 `BalanceChangeEvent`（向後相容於 v0.2 部署）
+3. **Partition key 不變**：仍以 `accountId:balanceType:currency` 為 partition key；同一 Journal 的多 events 屬於不同 Key 會落在不同 partition，但這在 v0.2 也是如此，envelope 不改變此語義。
+4. **冪等性不變**：每個 event 仍攜帶唯一 `eventId` 與 `idempotencyKey`；Consumer 端去重邏輯保持現狀。
+5. **Outbox 行為不變**：CF_OUTBOX 仍以 `eventId` 為 key 儲存 envelope 序列化物；`KafkaEventPublisher` 的 callback 機制（callback-driven deletion）沿用。
+
+### 8.5 4-line Posting 發送示例
+
+對應 §7 的 4-line Posting（CLIENT DEBIT 800 + COMPANY CREDIT 800）：
+
+```json
+{
+  "type": "JOURNAL",
+  "journalId": "JNL-01JWXYZ000000001",
+  "events": [
+    {
+      "eventId": "evt-01JWXYZ000000001-01",
+      "eventType": "BALANCE_CHANGE",
+      "eventVersion": "1.1",
+      "accountId": "CLIENT_ACC_001",
+      "balanceType": "AVAILABLE_BALANCE",
+      "currency": "USD",
+      "entryType": "DEBIT",
+      "amount": "800.00",
+      "preBalance": "1000.00",
+      "postBalance": "200.00",
+      "balanceDelta": "-800.00",
+      "accountSeq": 42,
+      "prevAccountSeq": 41,
+      "idempotencyKey": "req-001:CLIENT_ACC_001:AVAILABLE_BALANCE:USD"
+    },
+    {
+      "eventId": "evt-01JWXYZ000000001-02",
+      "eventType": "BALANCE_CHANGE",
+      "eventVersion": "1.1",
+      "accountId": "COMPANY_FX_ACC",
+      "balanceType": "AVAILABLE_BALANCE",
+      "currency": "USD",
+      "entryType": "CREDIT",
+      "amount": "800.00",
+      "preBalance": "5000.00",
+      "postBalance": "5800.00",
+      "balanceDelta": "800.00",
+      "accountSeq": 100,
+      "prevAccountSeq": 99,
+      "idempotencyKey": "req-001:COMPANY_FX_ACC:AVAILABLE_BALANCE:USD"
+    }
+  ]
+}
+```
+
+> 注意：`accountSeq` / `prevAccountSeq` 由 State Machine 在 apply 時按 `(accountId, balanceType, currency)` 維度獨立遞增；envelope 只是把多個已確定 seq 的 events 包成同一 record。
+
+### 8.6 向後相容性
+
+- **Producer → Consumer（同 v0.3 部署）**：envelope ↔ envelope，無問題。
+- **Producer v0.2 → Consumer v0.3**：Consumer 收到 legacy 單一 event record（無 `type` 欄位），按 fallback 路徑處理，不破壞。
+- **Producer v0.3 → Consumer v0.2**：Consumer 不認得 envelope 結構，會將整個 envelope JSON 視為單一 `BalanceChangeEvent`，下游處理失敗 → 視為不支援的升級組合，**不可作為長期運行配置**，升級時須 Consumer 先升。
+- **Type discriminator 預留**：未來新增 envelope 類型（如 `SNAPSHOT_BUNDLE`）時，僅需在 `JournalEventEnvelope` / `EnvelopeType` enum 擴充，Consumer 依 `type` 路由即可，無 breaking change。
+
+---
+
+## 9. Schema Evolution 策略
 
 - `eventVersion` 採用語意版本（`1.0`、`1.1`、`2.0`）
 - **v0.2 本次變更**：`1.0` → `1.1`（backward compatible minor change）
