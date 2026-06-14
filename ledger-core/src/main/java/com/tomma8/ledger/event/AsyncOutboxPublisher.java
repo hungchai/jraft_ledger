@@ -28,6 +28,7 @@ public class AsyncOutboxPublisher implements AutoCloseable {
 
     private final OutboxStore outboxStore;
     private final KafkaEventPublisher kafkaPublisher;
+    private final EmitGate emitGate;
     private final ScheduledExecutorService scheduler;
     private final Duration pollInterval;
     private final int batchSize;
@@ -51,8 +52,17 @@ public class AsyncOutboxPublisher implements AutoCloseable {
                                 KafkaEventPublisher kafkaPublisher,
                                 Duration pollInterval,
                                 int batchSize) {
+        this(outboxStore, kafkaPublisher, new EmitGate(), pollInterval, batchSize);
+    }
+
+    public AsyncOutboxPublisher(OutboxStore outboxStore,
+                                KafkaEventPublisher kafkaPublisher,
+                                EmitGate emitGate,
+                                Duration pollInterval,
+                                int batchSize) {
         this.outboxStore = outboxStore;
         this.kafkaPublisher = kafkaPublisher;
+        this.emitGate = emitGate;
         this.pollInterval = pollInterval;
         this.batchSize = batchSize;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -70,6 +80,7 @@ public class AsyncOutboxPublisher implements AutoCloseable {
 
     private void scanAndPublish() {
         if (!running) return;
+        if (!emitGate.isEnabled()) return;
         long start = System.currentTimeMillis();
         try {
             List<BalanceChangeEvent> events = outboxStore.readPending(batchSize);

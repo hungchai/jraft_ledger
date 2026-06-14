@@ -54,6 +54,8 @@ class QueueAndOutboxIntegrationTest {
 
         // Wire event listener to capture events (simulating outbox)
         stateMachine.setEventListener(outboxEvents::add);
+        // EmitGate is closed by default; tests opt in to capture events.
+        stateMachine.getEmitGate().setEnabled(true);
 
         queueManager = new AccountQueueManager(cmd -> {
             if (cmd instanceof PostingCommand p) {

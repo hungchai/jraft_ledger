@@ -151,6 +151,8 @@ class OutboxCallbackTest {
         stateMachine.setEventListener(publisher);
         stateMachine.setOutboxStore(outboxStore);
         stateMachine.setPersistAfterApply(false);
+        // EmitGate is closed by default; tests opt in.
+        stateMachine.getEmitGate().setEnabled(true);
 
         PostingCommand cmd = new PostingCommand(
                 "hotpath-cb-001", "TEST", "HOTPATH-CB-001", LocalDate.now(),

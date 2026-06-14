@@ -5,6 +5,7 @@ import com.tomma8.ledger.domain.model.BalanceTypeConfig;
 import com.tomma8.ledger.domain.model.NegativeSemantics;
 import com.tomma8.ledger.domain.model.SignConvention;
 import com.tomma8.ledger.event.AsyncOutboxPublisher;
+import com.tomma8.ledger.event.EmitGate;
 import com.tomma8.ledger.event.KafkaEventPublisher;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.raft.LedgerRaftStateMachine;
@@ -29,6 +30,9 @@ import java.io.File;
 import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
@@ -125,12 +129,13 @@ public class LedgerConfig {
     @Profile("!test")
     public AsyncOutboxPublisher asyncOutboxPublisher(OutboxStore outboxStore,
                                                       KafkaEventPublisher kafkaPublisher,
+                                                      LedgerStateMachine ledgerStateMachine,
                                                       MeterRegistry meterRegistry,
                                                       ConfigService cs) {
         Duration pollInterval = Duration.ofSeconds(cs.getInt("OUTBOX_POLL_INTERVAL_SECS", 10));
         int batchSize = cs.getInt("OUTBOX_BATCH_SIZE", 100);
         AsyncOutboxPublisher publisher = new AsyncOutboxPublisher(
-                outboxStore, kafkaPublisher, pollInterval, batchSize);
+                outboxStore, kafkaPublisher, ledgerStateMachine.getEmitGate(), pollInterval, batchSize);
 
         // Register Micrometer gauges
         Gauge.builder("ledger.outbox.pending", outboxStore::pendingCount)
@@ -151,6 +156,65 @@ public class LedgerConfig {
 
         log.info("AsyncOutboxPublisher wired with pollInterval={} batchSize={}", pollInterval, batchSize);
         return publisher;
+    }
+
+    /**
+     * Watcher: polls nodeRole.isLeader() and flips LedgerStateMachine's EmitGate.
+     * Gate is owned by the state machine (so test path stays unchanged); this watcher
+     * just toggles it. Closed by default; opened the moment this node becomes leader.
+     */
+    @Bean(destroyMethod = "shutdown")
+    public EmitGateWatcher emitGateWatcher(LedgerStateMachine ledgerStateMachine, NodeRole nodeRole) {
+        return new EmitGateWatcher(ledgerStateMachine.getEmitGate(), nodeRole);
+    }
+
+    public static class EmitGateWatcher implements AutoCloseable {
+        private final EmitGate emitGate;
+        private final NodeRole nodeRole;
+        private final ScheduledExecutorService scheduler;
+        private volatile boolean running = true;
+
+        public EmitGateWatcher(EmitGate emitGate, NodeRole nodeRole) {
+            this.emitGate = emitGate;
+            this.nodeRole = nodeRole;
+            this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "emit-gate-watcher");
+                t.setDaemon(true);
+                return t;
+            });
+            scheduler.scheduleWithFixedDelay(this::tick, 1, 1, TimeUnit.SECONDS);
+            log.info("EmitGateWatcher started");
+        }
+
+        private void tick() {
+            if (!running) return;
+            try {
+                boolean shouldEmit = nodeRole.isLeader();
+                if (emitGate.isEnabled() != shouldEmit) {
+                    emitGate.setEnabled(shouldEmit);
+                    log.info("EmitGate flipped: enabled={} (role={})",
+                            shouldEmit, shouldEmit ? "LEADER" : "FOLLOWER");
+                }
+            } catch (Exception e) {
+                log.warn("EmitGateWatcher tick failed", e);
+            }
+        }
+
+        public void shutdown() {
+            running = false;
+            scheduler.shutdown();
+            try {
+                if (!scheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                    scheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                scheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        @Override
+        public void close() { shutdown(); }
     }
 
     @Bean
