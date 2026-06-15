@@ -55,12 +55,33 @@ public class LedgerConfig {
                 @Override
                 public DistributionStatisticConfig configure(io.micrometer.core.instrument.Meter.Id id, DistributionStatisticConfig config) {
                     if (id.getName().startsWith("ledger.")) {
+                        // Timer base unit is NANOSECONDS (not seconds). The
+                        // SLO doubles are in seconds (the Prometheus
+                        // convention). Without explicit boundaries the
+                        // default exponential buckets (1ns..10ns range)
+                        // sit far below posting latencies (1–15 ms) and
+                        // every sample collapses into the +Inf bucket,
+                        // producing a meaningless p95 of "0.01 ms".
                         return DistributionStatisticConfig.builder()
                                 .percentilesHistogram(true)
-                                .minimumExpectedValue(1.0)
-                                .maximumExpectedValue(10000.0)
-                                .build()
-                                .merge(config);
+                                .minimumExpectedValue(100_000.0)         // 100 µs in ns
+                                .maximumExpectedValue(10_000_000_000.0)  // 10 s in ns
+                                .serviceLevelObjectives(
+                                        0.0001,   // 100 µs
+                                        0.0005,   // 500 µs
+                                        0.001,    //   1 ms
+                                        0.002,    //   2 ms
+                                        0.003,    //   3 ms (NFR p95 target)
+                                        0.005,    //   5 ms
+                                        0.01,     //  10 ms
+                                        0.03,     //  30 ms
+                                        0.1,      // 100 ms
+                                        0.5,      // 500 ms
+                                        1.0,      //   1 s
+                                        5.0,      //   5 s
+                                        10.0      //  10 s
+                                )
+                                .build();
                     }
                     return config;
                 }
