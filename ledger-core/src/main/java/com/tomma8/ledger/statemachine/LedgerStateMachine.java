@@ -185,6 +185,40 @@ public class LedgerStateMachine {
                 raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
+        // Snapshot is the natural GC point: prune journals older than the retention
+        // window so the RocksDB journal CF (and the off-heap/page-cache footprint that
+        // scales with DB size) stays bounded. Cold history lives in the MySQL projection.
+        pruneOldJournals();
+    }
+
+    /** Local GC of the derived journal CF: delete journals (and their lines) with
+     *  raftIndex < (appliedIndex − LEDGER_JOURNAL_RETENTION). The journal CF is derived
+     *  state, so this is a per-node cleanup — it needs NO cross-node coordination and
+     *  does not affect Raft apply determinism. Retention is sized ≫ the reversal window
+     *  and ≫ Kafka→projection lag, so a pruned journal is never reversal-target and is
+     *  already durably in the MySQL projection (the cold store). Idempotent. */
+    public void pruneOldJournals() {
+        pruneJournals(parseIntEnv("LEDGER_JOURNAL_RETENTION", 1_000_000));
+    }
+
+    /** Prune with an explicit retention window (journals). */
+    public void pruneJournals(long retention) {
+        if (rocksDB == null) return;
+        long applied = getRaftLogIndex();
+        long pruneBelow = applied - retention;
+        if (pruneBelow <= 0) return;
+        // journalId = "JNL-%016d" (zero-padded ⇒ lexicographic == numeric order).
+        // journal_line keys are "<journalId>#<lineId>" ⇒ same upper bound covers them.
+        byte[] begin = "JNL-0000000000000000".getBytes(StandardCharsets.UTF_8);
+        byte[] end = String.format("JNL-%016d", pruneBelow).getBytes(StandardCharsets.UTF_8);
+        try {
+            rocksDB.deleteRange("journal", begin, end);
+            rocksDB.deleteRange("journal_line", begin, end);
+            log.info("Pruned journals below raftIndex {} (applied={} retention={})",
+                    pruneBelow, applied, retention);
+        } catch (Exception e) {
+            log.error("Journal prune failed (pruneBelow={})", pruneBelow, e);
+        }
     }
 
     public void restoreFromSnapshot() throws Exception {

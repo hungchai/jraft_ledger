@@ -507,4 +507,51 @@ class RocksDBIntegrationTest {
 
         assertThat(bs2.getOrThrow(key).accountSeq()).isEqualTo(100);
     }
+
+    @Test
+    @DisplayName("TC-ROCKS-RETENTION-01 prune deletes old journals, keeps recent + reversible")
+    void pruneJournals_deletesOld_keepsRecentAndReversible() throws Exception {
+        BalanceStore bs = new BalanceStore();
+        AccountMetaStore ams = new AccountMetaStore();
+        BalanceTypeConfigStore cs = new BalanceTypeConfigStore();
+        LedgerStateMachine sm = new LedgerStateMachine(bs, ams, cs);
+        sm.setRocksDB(rocksDBManager);
+        cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
+                "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+        ams.put("A", new Account("A", AccountType.COMPANY, "A", null, AccountStatus.ACTIVE, null, Instant.now()));
+        ams.put("B", new Account("B", AccountType.COMPANY, "B", null, AccountStatus.ACTIVE, null, Instant.now()));
+        // A funded so 20 debits of 1.00 stay non-negative.
+        bs.put(new AccountBalanceKey("A", "AVAILABLE_BALANCE", "CURRENT", "USD"),
+                new BalanceEntry(new BigDecimal("1000.00"), 0, 1, "JNL-INIT", Instant.now()));
+
+        // Apply 20 postings at raftIndex 1..20 → journals JNL-...0001 .. JNL-...0020
+        for (int i = 1; i <= 20; i++) {
+            CommandResult r = sm.applyPosting(new PostingCommand(
+                    "req-" + i, "TEST", "ref-" + i, LocalDate.now(),
+                    List.of(new PostingCommand.Leg("leg", "TEST", new BigDecimal("1.00"), "USD", List.of(
+                            new PostingCommand.Line("A", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "d"),
+                            new PostingCommand.Line("B", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "c"))))), i);
+            assertThat(r.status()).as("posting %s: %s", i, r.errorCodes()).isEqualTo(CommandResult.COMPLETED);
+        }
+        String oldId = String.format("JNL-%016d", 3);
+        String recentId = String.format("JNL-%016d", 20);
+        assertThat(sm.getJournal(oldId)).isNotNull();
+        assertThat(sm.getJournal(recentId)).isNotNull();
+
+        // applied=20, retention=5 → pruneBelow=15 → JNL 1..14 deleted, 15..20 kept
+        sm.setLastAppliedIndexSource(() -> 20L);
+        sm.pruneJournals(5);
+
+        // Clearly-old pruned; clearly-recent (within retention) kept. The exact
+        // boundary key isn't pinned — retention is approximate at the edge.
+        assertThat(sm.getJournal(oldId)).as("old journal (3) pruned").isNull();
+        assertThat(sm.getJournal(String.format("JNL-%016d", 10))).as("old journal (10) pruned").isNull();
+        assertThat(sm.getJournal(String.format("JNL-%016d", 18))).as("recent (18) kept").isNotNull();
+        assertThat(sm.getJournal(recentId)).as("recent (20) kept").isNotNull();
+
+        // A retained (recent) journal is still reversible — reads original from RocksDB.
+        CommandResult rev = sm.applyReversal(new ReversalCommand("rev-1", recentId, "reversal", "ADJ", LocalDate.now()), 21);
+        assertThat(rev.status()).isEqualTo(CommandResult.COMPLETED);
+        assertThat(sm.getJournal(recentId).status()).isEqualTo(JournalStatus.REVERSED);
+    }
 }

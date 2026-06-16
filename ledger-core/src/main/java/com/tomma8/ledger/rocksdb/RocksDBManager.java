@@ -151,6 +151,13 @@ public class RocksDBManager implements AutoCloseable {
         rocksDB.delete(getHandle(cfName), key);
     }
 
+    /** Delete all keys in [beginKey, endKey) from a column family (single tombstone;
+     *  space reclaimed by compaction). Used to prune old journals past the retention
+     *  window. endKey is exclusive. */
+    public void deleteRange(String cfName, byte[] beginKey, byte[] endKey) throws Exception {
+        rocksDB.deleteRange(getHandle(cfName), writeOptionsInstance, beginKey, endKey);
+    }
+
     /**
      * Iterate every key/value in a column family, in RocksDB key order
      * (deterministic — identical on every node). Used to scan/stream journals
