@@ -91,6 +91,28 @@ public class RocksDBManager implements AutoCloseable {
     }
 
     /**
+     * Iterate every key/value in a column family, in RocksDB key order
+     * (deterministic — identical on every node). Used to scan/stream journals
+     * and idempotency entries without holding the whole CF in heap.
+     */
+    public void forEach(String cfName, java.util.function.BiConsumer<byte[], byte[]> consumer) {
+        try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                consumer.accept(it.key(), it.value());
+            }
+        }
+    }
+
+    /** Count keys in a column family (CF scan; used for F-006 counts). */
+    public long count(String cfName) {
+        long n = 0;
+        try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
+            for (it.seekToFirst(); it.isValid(); it.next()) n++;
+        }
+        return n;
+    }
+
+    /**
      * Cached WriteOptions (initialised in {@link #open()} after the JNI library
      * is loaded). Avoids allocating a new WriteOptions per write — small but
      * real allocation/GC win on the hot path.

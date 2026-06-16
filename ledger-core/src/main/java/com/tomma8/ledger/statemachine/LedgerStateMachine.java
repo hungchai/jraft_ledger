@@ -43,7 +43,12 @@ public class LedgerStateMachine {
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
     private final IdempotencyStore idempotencyStore;
-    private final ConcurrentHashMap<String, Journal> journalStore;
+    // Bounded LRU cache over the RocksDB `journal` CF (the durable, authoritative
+    // store). Caps heap at O(working-set) instead of O(all-history) — the prior
+    // unbounded map was the dominant OOM cause. Reads fall through to RocksDB
+    // (readJournal); F-006 list queries scan the CF. NOT used as the snapshot
+    // source — the snapshot streams journals straight from RocksDB.
+    private final Map<String, Journal> journalStore;
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
@@ -173,7 +178,7 @@ public class LedgerStateMachine {
         if (rocksDB == null) return;
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                journalStore, idempotencyStore,
+                allJournalsForSnapshot(), idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
@@ -189,7 +194,7 @@ public class LedgerStateMachine {
     public byte[] snapshotBytes() throws Exception {
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                journalStore, idempotencyStore,
+                allJournalsForSnapshot(), idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         return objectMapper.writeValueAsBytes(data);
     }
@@ -198,6 +203,20 @@ public class LedgerStateMachine {
         SnapshotData data = objectMapper.readValue(bytes, SnapshotData.class);
         data.restoreTo(balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore);
+        // Persist the snapshot's journals to the RocksDB `journal` CF so a node
+        // bootstrapped purely from InstallSnapshot (empty local RocksDB) can still
+        // read/reverse any historical journal. (Same-dir restart already has them;
+        // the write is idempotent.) journalStore itself is only a bounded cache.
+        if (rocksDB != null) {
+            try {
+                for (Journal j : data.journals().values()) {
+                    rocksDB.put("journal", j.journalId().getBytes(StandardCharsets.UTF_8),
+                            objectMapper.writeValueAsBytes(j));
+                }
+            } catch (Exception e) {
+                log.error("Failed to persist restored journals to RocksDB", e);
+            }
+        }
         // Restore the authoritative journal count from the snapshot. (Previously
         // derived from journalStore.size(); that breaks once journalStore is a
         // bounded cache — the snapshot now carries the true count, which equals
@@ -222,7 +241,17 @@ public class LedgerStateMachine {
     public BalanceStore getBalanceStore() { return balanceStore; }
     public AccountMetaStore getAccountMetaStore() { return accountMetaStore; }
     public BalanceTypeConfigStore getBalanceTypeConfigStore() { return balanceTypeConfigStore; }
-    public Map<String, Journal> getAllJournals() { return new HashMap<>(journalStore); }
+    public Map<String, Journal> getAllJournals() { return allJournalsForSnapshot(); }
+
+    /** Complete journal set for snapshotting / cross-node comparison: from RocksDB
+     *  (authoritative, all history) if present, else the in-heap cache (standalone/tests).
+     *  Transiently materializes all journals — only invoked at snapshot time, not on the hot path. */
+    private Map<String, Journal> allJournalsForSnapshot() {
+        if (rocksDB == null) return new HashMap<>(journalStore);
+        Map<String, Journal> out = new HashMap<>();
+        forEachJournal(j -> out.put(j.journalId(), j));
+        return out;
+    }
 
     // ── Snapshot data record ───────────────────────────────────
 
@@ -237,20 +266,20 @@ public class LedgerStateMachine {
 
         static SnapshotData from(BalanceStore bs, AccountMetaStore ams,
                                  BalanceTypeConfigStore bcs,
-                                 ConcurrentHashMap<String, Journal> js,
+                                 Map<String, Journal> allJournals,
                                  IdempotencyStore is,
                                  long raftLogIndex, long journalSeq) {
             Map<String, BalanceEntry> balMap = new HashMap<>();
             bs.getAll().forEach((k, v) -> balMap.put(keyStr(k), v));
             Map<String, Account> accMap = new HashMap<>();
             ams.getAll().forEach(accMap::put);
-            return new SnapshotData(balMap, accMap, bcs.getAll(), Map.copyOf(js),
+            return new SnapshotData(balMap, accMap, bcs.getAll(), Map.copyOf(allJournals),
                     Map.copyOf(is.getAll()), raftLogIndex, journalSeq);
         }
 
         void restoreTo(BalanceStore bs, AccountMetaStore ams,
                        BalanceTypeConfigStore bcs,
-                       ConcurrentHashMap<String, Journal> js,
+                       Map<String, Journal> journalCache,
                        IdempotencyStore is) {
             bs.clear();
             balances.forEach((k, v) -> bs.put(parseKey(k), v));
@@ -258,8 +287,9 @@ public class LedgerStateMachine {
             accounts.forEach(ams::put);
             bcs.clear();
             configs.forEach(bcs::put);
-            js.clear();
-            js.putAll(journals);
+            // journalCache is a bounded LRU; warm it (eldest evicted automatically).
+            journalCache.clear();
+            journalCache.putAll(journals);
             is.clear();
             idempotency.forEach(is::put);
         }
@@ -280,9 +310,46 @@ public class LedgerStateMachine {
         this.accountMetaStore = accountMetaStore;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
         this.idempotencyStore = new IdempotencyStore();
-        this.journalStore = new ConcurrentHashMap<>();
+        int cacheMax = parseIntEnv("LEDGER_JOURNAL_CACHE_MAX", 50_000);
+        this.journalStore = java.util.Collections.synchronizedMap(
+                new java.util.LinkedHashMap<>(1024, 0.75f, true) {
+                    @Override protected boolean removeEldestEntry(Map.Entry<String, Journal> e) {
+                        return size() > cacheMax;
+                    }
+                });
         this.raftLogIndex = new AtomicLong(0);
         this.journalSequence = new AtomicLong(0);
+    }
+
+    private static int parseIntEnv(String k, int def) {
+        try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
+        catch (Exception e) { return def; }
+    }
+
+    /** Read a journal: bounded cache → RocksDB read-through (authoritative). */
+    private Journal readJournal(String journalId) {
+        Journal cached = journalStore.get(journalId);
+        if (cached != null) return cached;
+        if (rocksDB == null) return null;
+        try {
+            byte[] raw = rocksDB.get("journal", journalId.getBytes(StandardCharsets.UTF_8));
+            if (raw == null) return null;
+            Journal j = objectMapper.readValue(raw, Journal.class);
+            journalStore.put(journalId, j);   // warm cache
+            return j;
+        } catch (Exception e) {
+            log.error("RocksDB journal read failed for {}", journalId, e);
+            return null;
+        }
+    }
+
+    /** Scan all journals from RocksDB (F-006 list queries; bounded memory per-call by the caller's filter+limit). */
+    private void forEachJournal(java.util.function.Consumer<Journal> consumer) {
+        if (rocksDB == null) { journalStore.values().forEach(consumer); return; }
+        rocksDB.forEach("journal", (k, v) -> {
+            try { consumer.accept(objectMapper.readValue(v, Journal.class)); }
+            catch (Exception e) { log.error("RocksDB journal scan decode failed", e); }
+        });
     }
 
     private record LineWithLeg(String legId, BigDecimal amount, String currency, PostingCommand.Line line) {}
@@ -771,7 +838,7 @@ public class LedgerStateMachine {
             return CommandResult.rejected(entry.errors(), entry.errorDetails());
         }
 
-        Journal originalJournal = journalStore.get(cmd.originalJournalId());
+        Journal originalJournal = readJournal(cmd.originalJournalId());
         if (originalJournal == null) {
             var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                     Map.of("journalId", cmd.originalJournalId()));
@@ -798,7 +865,7 @@ public class LedgerStateMachine {
             }
 
         // Re-fetch original journal
-            Journal orig = journalStore.get(cmd.originalJournalId());
+            Journal orig = readJournal(cmd.originalJournalId());
             if (orig == null) {
                 var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                         Map.of("journalId", cmd.originalJournalId()));
@@ -943,45 +1010,45 @@ public class LedgerStateMachine {
     // ── Journal access ─────────────────────────────────────────
 
     public Journal getJournal(String journalId) {
-        return journalStore.get(journalId);
+        return readJournal(journalId);
     }
 
+    // F-006 list queries scan the RocksDB journal CF (authoritative, unbounded
+    // history) instead of an in-heap map. Same O(n) as before; not the hot path.
+
     public List<Journal> getJournalsByAccount(String accountId, int page, int size) {
-        return journalStore.values().stream()
-                .filter(j -> j.lines().stream().anyMatch(l -> l.accountId().equals(accountId)))
-                .skip((long) page * size)
-                .limit(size)
-                .toList();
+        List<Journal> all = new ArrayList<>();
+        forEachJournal(j -> { if (j.lines().stream().anyMatch(l -> l.accountId().equals(accountId))) all.add(j); });
+        all.sort(java.util.Comparator.comparing(Journal::createdAt).reversed());
+        return all.stream().skip((long) page * size).limit(size).toList();
     }
 
     public long countJournalsByAccount(String accountId) {
-        return journalStore.values().stream()
-                .filter(j -> j.lines().stream().anyMatch(l -> l.accountId().equals(accountId)))
-                .count();
+        long[] n = {0};
+        forEachJournal(j -> { if (j.lines().stream().anyMatch(l -> l.accountId().equals(accountId))) n[0]++; });
+        return n[0];
     }
 
     public List<Journal> getJournalsByBusinessEventRef(String businessEventRef) {
-        return journalStore.values().stream()
-                .filter(j -> businessEventRef.equals(j.businessEventRef()))
-                .toList();
+        List<Journal> out = new ArrayList<>();
+        forEachJournal(j -> { if (businessEventRef.equals(j.businessEventRef())) out.add(j); });
+        return out;
     }
 
     public List<Journal> getJournalChain(String originalJournalId) {
-        Journal original = journalStore.get(originalJournalId);
-        if (original == null) return List.of();
-        // All journals sharing the same businessEventRef form the chain
+        Journal original = readJournal(originalJournalId);
+        if (original == null || original.businessEventRef() == null) return List.of();
         String ref = original.businessEventRef();
-        return journalStore.values().stream()
-                .filter(j -> ref != null && ref.equals(j.businessEventRef()))
-                .sorted(java.util.Comparator.comparing(Journal::createdAt))
-                .toList();
+        List<Journal> chain = new ArrayList<>();
+        forEachJournal(j -> { if (ref.equals(j.businessEventRef())) chain.add(j); });
+        chain.sort(java.util.Comparator.comparing(Journal::createdAt));
+        return chain;
     }
 
     public Journal getJournalByRequestId(String requestId) {
-        return journalStore.values().stream()
-                .filter(j -> requestId.equals(j.requestId()))
-                .findFirst()
-                .orElse(null);
+        Journal[] found = {null};
+        forEachJournal(j -> { if (found[0] == null && requestId.equals(j.requestId())) found[0] = j; });
+        return found[0];
     }
 
     // ── Balance computation ────────────────────────────────────
