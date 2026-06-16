@@ -40,6 +40,8 @@ Client → HTTP → Raft Leader → State Machine (in-memory) → RocksDB
 12. [Kafka Events](#12-kafka-events)
 13. [Error Codes](#13-error-codes)
 14. [Enumerations](#14-enumerations)
+15. [Cluster & Raft](#15-cluster--raft)
+16. [Projection Service](#16-projection-service)
 
 ---
 
@@ -71,7 +73,9 @@ Query responses may include `dataSource` to indicate where the data came from:
 
 ## 2. Health
 
-### GET `/health`
+### GET /health
+
+`GET /health`
 
 Returns service health status.
 
@@ -133,7 +137,32 @@ Creates a new account with initial balance type definitions. **Goes through Raft
 
 ---
 
-### 3.2 Freeze Account
+### 3.2 Get Account
+
+`GET /ledger/accounts/{accountId}`
+
+Returns account metadata from the in-memory state machine (strong consistency). Read from any Raft node.
+
+**Response 200**:
+```json
+{
+  "accountId": "CLIENT_ACC_001",
+  "accountType": "CLIENT",
+  "displayName": "Client USD Account",
+  "ownerId": "CUST-001",
+  "status": "ACTIVE",
+  "allowedBalanceTypes": [
+    { "balanceType": "AVAILABLE_BALANCE", "currency": "USD" }
+  ],
+  "createdAt": "2026-05-16T10:30:22.341Z"
+}
+```
+
+**Response 404** — account not found.
+
+---
+
+### 3.3 Freeze Account
 
 `POST /ledger/accounts/{accountId}/freeze`
 
@@ -159,7 +188,7 @@ Freezes an account. No new postings are accepted for frozen accounts.
 
 ---
 
-### 3.3 Unfreeze Account
+### 3.4 Unfreeze Account
 
 `POST /ledger/accounts/{accountId}/unfreeze`
 
@@ -185,7 +214,7 @@ Unfreezes a previously frozen account.
 
 ---
 
-### 3.4 Close Account
+### 3.5 Close Account
 
 `POST /ledger/accounts/{accountId}/close`
 
@@ -211,7 +240,7 @@ Closes an account permanently. **All balances must be zero.** Once closed, an ac
 
 ---
 
-### 3.5 Add Balance Type to Account
+### 3.6 Add Balance Type to Account
 
 `POST /ledger/accounts/{accountId}/balance-types`
 
@@ -239,7 +268,7 @@ Adds a new `(balanceType, currency)` pair to an existing account. The initial ba
 
 ---
 
-### 3.6 Account State Machine
+### 3.7 Account State Machine
 
 ```
         Create
@@ -262,7 +291,7 @@ Adds a new `(balanceType, currency)` pair to an existing account. The initial ba
 
 Balance Types define how balances behave: sign convention, allow-negative semantics, composition rules, visibility, caching, alerts, etc. The system reads configuration from the registry at runtime with no hardcoded types.
 
-> **Note**: This is a system-design specification. The current codebase implements a simplified in-memory `BalanceTypeConfigStore` seeded at startup. The full admin CRUD API (`POST /admin/ledger/balance-types`, etc.) is planned per F-001.
+> **Note**: This is a system-design specification. The current codebase implements a simplified in-memory `BalanceTypeConfigStore` seeded at startup. The full admin CRUD API (`POST /admin/ledger/balance-types`, etc.) is **planned per F-001 and not yet implemented** — it is intentionally absent from controllers and Postman until F-001 ships.
 
 ### 4.1 Balance Type Properties
 
@@ -1399,6 +1428,87 @@ The platform emits two types of Kafka events. Both use the **Outbox pattern** (w
 | `POSTING` | Standard posting |
 | `REVERSAL` | Reversal |
 | `MANUAL_ADJUSTMENT` | Manual adjustment |
+
+---
+
+## 15. Cluster & Raft
+
+Operational endpoints for cluster topology, Raft leader discovery, and replication health. Served by each ledger node.
+
+### 15.1 Cluster Info
+
+`GET /ledger/cluster/info`
+
+Returns this node's role, term, and read/write routing hints.
+
+**Response 200**:
+```json
+{
+  "nodeId": "node1",
+  "role": "LEADER",
+  "term": 3,
+  "isLeader": true,
+  "routing": {
+    "writes": "This node accepts writes",
+    "reads": "This node serves reads (CQRS — any node)"
+  }
+}
+```
+
+### 15.2 Cluster Nodes
+
+`GET /ledger/cluster/nodes`
+
+Lists configured peer nodes and CQRS routing note.
+
+### 15.3 Raft Status
+
+`GET /ledger/cluster/raft-status`
+
+Returns replication and state-machine diagnostics: `lastAppliedIndex`, `smRaftLogIndex`, account/balance counts, alive peers.
+
+**Response 200** (Raft mode):
+```json
+{
+  "nodeId": "node1",
+  "isLeader": true,
+  "term": 3,
+  "lastAppliedIndex": 100245,
+  "smRaftLogIndex": 100245,
+  "smJournalSeq": 42,
+  "smAccountCount": 10,
+  "smBalanceCount": 25,
+  "alivePeers": ["node2:28081", "node3:28081"]
+}
+```
+
+### 15.4 Raft Leader Discovery
+
+`GET /raft/leader`
+
+Returns the leader's HTTP base URL when called on the leader. Returns **503** on followers with `leaderHint`.
+
+**Response 200** (leader only):
+```json
+{
+  "leader": "http://localhost:8081"
+}
+```
+
+---
+
+## 16. Projection Service
+
+Read-path APIs on the **Projection Service** (default port **8089**). Queries MySQL View Layer directly — eventual consistency, typically < 1s lag behind the Raft leader.
+
+| Endpoint | Description |
+|---|---|
+| `GET /projection/accounts/{accountId}/balances` | Account balances from MySQL (`dataSource=VIEW_LAYER`) |
+| `GET /projection/journals/{journalId}` | Journal + lines by ID |
+| `GET /projection/accounts/{accountId}/journals` | Paginated journals for account (`page`, `size`) |
+| `GET /projection/journals/by-request-id?requestId={id}` | Journal lookup by original posting `requestId` |
+
+Optional query params for balances: `balanceType`, `position`, `currency`.
 
 ---
 

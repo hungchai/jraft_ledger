@@ -1,10 +1,14 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.14
-**日期**: 2026-06-08
+**版本**: v0.16
+**日期**: 2026-06-15
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.15 變更摘要**：新增 Module 19.5（Projection Deadlock Safety），新增 TC-PROJ-11~12。涵蓋 journal_line 批次寫入前按 (accountAccountId, journalLineId) 排序以避免 InnoDB gap-lock 死鎖，以及死鎖發生時 bounded retry。
+>
+> **v0.16 變更摘要**：新增 TC-F011-13~17（JournalEventEnvelope 1-record-per-journal）。驗證 applyPosting 走 `onPosting(envelope)` 路徑、EmitGate 關閉時零發送、CF_OUTBOX 一筆 journal 一筆 envelope 條目、AsyncOutboxPublisher 走 envelope 路徑。對應 v0.3 F-011 §8 envelope 模型。
+>
 > **v0.14 變更摘要**：新增 Module 15.1（Apache Ratis Engine，ADR-003），新增 TC-RAFT-RATIS-01~04 與 TC-NFR-OOM-01。涵蓋 Ratis log 提交餘額變更、冪等重放、snapshot 還原、引擎可切換，以及 OOM 災難復原（0 已提交遺失 + 乾淨復原 + 無跨節點分歧）。
 >
 > **v0.13 變更摘要**：新增 Module 22（SnowflakeIdGenerator 時鐘回退容錯），新增 TC-SNOW-01~04。涵蓋 monotonic ID、序列號回捲、≤5ms 時鐘回退等待、>5ms 時鐘回退拒絕。
@@ -867,6 +871,38 @@ TC-F011-12  hotPath_callback_deletesOutboxImmediately【v0.11 新增】
             Given: StateMachine 熱路徑發送，KafkaEventPublisher 已設置 outboxStore
             When:  applyPosting → onEvent(event) → enqueue → flush → publisher.flush()
             Then:  outboxStore.readPending() 返回空（熱路徑 callback 即時清理）
+
+TC-F011-13  applyPosting_oneEnvelopePerJournal【v0.16 新增】
+            Given: 4-line posting，EmitGate enabled，eventListener 為 EnvelopeCountingListener
+            When:  applyPosting(4-line cmd)
+            Then:  envelopes.get() == 1；events.get() == 0（不再 per-line 呼叫）
+                  envelope.type == "JOURNAL"；envelope.journalId 以 "JNL-" 開頭
+                  envelope.events().size() == 4
+
+TC-F011-14  applyPosting_gateClosed_zeroEmission【v0.16 新增】
+            Given: 2-line posting，EmitGate 關閉（follower / init）
+            When:  applyPosting
+            Then:  envelopes.get() == 0；events.get() == 0
+                  CF_OUTBOX 也未新增 entry（persistApply 跳過 outbox 寫入）
+
+TC-F011-15  envelopeJsonRoundTrip【v0.16 新增】
+            Given: JournalEventEnvelope{ type="JOURNAL", journalId="JNL-T-1", events=[e1, e2] }
+            When:  Jackson 序列化 → 反序列化
+            Then:  兩次 type / journalId / events 內容完全一致
+                  JSON 包含 "type":"JOURNAL" 字串
+
+TC-F011-16  persistApply_writesOneEnvelopeEntry【v0.16 新增】
+            Given: 2-line posting，RocksDB + outbox 開啟，EmitGate enabled
+            When:  applyPosting + persistApply
+            Then:  outboxStore.readPendingJournals(100) 返回 1 個 envelope
+                  envelope.events() 包含 2 個 BalanceChangeEvent
+                  CF_OUTBOX 中對應的 key 為 "outbox:journal:<journalId>"
+
+TC-F011-17  asyncOutboxPublisher_publishesEnvelope【v0.16 新增】
+            Given: CF_OUTBOX 中有一筆 envelope entry，EmitGate enabled
+            When:  AsyncOutboxPublisher.scanAndPublish() 觸發
+            Then:  KafkaEventPublisher.onPosting 被呼叫 1 次
+                  KafkaEventPublisher.onEvent 沒有被呼叫（不再 per-event fallback）
 ```
 
 ---
@@ -1255,6 +1291,21 @@ TC-PROJ-10  journalLine_missingSurrogateLogicallyAllowed
                    查詢時 LEFT JOIN journal 返回 NULL 欄位（資料完整但不影響 insert）
 ```
 
+### 19.5 Projection Deadlock Safety
+
+```
+TC-PROJ-11  journalLineBatch_rowsSortedByAccountThenLineId
+            Given: 一個 poll batch 包含 PendingRow：ACC-Z/JL-002、ACC-A/JL-003、ACC-A/JL-001、ACC-Z/JL-001
+            When:  JournalFlushBuffer.toJournalLineRows(rows)
+            Then:  返回結果按 (accountAccountId 升序, journalLineId 升序) 排列
+                   → ACC-A/JL-001、ACC-A/JL-003、ACC-Z/JL-001、ACC-Z/JL-002
+
+TC-PROJ-12  journalLineBatch_deadlockRetriesBeforeFailing
+            Given: batch insert 前兩次拋出 MySQLTransactionRollbackException SQLState=40001，第三次成功
+            When:  JournalFlushBuffer.flushRowsDirect(batch)
+            Then:  最多重試 3 次，最終成功寫入；Kafka offset 不受影響
+```
+
 ---
 
 ## Module 20：Config Abstraction（F-015）
@@ -1322,6 +1373,7 @@ Phase 3 — 讀路徑
 Phase 3.5 — accountSeq【v0.2 新增】
   TC-F008-19~26（State Machine accountSeq）
   TC-F011-01~12（BalanceChangeEvent accountSeq + position + outbox callback deletion）
+  TC-F011-13~17（JournalEventEnvelope 1-record-per-journal，v0.16 新增）
 
 Phase 4 — 對帳與帳期
   TC-F007-*（Reconciliation）
@@ -1346,6 +1398,7 @@ Phase 8 — Projection MySQL View Layer v2【v0.6 新增】
   TC-PROJ-03~05（account_balance accountSeq guard）
   TC-PROJ-06~08（ProjectionConsumer full idempotent flow）
   TC-PROJ-09~10（surrogate FK chain — consistency + no-FK tolerance）
+  TC-PROJ-11~12（deadlock-safe batch ordering + bounded retry）
 
 Phase 9 — Config Abstraction【v0.10 新增】
   TC-F015-01~05（ConfigService + SpringConfigService + LedgerConfig refactor）

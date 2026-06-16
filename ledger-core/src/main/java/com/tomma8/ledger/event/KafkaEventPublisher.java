@@ -3,6 +3,7 @@ package com.tomma8.ledger.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tomma8.ledger.domain.event.AccountCreatedEvent;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
+import com.tomma8.ledger.domain.event.JournalEventEnvelope;
 import com.tomma8.ledger.domain.event.LedgerEventListener;
 import com.tomma8.ledger.rocksdb.OutboxStore;
 import com.tomma8.ledger.util.LedgerMappers;
@@ -66,6 +67,32 @@ public class KafkaEventPublisher implements LedgerEventListener {
             });
         } catch (Exception e) {
             log.error("Failed to serialize balance event {}", event.eventId(), e);
+        }
+    }
+
+    /**
+     * Send one Kafka record bundling all line events of a single journal
+     * (posting or reversal). The journalId is used as the partition key so
+     * all events for one journal land on the same partition and are
+     * consumed in order. Downstream projection (ProjectionConsumer) detects
+     * the envelope via its {@code type} field and processes the array.
+     */
+    @Override
+    public void onPosting(JournalEventEnvelope envelope) {
+        try {
+            String key = envelope.journalId();
+            String value = mapper.writeValueAsString(envelope);
+            ProducerRecord<String, String> record = new ProducerRecord<>(balanceChangeTopic, key, value);
+            producer.send(record, (metadata, exception) -> {
+                if (exception != null) {
+                    log.error("Failed to publish journal envelope {}: {}",
+                            envelope.journalId(), exception.getMessage());
+                } else if (outboxStore != null) {
+                    outboxStore.markJournalSent(envelope.journalId());
+                }
+            });
+        } catch (Exception e) {
+            log.error("Failed to serialize journal envelope {}", envelope.journalId(), e);
         }
     }
 

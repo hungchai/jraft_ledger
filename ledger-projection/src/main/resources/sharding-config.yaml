@@ -52,7 +52,7 @@ rules:
     snowflake:
       type: SNOWFLAKE
       props:
-        worker-id: 0
+        worker-id: 1
 
 props:
   # Logging every Logic+Actual SQL at INFO crushes projection throughput. Keep off.

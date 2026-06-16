@@ -193,7 +193,11 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     }
 
                     long totalUs = (tExecEnd - tStart) / 1000;
-                    if (totalUs > 5000) {
+                    // APPLY_SLOW warn disabled: onApply is the Raft apply hot path
+                    // and the string formatting + log dispatch on the slow path itself
+                    // made contention worse during stress tests. Metrics are still
+                    // recorded above (recordApplyTotal); use Prometheus to inspect.
+                    if (false && totalUs > 5000) {
                         log.warn("[APPLY_SLOW] cmd={} index={} total={}us",
                                 cmd.getClass().getSimpleName(), index, totalUs);
                     }

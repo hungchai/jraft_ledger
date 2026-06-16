@@ -38,6 +38,8 @@ class BalanceChangeEventTest {
 
         capturedEvents = new ArrayList<>();
         stateMachine.setEventListener(capturedEvents::add);
+        // EmitGate is closed by default; tests opt in to capture events.
+        stateMachine.getEmitGate().setEnabled(true);
 
         // Register balance types
         balanceTypeConfigStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(

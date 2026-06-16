@@ -754,6 +754,14 @@
           }
         },
         {
+          "name": "Get Raft Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/raft-status", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "raft-status"] }
+          }
+        },
+        {
           "name": "Health — Check Leader on All Nodes",
           "item": [
             {

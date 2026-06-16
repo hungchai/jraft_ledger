@@ -28,6 +28,7 @@ public class AsyncOutboxPublisher implements AutoCloseable {
 
     private final OutboxStore outboxStore;
     private final KafkaEventPublisher kafkaPublisher;
+    private final EmitGate emitGate;
     private final ScheduledExecutorService scheduler;
     private final Duration pollInterval;
     private final int batchSize;
@@ -51,8 +52,17 @@ public class AsyncOutboxPublisher implements AutoCloseable {
                                 KafkaEventPublisher kafkaPublisher,
                                 Duration pollInterval,
                                 int batchSize) {
+        this(outboxStore, kafkaPublisher, new EmitGate(), pollInterval, batchSize);
+    }
+
+    public AsyncOutboxPublisher(OutboxStore outboxStore,
+                                KafkaEventPublisher kafkaPublisher,
+                                EmitGate emitGate,
+                                Duration pollInterval,
+                                int batchSize) {
         this.outboxStore = outboxStore;
         this.kafkaPublisher = kafkaPublisher;
+        this.emitGate = emitGate;
         this.pollInterval = pollInterval;
         this.batchSize = batchSize;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -70,27 +80,29 @@ public class AsyncOutboxPublisher implements AutoCloseable {
 
     private void scanAndPublish() {
         if (!running) return;
+        if (!emitGate.isEnabled()) return;
         long start = System.currentTimeMillis();
         try {
-            List<BalanceChangeEvent> events = outboxStore.readPending(batchSize);
-            lastScanPending.set(events.size());
-            if (events.isEmpty()) return;
+            List<com.tomma8.ledger.domain.event.JournalEventEnvelope> envelopes =
+                    outboxStore.readPendingJournals(batchSize);
+            lastScanPending.set(envelopes.size());
+            if (envelopes.isEmpty()) return;
 
-            log.debug("Outbox scan found {} pending events", events.size());
+            log.debug("Outbox scan found {} pending journal envelopes", envelopes.size());
             int ok = 0;
             int fail = 0;
 
-            for (BalanceChangeEvent event : events) {
+            for (var env : envelopes) {
                 try {
-                    kafkaPublisher.onEvent(event);
+                    kafkaPublisher.onPosting(env);
                     // Callback-driven deletion: KafkaEventPublisher send-callback
-                    // calls outboxStore.markSent(eventId) on Kafka ack success.
-                    // If callback never fires (crash), event stays in outbox and
-                    // will be re-scanned on next poll.
+                    // calls outboxStore.markJournalSent(journalId) on Kafka ack.
+                    // If callback never fires (crash), envelope stays in outbox
+                    // and will be re-scanned on next poll.
                     ok++;
                 } catch (Exception e) {
-                    log.warn("Failed to publish outbox event {} (account={} balanceType={})",
-                            event.eventId(), event.accountId(), event.balanceType(), e);
+                    log.warn("Failed to publish outbox envelope {} ({} events)",
+                            env.journalId(), env.events().size(), e);
                     fail++;
                 }
             }

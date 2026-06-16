@@ -145,10 +145,14 @@ public class ProjectionConsumer {
             return;
         }
         try {
-            var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size());
+            var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size() * 2);
             for (String m : messages) {
-                ProjectionWriter.BalanceEvent pe = parseBalanceEvent(m);
-                if (pe != null) parsed.add(pe);
+                if (isEnvelope(m)) {
+                    parsed.addAll(parseEnvelopeEvents(m));
+                } else {
+                    ProjectionWriter.BalanceEvent pe = parseBalanceEvent(m);
+                    if (pe != null) parsed.add(pe);
+                }
             }
             writer.writeBalanceBatch(parsed);
             ack.acknowledge();
@@ -160,54 +164,122 @@ public class ProjectionConsumer {
 
     private ProjectionWriter.BalanceEvent parseBalanceEvent(String message) {
         try (JsonParser p = JSON_FACTORY.createParser(message)) {
-            // Required string fields; null = absent. We bail on missing required
-            // ones by returning a partial record that the writer will skip (PK
-            // resolution yields null and the loop's `continue` drops it).
-            String eventId = null, journalId = null, journalLineId = null, requestId = null,
-                    commandType = null, accountId = null, balanceType = null,
-                    position = "CURRENT", currency = null, entryType = null,
-                    businessEventRef = null, valueDateRaw = null;
-            BigDecimal amount = null, postBalance = null, preBalance = null;
-            long accountSeq = 0L;
-            int configVersion = 1;
-
-            if (p.nextToken() != JsonToken.START_OBJECT) return null;
-            while (p.nextToken() != JsonToken.END_OBJECT) {
-                String field = p.currentName();
-                JsonToken t = p.nextToken();
-                switch (field) {
-                    case "eventId"          -> eventId          = (t == JsonToken.VALUE_NULL) ? null : p.getText();
-                    case "journalId"        -> journalId        = p.getText();
-                    case "journalLineId"    -> journalLineId    = p.getText();
-                    case "requestId"        -> requestId        = p.getText();
-                    case "commandType"      -> commandType      = p.getText();
-                    case "accountId"        -> accountId        = p.getText();
-                    case "balanceType"      -> balanceType      = p.getText();
-                    case "position"         -> { String s = p.getText(); if (s != null) position = s; }
-                    case "currency"         -> currency         = p.getText();
-                    case "entryType"        -> entryType        = p.getText();
-                    case "businessEventRef" -> { String s = p.getText(); if (s != null) businessEventRef = s; }
-                    case "configVersion"    -> configVersion    = p.getIntValue();
-                    case "accountSeq"       -> accountSeq       = p.getLongValue();
-                    case "amount"           -> amount           = readBigDecimal(p, t);
-                    case "postBalance"      -> postBalance      = readBigDecimal(p, t);
-                    case "preBalance"       -> preBalance       = readBigDecimal(p, t);
-                    case "valueDate"        -> valueDateRaw     = readValueDate(p, t);
-                    default                 -> p.skipChildren();
-                }
-            }
-            return new ProjectionWriter.BalanceEvent(
-                    nullToEmpty(eventId), nullToEmpty(journalId), nullToEmpty(journalLineId),
-                    nullToEmpty(requestId), nullToEmpty(commandType), nullToEmpty(accountId),
-                    nullToEmpty(balanceType), position, nullToEmpty(currency),
-                    nullToEmpty(entryType),
-                    nz(amount), nz(postBalance), accountSeq,
-                    nullToEmpty(businessEventRef),
-                    toLocalDate(valueDateRaw), configVersion, nz(preBalance));
+            return parseOneEventObject(p);
         } catch (Exception e) {
             log.error("Failed to parse balance event", e);
             return null;
         }
+    }
+
+    /**
+     * Parse a single BalanceChangeEvent JSON object. Caller must position
+     * the parser EITHER before the {@code START_OBJECT} token (legacy
+     * single-event path) OR at the {@code START_OBJECT} token (inner event
+     * of the envelope array, where the outer loop already advanced). This
+     * method handles both. After return, the parser is past the matching
+     * {@code END_OBJECT}.
+     */
+    private ProjectionWriter.BalanceEvent parseOneEventObject(JsonParser p) throws java.io.IOException {
+        // Required string fields; null = absent. We bail on missing required
+        // ones by returning a partial record that the writer will skip (PK
+        // resolution yields null and the loop's `continue` drops it).
+        String eventId = null, journalId = null, journalLineId = null, requestId = null,
+                commandType = null, accountId = null, balanceType = null,
+                position = "CURRENT", currency = null, entryType = null,
+                businessEventRef = null, valueDateRaw = null;
+        BigDecimal amount = null, postBalance = null, preBalance = null;
+        long accountSeq = 0L;
+        int configVersion = 1;
+
+        // If we're not yet inside the object, advance to START_OBJECT.
+        if (p.currentToken() != JsonToken.START_OBJECT) {
+            if (p.nextToken() != JsonToken.START_OBJECT) return null;
+        }
+        while (p.nextToken() != JsonToken.END_OBJECT) {
+            String field = p.currentName();
+            JsonToken t = p.nextToken();
+            switch (field) {
+                case "eventId"          -> eventId          = (t == JsonToken.VALUE_NULL) ? null : p.getText();
+                case "journalId"        -> journalId        = p.getText();
+                case "journalLineId"    -> journalLineId    = p.getText();
+                case "requestId"        -> requestId        = p.getText();
+                case "commandType"      -> commandType      = p.getText();
+                case "accountId"        -> accountId        = p.getText();
+                case "balanceType"      -> balanceType      = p.getText();
+                case "position"         -> { String s = p.getText(); if (s != null) position = s; }
+                case "currency"         -> currency         = p.getText();
+                case "entryType"        -> entryType        = p.getText();
+                case "businessEventRef" -> { String s = p.getText(); if (s != null) businessEventRef = s; }
+                case "configVersion"    -> configVersion    = p.getIntValue();
+                case "accountSeq"       -> accountSeq       = p.getLongValue();
+                case "amount"           -> amount           = readBigDecimal(p, t);
+                case "postBalance"      -> postBalance      = readBigDecimal(p, t);
+                case "preBalance"       -> preBalance       = readBigDecimal(p, t);
+                case "valueDate"        -> valueDateRaw     = readValueDate(p, t);
+                default                 -> p.skipChildren();
+            }
+        }
+        return new ProjectionWriter.BalanceEvent(
+                nullToEmpty(eventId), nullToEmpty(journalId), nullToEmpty(journalLineId),
+                nullToEmpty(requestId), nullToEmpty(commandType), nullToEmpty(accountId),
+                nullToEmpty(balanceType), position, nullToEmpty(currency),
+                nullToEmpty(entryType),
+                nz(amount), nz(postBalance), accountSeq,
+                nullToEmpty(businessEventRef),
+                toLocalDate(valueDateRaw), configVersion, nz(preBalance));
+    }
+
+    /**
+     * Detect envelope vs single-event format. The discriminator is the
+     * first field name in the top-level object: {@code "type"} = envelope.
+     */
+    private static boolean isEnvelope(String message) {
+        if (message == null) return false;
+        try (JsonParser p = JSON_FACTORY.createParser(message)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) return false;
+            // Probe first field
+            JsonToken t = p.nextToken();
+            if (t == null || t == JsonToken.END_OBJECT) return false;
+            String firstField = p.currentName();
+            return "type".equals(firstField);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Parse a journal envelope and return all inner events. The envelope
+     * shape: { "type":"JOURNAL", "journalId":"...", "events":[ {...}, ... ] }
+     */
+    private List<ProjectionWriter.BalanceEvent> parseEnvelopeEvents(String message) {
+        List<ProjectionWriter.BalanceEvent> out = new ArrayList<>();
+        try (JsonParser p = JSON_FACTORY.createParser(message)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) return out;
+            boolean seenEventsArray = false;
+            while (p.nextToken() != JsonToken.END_OBJECT) {
+                String field = p.currentName();
+                JsonToken t = p.nextToken();
+                if ("events".equals(field)) {
+                    if (t == JsonToken.START_ARRAY) {
+                        while (p.nextToken() != JsonToken.END_ARRAY) {
+                            ProjectionWriter.BalanceEvent be = parseOneEventObject(p);
+                            if (be != null) out.add(be);
+                        }
+                        seenEventsArray = true;
+                    } else {
+                        p.skipChildren();
+                    }
+                } else {
+                    p.skipChildren();
+                }
+            }
+            if (!seenEventsArray) {
+                log.warn("Envelope parsed but no events[] array found");
+            }
+        } catch (Exception e) {
+            log.error("Failed to parse journal envelope", e);
+        }
+        return out;
     }
 
     /** Read a BigDecimal: numeric tokens go through {@code decimalValue()}, strings via {@code new BigDecimal(text)}. */

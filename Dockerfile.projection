@@ -11,13 +11,14 @@ RUN mvn package -pl ledger-projection -am -DskipTests -q
 FROM amazoncorretto:21
 RUN yum install -y shadow-utils && yum clean all
 RUN groupadd -r ledger && useradd -r -g ledger ledger
+RUN mkdir -p /var/lib/projection && chown ledger:ledger /var/lib/projection
+COPY scripts/projection-oom-handler.sh /app/oom-handler.sh
+COPY scripts/projection-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/oom-handler.sh /app/entrypoint.sh \
+    && chown ledger:ledger /app/oom-handler.sh /app/entrypoint.sh
 COPY --from=build /build/ledger-projection/target/ledger-projection-*.jar /app/projection.jar
 USER ledger
 EXPOSE 8089
-ENTRYPOINT ["java", \
-    "-XX:+UseZGC", \
-    "-XX:MaxGCPauseMillis=1", \
-    "-Xms1g", "-Xmx1g", \
-    "-Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info", \
-    "-Dmanagement.metrics.export.prometheus.enabled=true", \
-    "-jar", "/app/projection.jar"]
+
+ENV JAVA_OPTS=""
+ENTRYPOINT ["/app/entrypoint.sh"]

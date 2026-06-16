@@ -2,6 +2,7 @@ package com.tomma8.ledger.rocksdb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tomma8.ledger.domain.event.BalanceChangeEvent;
+import com.tomma8.ledger.domain.event.JournalEventEnvelope;
 import com.tomma8.ledger.util.LedgerMappers;
 import org.rocksdb.RocksIterator;
 import org.slf4j.Logger;
@@ -22,6 +23,7 @@ public class OutboxStore {
     private static final Logger log = LoggerFactory.getLogger(OutboxStore.class);
     private static final ObjectMapper mapper = LedgerMappers.get();
     private static final byte[] OUTBOX_PREFIX = "outbox:".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] OUTBOX_JOURNAL_PREFIX = "outbox:journal:".getBytes(StandardCharsets.UTF_8);
 
     private final RocksDBManager rocksDBManager;
     private final ConcurrentLinkedQueue<BalanceChangeEvent> pending = new ConcurrentLinkedQueue<>();
@@ -55,8 +57,9 @@ public class OutboxStore {
     }
 
     /**
-     * Scan CF_OUTBOX and return unsent events up to limit.
-     * Caller must call {@link #markSent} after successful Kafka publish.
+     * Scan CF_OUTBOX and return unsent per-line events (legacy path; used
+     * by tests that pre-date the journal-envelope wire format). Caller
+     * must call {@link #markSent} after successful Kafka publish.
      */
     public List<BalanceChangeEvent> readPending(int limit) {
         if (rocksDBManager == null || !rocksDBManager.isOpen()) return List.of();
@@ -67,6 +70,8 @@ public class OutboxStore {
             while (iter.isValid() && events.size() < limit) {
                 byte[] key = iter.key();
                 if (key == null || !startsWith(key, OUTBOX_PREFIX)) break;
+                // Skip journal-envelope entries (different prefix)
+                if (startsWith(key, OUTBOX_JOURNAL_PREFIX)) { iter.next(); continue; }
                 byte[] value = iter.value();
                 if (value != null && value.length > 0) {
                     try {
@@ -86,6 +91,39 @@ public class OutboxStore {
     }
 
     /**
+     * Scan CF_OUTBOX and return unsent journal envelopes up to limit.
+     * Each envelope bundles all line events for one journal — caller must
+     * call {@link #markJournalSent} on Kafka ack. Returns envelopes in
+     * journalId order (sorted by CF key prefix).
+     */
+    public List<JournalEventEnvelope> readPendingJournals(int limit) {
+        if (rocksDBManager == null || !rocksDBManager.isOpen()) return List.of();
+        List<JournalEventEnvelope> envelopes = new ArrayList<>();
+        try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
+                rocksDBManager.getHandle("outbox"))) {
+            iter.seek(OUTBOX_JOURNAL_PREFIX);
+            while (iter.isValid() && envelopes.size() < limit) {
+                byte[] key = iter.key();
+                if (key == null || !startsWith(key, OUTBOX_JOURNAL_PREFIX)) break;
+                byte[] value = iter.value();
+                if (value != null && value.length > 0) {
+                    try {
+                        JournalEventEnvelope env = mapper.readValue(value, JournalEventEnvelope.class);
+                        envelopes.add(env);
+                    } catch (Exception e) {
+                        log.warn("Failed to deserialize outbox envelope, key={}",
+                                new String(key, StandardCharsets.UTF_8), e);
+                    }
+                }
+                iter.next();
+            }
+        } catch (Exception e) {
+            log.error("Failed to scan outbox journals", e);
+        }
+        return envelopes;
+    }
+
+    /**
      * Delete an outbox event after successful Kafka publish.
      */
     public void markSent(String eventId) {
@@ -94,6 +132,32 @@ public class OutboxStore {
             rocksDBManager.delete("outbox", outboxKey(eventId));
         } catch (Exception e) {
             log.error("Failed to delete outbox event {}", eventId, e);
+        }
+    }
+
+    /**
+     * Delete an outbox journal-envelope entry after successful Kafka publish.
+     * Key format: {@code outbox:journal:<journalId>}.
+     */
+    public void markJournalSent(String journalId) {
+        if (rocksDBManager == null || !rocksDBManager.isOpen()) return;
+        try {
+            rocksDBManager.delete("outbox", outboxJournalKey(journalId));
+        } catch (Exception e) {
+            log.error("Failed to delete outbox journal envelope {}", journalId, e);
+        }
+    }
+
+    /**
+     * Persist a journal envelope to CF_OUTBOX. Caller must invoke
+     * {@link #markJournalSent} on Kafka ack.
+     */
+    public void enqueueJournal(String journalId, byte[] value) {
+        if (rocksDBManager == null || !rocksDBManager.isOpen()) return;
+        try {
+            rocksDBManager.put("outbox", outboxJournalKey(journalId), value);
+        } catch (Exception e) {
+            log.error("Failed to enqueue outbox journal envelope {}", journalId, e);
         }
     }
 
@@ -120,6 +184,10 @@ public class OutboxStore {
 
     private static byte[] outboxKey(String eventId) {
         return ("outbox:" + eventId).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] outboxJournalKey(String journalId) {
+        return ("outbox:journal:" + journalId).getBytes(StandardCharsets.UTF_8);
     }
 
     private static boolean startsWith(byte[] src, byte[] prefix) {

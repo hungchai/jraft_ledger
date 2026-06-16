@@ -24,6 +24,11 @@ RUN groupadd -r ledger && useradd -r -g ledger ledger
 RUN mkdir -p /var/lib/ledger/rocksdb /var/lib/ledger/raft /var/log/ledger \
     && chown -R ledger:ledger /var/lib/ledger /var/log/ledger
 
+COPY scripts/ledger-oom-handler.sh /app/oom-handler.sh
+COPY scripts/ledger-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/oom-handler.sh /app/entrypoint.sh \
+    && chown ledger:ledger /app/oom-handler.sh /app/entrypoint.sh
+
 COPY --from=build /build/ledger-restful/target/ledger-restful-*.jar /app/ledger-restful.jar
 
 USER ledger
@@ -34,4 +39,4 @@ HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
 ENV JAVA_OPTS=""
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/ledger-restful.jar"]
+ENTRYPOINT ["/app/entrypoint.sh"]

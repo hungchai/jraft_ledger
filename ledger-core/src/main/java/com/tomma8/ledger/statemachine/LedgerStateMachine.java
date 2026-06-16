@@ -53,6 +53,11 @@ public class LedgerStateMachine {
     private RocksDBManager rocksDB;
     private com.tomma8.ledger.rocksdb.OutboxStore outboxStore;
     private boolean persistAfterApply;
+    private final com.tomma8.ledger.event.EmitGate emitGate = new com.tomma8.ledger.event.EmitGate();
+
+    public com.tomma8.ledger.event.EmitGate getEmitGate() {
+        return emitGate;
+    }
 
     public void setOutboxStore(com.tomma8.ledger.rocksdb.OutboxStore outboxStore) {
         this.outboxStore = outboxStore;
@@ -103,11 +108,19 @@ public class LedgerStateMachine {
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
                     idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), idempotencyBytes);
-            // Write outbox events inside same WriteBatch for atomicity
-            for (BalanceChangeEvent event : outboxEvents) {
-                byte[] key = ("outbox:" + event.eventId()).getBytes(StandardCharsets.UTF_8);
-                byte[] value = objectMapper.writeValueAsBytes(event);
-                batch.put(rocksDB.getHandle("outbox"), key, value);
+            // Write outbox envelope inside same WriteBatch for atomicity.
+            // One CF_OUTBOX entry per journal (not per line), keyed by journalId.
+            // Gated by emitGate: skip when this node won't publish (follower / init phase).
+            // Skipping avoids unbounded CF_OUTBOX growth on followers — the journal itself
+            // is the source of truth and is replicated via Raft.
+            if (emitGate.isEnabled() && !outboxEvents.isEmpty()) {
+                com.tomma8.ledger.domain.event.JournalEventEnvelope env =
+                        new com.tomma8.ledger.domain.event.JournalEventEnvelope(
+                                com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
+                                journal.journalId(), outboxEvents);
+                byte[] envValue = objectMapper.writeValueAsBytes(env);
+                String envKey = "outbox:journal:" + journal.journalId();
+                batch.put(rocksDB.getHandle("outbox"), envKey.getBytes(StandardCharsets.UTF_8), envValue);
             }
             rocksDB.write(batch);
         } catch (Exception e) {
@@ -606,10 +619,16 @@ public class LedgerStateMachine {
             persistApply(journal, balanceUpdates, idempotencyEntry, eventsToPublish);
 
             // 10. Publish to Kafka ONLY after outbox is committed to RocksDB
-            // Callback-driven deletion: KafkaEventPublisher callback calls markSent()
-            // after broker ack. Because outbox is already in RocksDB, the delete is safe.
-            for (BalanceChangeEvent event : eventsToPublish) {
-                eventListener.onEvent(event);
+            // Bundled per-journal envelope: 1 Kafka record per posting/reversal
+            // (4 lines → 1 record, not 4). Callback-driven deletion: publisher
+            // calls markJournalSent on broker ack.
+            // Gated by emitGate: closed during init/catch-up, open only on leader.
+            if (emitGate.isEnabled() && eventListener != null && !eventsToPublish.isEmpty()) {
+                com.tomma8.ledger.domain.event.JournalEventEnvelope envelope =
+                        new com.tomma8.ledger.domain.event.JournalEventEnvelope(
+                                com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
+                                journalId, eventsToPublish);
+                eventListener.onPosting(envelope);
             }
             long tEnd = System.nanoTime();
             long totalMs = (tEnd - t0) / 1_000_000;
@@ -659,8 +678,8 @@ public class LedgerStateMachine {
             persistBalanceEntry(key, balanceStore.get(key).orElse(null));
         }
 
-        // Publish account creation event
-        if (eventListener != null) {
+        // Publish account creation event (gated: only on leader after catch-up)
+        if (emitGate.isEnabled() && eventListener != null) {
             eventListener.onAccountCreated(new AccountCreatedEvent(
                     FastIdGenerator.nextId(),
                     AccountCreatedEvent.EVENT_TYPE,
@@ -804,6 +823,7 @@ public class LedgerStateMachine {
             Instant now = Instant.now();
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
+            List<BalanceChangeEvent> reversalEvents = new ArrayList<>();
 
             // Mirror each original line: DEBIT ↔ CREDIT, no balance check
             for (var origLine : orig.lines()) {
@@ -833,8 +853,8 @@ public class LedgerStateMachine {
                         origLine.configVersion(), now);
                 reusableMirroredLines.add(jl);
 
-                // Publish BalanceChangeEvent for reversal
-                if (eventListener != null) {
+                // Collect BalanceChangeEvent for reversal (gated: only on leader after catch-up)
+                if (emitGate.isEnabled() && eventListener != null) {
                     BigDecimal delta = mirrored == EntryType.DEBIT
                             ? jl.amount().negate()
                             : jl.amount();
@@ -866,8 +886,16 @@ public class LedgerStateMachine {
                             cmd.valueDate(),
                             cmd.valueDate(),
                             Map.of("sourceSystem", "LEDGER"));
-                    eventListener.onEvent(event);
+                    reversalEvents.add(event);
                 }
+            }
+            // Publish reversal as one envelope (1 Kafka record per reversal, not N)
+            if (!reversalEvents.isEmpty() && eventListener != null) {
+                com.tomma8.ledger.domain.event.JournalEventEnvelope reversalEnv =
+                        new com.tomma8.ledger.domain.event.JournalEventEnvelope(
+                                com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
+                                reversalJournalId, reversalEvents);
+                eventListener.onPosting(reversalEnv);
             }
 
             boolean crossPeriod = cmd.valueDate().getYear() != orig.valueDate().getYear()
@@ -888,7 +916,7 @@ public class LedgerStateMachine {
             idempotencyStore.put(cmd.requestId(), idempotencyEntry);
 
             // Atomic RocksDB persistence
-            persistApply(reversalJournal, balanceUpdates, idempotencyEntry, List.of());
+            persistApply(reversalJournal, balanceUpdates, idempotencyEntry, reversalEvents);
             // Also persist updated original journal
             if (rocksDB != null) {
                 try {

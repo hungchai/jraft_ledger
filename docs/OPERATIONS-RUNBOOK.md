@@ -52,13 +52,8 @@ RocksDB uses leveled compaction by default. For this write-heavy workload:
 
 ```bash
 # Manual compaction during low-traffic window (Sunday 03:00 UTC):
-# Trigger via JMX or admin API — compact the entire DB
-curl -X POST http://<leader-node>:8080/ledger/admin/rocksdb/compact
-
-# Equivalent manual approach (if no admin endpoint):
-# 1. Stop writes gracefully
-# 2. Let pending compactions finish (monitor SST count)
-# 3. Optionally: trigger CompactRange via RocksDB API
+# Not yet exposed via REST — use RocksDB JMX / ops tooling, or wait for
+# POST /ledger/admin/rocksdb/compact (planned, not implemented).
 ```
 
 **Signs of compaction debt:**
@@ -79,10 +74,7 @@ This codebase writes all journal + balance data to MySQL via the Projection side
    -- Compare to Leader's raftLogIndex
    ```
 
-2. **Take final snapshot of active data:**
-   ```bash
-   curl -X POST http://<leader-node>:8080/ledger/admin/snapshot
-   ```
+2. **Before maintenance:** ensure a recent Raft snapshot exists (SOFAJRaft auto-snapshot every 600s via `setSnapshotIntervalSecs`). Manual trigger API (`POST /ledger/admin/snapshot`) is **not yet implemented**.
 
 3. **Archive old RocksDB SST files (older than 90 days):**
    ```bash
@@ -126,7 +118,7 @@ Leader ──AppendEntries RPC──→ Follower-1
 
 ```bash
 # On each node, query lastAppliedIndex:
-curl -s http://<node>:8080/ledger/admin/raft/status | jq '.lastAppliedIndex'
+curl -s http://<node>:8081/ledger/cluster/raft-status | jq '.lastAppliedIndex'
 
 # All nodes should be within ~100 entries of each other.
 # Learner may lag more (up to a few seconds).
@@ -161,7 +153,7 @@ Do nothing. Leader's `AppendEntries` will catch it up. Monitor lag decreasing.
 
 ```
 Step 1: Identify the stale node
-  curl http://<suspected-node>:8080/ledger/admin/raft/status
+  curl http://<suspected-node>:8081/ledger/cluster/raft-status
 
 Step 2: Stop the ledger process on that node
   systemctl stop ledger
@@ -184,8 +176,7 @@ Step 5: The node starts as follower with empty state.
 
 ```
 Step 1: Identify — leader's own snapshot fails to load, or apply() panics
-Step 2: Step down the leader:
-  curl -X POST http://<leader>:8080/ledger/admin/raft/step-down
+Step 2: Step down the leader (not yet exposed via REST — restart followers first to force re-election, or use SOFAJRaft CLI if available):
 Step 3: New leader elected. Old leader becomes follower.
 Step 4: Treat old leader as Case B — wipe and re-sync.
 Step 5: Verify new leader's lastAppliedIndex matches journal projection.
@@ -277,7 +268,7 @@ log() {
 }
 
 # Check this node is NOT the leader (backup on follower to avoid perf impact)
-IS_LEADER=$(curl -s http://localhost:8080/ledger/admin/raft/status | jq -r '.isLeader')
+IS_LEADER=$(curl -s http://localhost:8081/ledger/cluster/raft-status | jq -r '.isLeader')
 if [ "$IS_LEADER" = "true" ]; then
     log "WARN: This node is leader. Skipping backup to avoid performance impact."
     log "INFO: Backup should run on a follower node."
@@ -298,19 +289,16 @@ fi
 
 case "$BACKUP_TYPE" in
     hourly)
-        # Incremental via BackupEngine (handled by Java admin endpoint)
-        curl -s -X POST http://localhost:8080/ledger/admin/rocksdb/backup/create
-        log "Hourly incremental backup triggered"
+        # Incremental via BackupEngine — admin REST not yet implemented; use ops tooling
+        log "Hourly incremental backup — trigger via RocksDB BackupEngine / planned admin API"
         ;;
     daily)
         # Full backup to NAS
         BACKUP_DIR="$BACKUP_ROOT/daily/$TIMESTAMP"
         mkdir -p "$BACKUP_DIR"
 
-        # Trigger RocksDB checkpoint (consistent snapshot without stopping)
-        curl -s -X POST http://localhost:8080/ledger/admin/rocksdb/checkpoint \
-            -d "{\"path\": \"$BACKUP_DIR\"}" \
-            -H "Content-Type: application/json"
+        # RocksDB checkpoint — admin REST not yet implemented; copy data dir after graceful stop
+        log "Daily backup — use filesystem snapshot / planned POST /ledger/admin/rocksdb/checkpoint"
 
         # Also dump current config
         cp /etc/ledger/*.yml "$BACKUP_DIR/"
@@ -332,9 +320,8 @@ case "$BACKUP_TYPE" in
         BACKUP_DIR="$BACKUP_ROOT/weekly/$TIMESTAMP"
         mkdir -p "$BACKUP_DIR"
 
-        curl -s -X POST http://localhost:8080/ledger/admin/rocksdb/checkpoint \
-            -d "{\"path\": \"$BACKUP_DIR/rocksdb\"}" \
-            -H "Content-Type: application/json"
+        # RocksDB checkpoint — admin REST not yet implemented
+        log "Weekly backup — copy RocksDB data dir / planned POST /ledger/admin/rocksdb/checkpoint"
 
         # MySQL dump (projection schema)
         mysqldump --single-transaction --routines --triggers \
@@ -379,8 +366,9 @@ tar -xzf "$BACKUP_FILE" -C "$RESTORE_DIR"
 ledger-server --data-dir "$RESTORE_DIR" --mode standalone-verify
 
 # 3. Query key invariants
-curl -s http://localhost:8081/ledger/admin/raft/status | jq '.lastAppliedIndex'
-curl -s http://localhost:8081/ledger/admin/verify/journal-balance | jq '.consistent'
+curl -s http://localhost:8081/ledger/cluster/raft-status | jq '.lastAppliedIndex'
+# Journal balance verify API not yet implemented — use reconciliation L1 instead
+curl -s -X POST http://localhost:8081/ledger/reconciliation/l1 -H 'Content-Type: application/json' -d '{"date":"2026-05-18"}'
 
 # 4. If both pass: backup valid. Cleanup.
 #    If either fails: investigate, mark backup as suspect.

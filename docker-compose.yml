@@ -82,7 +82,7 @@ services:
       LEDGER_ADVERTISE_URL: http://localhost:8081
       JAVA_OPTS: >-
         -Xms2g
-        -Xmx2g
+        -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
         -XX:+ExitOnOutOfMemoryError
@@ -131,7 +131,7 @@ services:
       LEDGER_ADVERTISE_URL: http://localhost:8082
       JAVA_OPTS: >-
         -Xms2g
-        -Xmx2g
+        -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
         -XX:+ExitOnOutOfMemoryError
@@ -182,7 +182,7 @@ services:
       LEDGER_ADVERTISE_URL: http://localhost:8083
       JAVA_OPTS: >-
         -Xms2g
-        -Xmx2g
+        -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
         -XX:+ExitOnOutOfMemoryError
@@ -259,8 +259,21 @@ services:
       SPRING_DATASOURCE_PASSWORD: ledger123
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       KAFKA_CONSUMER_CONCURRENCY: 4
-      SNOWFLAKE_WORKER_ID: 9
-      LEDGER_PROJECTION_BALANCE_WORKERS: 2
+      SNOWFLAKE_WORKER_ID: 1
+      JAVA_OPTS: >-
+        -Xms2g
+        -Xmx3g
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=50
+        -XX:+ExitOnOutOfMemoryError
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/projection/
+        -XX:ErrorFile=/var/lib/projection/hs_err_pid_%p.log
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
+    volumes:
+      - ./jraft_ledger/projection:/var/lib/projection
     depends_on:
       mysql:
         condition: service_healthy

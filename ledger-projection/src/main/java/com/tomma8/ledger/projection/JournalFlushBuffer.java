@@ -9,8 +9,10 @@ import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -31,6 +33,9 @@ import java.util.function.LongConsumer;
 public class JournalFlushBuffer implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(JournalFlushBuffer.class);
+
+    private static final int DEADLOCK_MAX_RETRIES = 3;
+    private static final long DEADLOCK_RETRY_BASE_MS = 20;
 
     private final SqlSessionFactory sqlSessionFactory;
     private final int flushIntervalMs;
@@ -217,24 +222,63 @@ public class JournalFlushBuffer implements AutoCloseable {
         }
     }
 
-    /** Multi-row INSERT for a single shard batch; throws on SQL failure. */
+    /** Multi-row INSERT for a single shard batch; throws on SQL failure.
+     * Rows are sorted by (accountAccountId, journalLineId) before insert so
+     * concurrent transactions acquire gap locks in a consistent order across
+     * all projection instances, preventing InnoDB deadlocks. Deadlocks are
+     * also retried a bounded number of times before giving up. */
     private void flushRowsDirect(List<PendingRow> pending) {
         if (pending.isEmpty()) return;
-        try (SqlSession session = sqlSessionFactory.openSession()) {
-            JournalMapper jm = session.getMapper(JournalMapper.class);
-            ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
-            jm.batchInsertJournalLines(toJournalLineRows(pending));
-            em.batchInsertEvents(toEventLogRows(pending));
-            session.commit();
-            flushBatches.increment();
-            flushRows.add(pending.size());
-            onFlushedEventCount.accept(pending.size());
-        } catch (Exception e) {
-            throw new RuntimeException("Journal batch insert failed (rows=" + pending.size() + ")", e);
+
+        List<JournalMapper.JournalLineBatchRow> journalRows = toJournalLineRows(pending);
+        List<ProjectionEventLogMapper.EventLogBatchRow> eventRows = toEventLogRows(pending);
+
+        RuntimeException lastError = null;
+        for (int attempt = 1; attempt <= DEADLOCK_MAX_RETRIES; attempt++) {
+            try (SqlSession session = sqlSessionFactory.openSession()) {
+                JournalMapper jm = session.getMapper(JournalMapper.class);
+                ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
+                jm.batchInsertJournalLines(journalRows);
+                em.batchInsertEvents(eventRows);
+                session.commit();
+                flushBatches.increment();
+                flushRows.add(pending.size());
+                onFlushedEventCount.accept(pending.size());
+                if (attempt > 1) {
+                    log.info("Journal batch insert succeeded after retry (attempt={} rows={})", attempt, pending.size());
+                }
+                return;
+            } catch (Exception e) {
+                lastError = new RuntimeException("Journal batch insert failed (rows=" + pending.size() + ")", e);
+                if (attempt < DEADLOCK_MAX_RETRIES && isDeadlock(e)) {
+                    long backoff = DEADLOCK_RETRY_BASE_MS * (1L << (attempt - 1));
+                    log.warn("Deadlock detected on journal batch insert (attempt={}/{} rows={}), retrying after {}ms",
+                            attempt, DEADLOCK_MAX_RETRIES, pending.size(), backoff, e);
+                    try {
+                        Thread.sleep(backoff);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Interrupted during deadlock retry", ie);
+                    }
+                } else {
+                    throw lastError;
+                }
+            }
         }
+        throw lastError;
     }
 
-    private static List<JournalMapper.JournalLineBatchRow> toJournalLineRows(List<PendingRow> rows) {
+    private static boolean isDeadlock(Throwable t) {
+        while (t != null) {
+            if (t instanceof SQLException sqlEx && "40001".equals(sqlEx.getSQLState())) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    static List<JournalMapper.JournalLineBatchRow> toJournalLineRows(List<PendingRow> rows) {
         var out = new ArrayList<JournalMapper.JournalLineBatchRow>(rows.size());
         for (PendingRow p : rows) {
             out.add(new JournalMapper.JournalLineBatchRow(
@@ -243,6 +287,9 @@ public class JournalFlushBuffer implements AutoCloseable {
                     p.pe().currency(), p.pe().entryType(), p.pe().amount(), p.pe().preBalance(),
                     p.pe().postBalance(), p.pe().configVersion(), p.createdAt()));
         }
+        out.sort(Comparator
+                .comparing(JournalMapper.JournalLineBatchRow::accountAccountId)
+                .thenComparing(JournalMapper.JournalLineBatchRow::journalLineId));
         return out;
     }
 

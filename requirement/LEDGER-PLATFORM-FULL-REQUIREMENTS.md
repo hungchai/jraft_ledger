@@ -32,6 +32,7 @@
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
 | v0.13 | 2026-05-31 | F-011：修正 Outbox Pattern 為 callback-driven deletion，消除重複發布；KafkaEventPublisher send callback 負責刪除 outbox，AsyncOutboxPublisher 不再直接調用 markSent | Ledger Platform Team |
+| v0.14 | 2026-06-15 | F-011：新增 §4.5 Journal Envelope 發送。一筆 Journal 一個 envelope record（含 N 個 BalanceChangeEvent），Kafka 流量降為原 1/N；新增 `JournalEventEnvelope`、`KafkaEventPublisher.onPosting`、`ProjectionConsumer` envelope/legacy 雙路徑、`AsyncOutboxPublisher` 改走 envelope 路徑 | Ledger Platform Team |
 | v0.14 | 2026-05-31 | 新增 F-016 Micrometer Metrics & Observability 規格：完整定義 Timer / Counter / Gauge 指標清單、Prometheus 抓取保型、Grafana Alert Rule 與 Dashboard Panel 規格、Hotspot Account Queue 深度監控、Projection Lag 監控、JVM GC Pause Alert | Ledger Platform Team |
 | v0.15 | 2026-06-04 | Raft / State Machine 強化：RaftNodeManager 新增 `electionTimeoutMs` 建構子重載（測試可注入 1000ms 縮短選舉時間）；新增 `RaftOptions.setApplyBatch(16)` 縮短 apply 批次等待以降低延遲；LedgerRaftStateMachine 移除 `Node.logManager` 反射式日誌恢復（環境耦合風險高），空 payload 條目改為 `[APPLY_EMPTY]` 記錄後跳過；測試 JVM 啟動參數新增 `--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED`（覆寫 mockito-inline 預設）。TDD 補充 Module 22（SnowflakeIdGenerator 時鐘回退容錯，TC-SNOW-01~04） | Ledger Platform Team |
 | v0.12 | 2026-05-31 | 新增 F-015 Config Abstraction：ConfigService 介面 + SpringConfigService 實作，移除 LedgerConfig 中所有 `System.getenv().getOrDefault()`，支援 Apollo / Nacos 等配置中心熱更新 | Ledger Platform Team |
@@ -3655,6 +3656,31 @@ Gap Detection：
   - 收到新事件時：if newSeq > lastSeenSeq + 1 → 判定 GAP
   - 觸發告警，可能需要從 Kafka 回溯或 Reconciliation 補齊
 ```
+
+### 4.5 Journal Envelope 發送（v0.3 增量）
+
+v0.2 模型下，一筆 N-line Journal 會發出 N 個 Kafka record（N 通常 = 2 ~ 8）。在高吞吐量場景（k6 50 VUs × 10 min ≈ 200K journals / 800K records）中，Kafka 流量、partition 元數據與 consumer 端 batch 開銷都隨 line 數線性放大。v0.3 改為**一筆 Journal 一個 envelope record**，將同一 Journal 的 BalanceChangeEvent 透過 envelope 內的 `events` 陣列一次投遞。
+
+**Envelope Schema**（`com.tomma8.ledger.domain.event.JournalEventEnvelope`）：
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `type` | `string` | ✅ | 事件類型判別子；當前固定值 `"JOURNAL"`（由 `JournalEventEnvelope.TYPE` 常數定義）；保留給未來其他 envelope 類型（如 `SNAPSHOT`、`CORRECTION`）擴展用 |
+| `journalId` | `string` | ✅ | 對應的 Journal ID；envelope 內所有 events 共享同一 journalId |
+| `events` | `BalanceChangeEvent[]` | ✅ | 該 Journal 內所有 JournalLine 對應的 BalanceChangeEvent，依行序排列 |
+
+**Producer 路徑**：`LedgerStateMachine.applyPosting` 與 `applyReversal` 在收集完所有 events 後，呼叫 `eventListener.onPosting(envelope)`，**不再逐 line 呼叫 `onEvent(event)`**。`KafkaEventPublisher.onPosting` 將 envelope 序列化成 JSON 一次送出；callback-driven deletion 改為 `markJournalSent(journalId)`，刪除 `outbox:journal:<journalId>` 條目。
+
+**Consumer 路徑**：`ProjectionConsumer` 在 `onBalance` 入口先以頂層 `type` 欄位判別 envelope（`type == "JOURNAL"`）與否。Envelope 走法解析 `events[]` 陣列，呼叫既有的 `parseOneEventObject` 處理每個內部事件；legacy 單一 record 走既有路徑（向後相容）。最終 inner events 與 legacy events 攤平後送入 `writer.writeBalanceBatch`。
+
+**CF_OUTBOX 變更**：
+- 舊 key 前綴：`outbox:<eventId>`（per-line）
+- 新 key 前綴：`outbox:journal:<journalId>`（per-journal）
+- `readPendingJournals(limit)` 為新生產路徑、`readPending(limit)` 為 legacy path（測試用）
+
+**預期效益**（k6 10 VUs × 1 min 實測）：
+- Kafka record 數：828311 → ~210K（-75%，與 journals 數 1:1）
+- Consumer 端 batch 開銷：每 record 1 envelope parse → N events，但 partition metadata / network frame 減少
 
 ---
 

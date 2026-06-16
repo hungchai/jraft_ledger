@@ -18,6 +18,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -146,12 +147,20 @@ public class ProjectionWriter {
         lastEventTimestamp.set(System.currentTimeMillis());
     }
 
-    /** Synchronous JDBC batch upsert; throws on SQL failure (no silent loss). */
+    /** Synchronous JDBC batch upsert; throws on SQL failure (no silent loss).
+     * Balance updates are sorted by (accountId, balanceType, currency) so
+     * concurrent transactions acquire account_balance unique-key locks in a
+     * consistent order across projection instances, preventing deadlocks. */
     private void upsertBalancesSync(LinkedHashMap<BalanceUpdate, BalanceUpdate> conflated) {
         if (conflated.isEmpty()) return;
+        var sorted = new ArrayList<>(conflated.values());
+        sorted.sort(Comparator
+                .comparing(BalanceUpdate::accountId)
+                .thenComparing(BalanceUpdate::balanceType)
+                .thenComparing(BalanceUpdate::currency));
         try (SqlSession session = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
             AccountBalanceMapper bm = session.getMapper(AccountBalanceMapper.class);
-            for (BalanceUpdate bu : conflated.values()) {
+            for (BalanceUpdate bu : sorted) {
                 bm.upsertBalance(bu.accountPk(), bu.accountId(), bu.balanceType(), bu.currency(),
                         bu.amount(), bu.position(), bu.accountSeq(), bu.lastJournalId());
             }

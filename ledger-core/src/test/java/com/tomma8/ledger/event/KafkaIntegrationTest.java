@@ -58,6 +58,8 @@ class KafkaIntegrationTest {
 
         publisher = new KafkaEventPublisher(kafka.getBootstrapServers(), topic);
         stateMachine.setEventListener(publisher);
+        // EmitGate is closed by default; tests opt in.
+        stateMachine.getEmitGate().setEnabled(true);
     }
 
     @AfterEach
