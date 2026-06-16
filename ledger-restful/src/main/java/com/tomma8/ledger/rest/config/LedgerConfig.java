@@ -258,6 +258,7 @@ public class LedgerConfig {
             sm.setRocksDB(rocksDBManager);
             sm.setOutboxStore(outboxStore);
             sm.setPersistAfterApply(true);
+            sm.startRetentionScheduler(); // periodic journal prune (bounds RocksDB/RSS)
             // Snapshot restore happens via onSnapshotLoad() from leader transfer
             // during Raft startup. Local RocksDB restore removed — stale local
             // snapshots caused non-deterministic replay and balance divergence.

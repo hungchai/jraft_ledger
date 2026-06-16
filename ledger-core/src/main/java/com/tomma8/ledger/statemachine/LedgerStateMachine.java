@@ -171,6 +171,50 @@ public class LedgerStateMachine {
         this.rocksDB = rocksDB;
     }
 
+    // Index-triggered pruning. raftIndex increments once per applied journal and DB
+    // space is ~linear in journal count, so triggering on index growth (not wall
+    // time) bounds the DB to retention + pruneEvery REGARDLESS of write rate — a
+    // time-based interval would let DB swing by (rate × interval), unpredictable.
+    // The prune itself (DeleteRange + compactRange) runs on a background thread so
+    // the apply hot path is never blocked; a single-permit guard coalesces triggers.
+    private java.util.concurrent.ExecutorService pruneExecutor;
+    private final AtomicLong lastPruneIndex = new AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicBoolean pruning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** Enable index-triggered async pruning (prod only). */
+    public synchronized void startRetentionScheduler() {
+        if (rocksDB == null || pruneExecutor != null) return;
+        pruneExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "journal-retention-pruner");
+            t.setDaemon(true);
+            return t;
+        });
+        log.info("Journal retention enabled: index-triggered every {} journals",
+                parseIntEnv("LEDGER_JOURNAL_PRUNE_EVERY", 10_000));
+    }
+
+    /** Called after each applied journal: if the index has advanced past the prune
+     *  step since the last prune, submit an async prune. Cheap + lock-free on the
+     *  hot path (one CAS); the actual prune runs on the background thread. */
+    private void maybeTriggerPrune() {
+        if (pruneExecutor == null) return;
+        long pruneEvery = parseIntEnv("LEDGER_JOURNAL_PRUNE_EVERY", 10_000);
+        if (getRaftLogIndex() - lastPruneIndex.get() < pruneEvery) return;
+        if (!pruning.compareAndSet(false, true)) return; // a prune is already queued/running
+        pruneExecutor.submit(() -> {
+            try {
+                long at = getRaftLogIndex();
+                pruneOldJournals();
+                lastPruneIndex.set(at);
+            } catch (Exception e) {
+                log.error("Async prune failed", e);
+            } finally {
+                pruning.set(false);
+            }
+        });
+    }
+
     // ── Snapshot / Restore ─────────────────────────────────────
 
     public void takeSnapshot() throws Exception {
@@ -185,10 +229,8 @@ public class LedgerStateMachine {
                 raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
-        // Snapshot is the natural GC point: prune journals older than the retention
-        // window so the RocksDB journal CF (and the off-heap/page-cache footprint that
-        // scales with DB size) stays bounded. Cold history lives in the MySQL projection.
-        pruneOldJournals();
+        // (Pruning is index-triggered continuously — see maybeTriggerPrune — not tied
+        //  to snapshots, which are too coarse for high write rates.)
     }
 
     /** Local GC of the derived journal CF: delete journals (and their lines) with
@@ -690,6 +732,7 @@ public class LedgerStateMachine {
 
             if (rocksDB == null) journalStore.put(journalId, journal); // in-memory mode only
             journalCount.incrementAndGet();
+            maybeTriggerPrune();
 
             // 7. Atomic balance update with accountSeq increment + collect events
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
@@ -1050,6 +1093,7 @@ public class LedgerStateMachine {
 
             if (rocksDB == null) journalStore.put(reversalJournalId, reversalJournal); // in-memory mode only
             journalCount.incrementAndGet();
+            maybeTriggerPrune();
 
             // Mark original as reversed. RocksDB write below is authoritative;
             // heap map only matters in standalone/test mode (no RocksDB).
