@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.controller;
 
+import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.EntryType;
@@ -8,6 +9,7 @@ import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.service.PostingService;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -17,6 +19,7 @@ import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 @RestController
@@ -29,16 +32,29 @@ public class PostingController {
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
 
+    // Admission control: cap concurrent in-flight postings so an overload burst
+    // sheds load (503) instead of accumulating in-flight work on the heap until
+    // OOM. Bounds the in-flight working set; does NOT touch consensus.
+    private final Semaphore inflight;
+    private final int acquireTimeoutMs;
+
     public PostingController(PostingService postingService,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                               NodeRole nodeRole,
-                              MeterRegistry meterRegistry) {
+                              MeterRegistry meterRegistry,
+                              ConfigService cs) {
         this.postingService = postingService;
         this.raftNodeManager = raftNodeManager;
         this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
+        int maxInflight = cs.getInt("LEDGER_MAX_INFLIGHT_POSTINGS", 256);
+        this.acquireTimeoutMs = cs.getInt("LEDGER_INFLIGHT_ACQUIRE_MS", 100);
+        this.inflight = new Semaphore(maxInflight, true);
+        Gauge.builder("ledger.posting.inflight.available", inflight::availablePermits)
+                .description("Available posting admission-control permits (0 = saturated, shedding)")
+                .register(meterRegistry);
     }
 
     @PostMapping
@@ -57,6 +73,25 @@ public class PostingController {
                 responseBody.put("leaderHint", leader);
                 return ResponseEntity.status(503).body(responseBody);
             }
+
+            // Admission control — shed load when in-flight postings are saturated.
+            boolean acquired;
+            try {
+                acquired = inflight.tryAcquire(acquireTimeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                acquired = false;
+            }
+            if (!acquired) {
+                outcome = "REJECTED";
+                meterRegistry.counter("ledger.posting.rejected.count", "errorCode", LedgerErrorCode.QUEUE_FULL.name()).increment();
+                var busy = new HashMap<String, Object>();
+                busy.put("status", "REJECTED");
+                busy.put("errorCodes", List.of(LedgerErrorCode.QUEUE_FULL.name()));
+                busy.put("reason", "in-flight posting limit reached — retry");
+                return ResponseEntity.status(503).header("Retry-After", "1").body(busy);
+            }
+            try {
             String requestId = (String) body.get("requestId");
             String businessEventRef = (String) body.get("businessEventRef");
             LocalDate valueDate = LocalDate.parse((String) body.get("valueDate"));
@@ -110,6 +145,9 @@ public class PostingController {
                 return ResponseEntity.badRequest().body(toResponseMap(result));
             }
             return ResponseEntity.ok(toResponseMap(result));
+            } finally {
+                inflight.release();
+            }
         } catch (Exception e) {
             outcome = "ERROR";
             throw e;
