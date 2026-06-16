@@ -614,4 +614,40 @@ class LedgerStateMachineTest {
         assertThat(second).isEqualTo(first);
         assertThat(second.errorDetails()).isEqualTo(first.errorDetails());
     }
+
+    // ── journalSequence authoritative counter (disk-backed stage 1) ────────
+
+    @Test
+    @DisplayName("TC-F008-SEQ-01 journalSequence increments per applied journal")
+    void journalSequence_incrementsPerJournal() {
+        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+        assertThat(stateMachine.getJournalSequence()).isZero();
+        for (int i = 1; i <= 3; i++) {
+            stateMachine.applyPosting(new PostingCommand(
+                    "seq-req-" + i, "TEST", "ref", LocalDate.now(),
+                    List.of(new PostingCommand.Leg("leg-1", "T", new BigDecimal("1.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "d"))))));
+            assertThat(stateMachine.getJournalSequence()).isEqualTo(i);
+        }
+    }
+
+    @Test
+    @DisplayName("TC-F008-SEQ-02 journalSequence survives snapshot/restore (not derived from map size)")
+    void journalSequence_survivesSnapshotRestore() throws Exception {
+        setBalance("CLIENT_ACC_001", "AVAILABLE_BALANCE", "USD", new BigDecimal("1000.00"));
+        for (int i = 1; i <= 5; i++) {
+            stateMachine.applyPosting(new PostingCommand(
+                    "snap-req-" + i, "TEST", "ref", LocalDate.now(),
+                    List.of(new PostingCommand.Leg("leg-1", "T", new BigDecimal("1.00"), "USD", List.of(
+                            new PostingCommand.Line("CLIENT_ACC_001", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "d"))))));
+        }
+        assertThat(stateMachine.getJournalSequence()).isEqualTo(5);
+
+        byte[] snap = stateMachine.snapshotBytes();
+        LedgerStateMachine restored = new LedgerStateMachine(
+                new BalanceStore(), new AccountMetaStore(), balanceTypeConfigStore);
+        restored.restoreFromBytes(snap);
+
+        assertThat(restored.getJournalSequence()).isEqualTo(5);
+    }
 }

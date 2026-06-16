@@ -47,6 +47,11 @@ public class LedgerStateMachine {
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
+    // Authoritative count of journals applied. Incremented once per NEW journal
+    // (deterministic — same Raft log => same count on every node). Replaces
+    // journalStore.size() as the journalSequence source so the count stays correct
+    // once journalStore becomes a bounded cache (disk-backed design, stage 3).
+    private final AtomicLong journalCount = new AtomicLong(0);
     private final ConcurrentHashMap<String, ReentrantLock> accountLocks = new ConcurrentHashMap<>();
 
     private LedgerEventListener eventListener;
@@ -169,7 +174,7 @@ public class LedgerStateMachine {
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore,
-                raftLogIndex.get(), journalSequence.get());
+                raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
     }
@@ -185,7 +190,7 @@ public class LedgerStateMachine {
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore,
-                raftLogIndex.get(), journalSequence.get());
+                raftLogIndex.get(), journalCount.get());
         return objectMapper.writeValueAsBytes(data);
     }
 
@@ -193,12 +198,14 @@ public class LedgerStateMachine {
         SnapshotData data = objectMapper.readValue(bytes, SnapshotData.class);
         data.restoreTo(balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore);
-        // Derive counters from actual journal count, not stored snapshot values.
-        // Stored counters can diverge when snapshot is taken on a different node
-        // that had a different application history (e.g., after leader change).
-        long journalCount = journalStore.size();
-        raftLogIndex.set(journalCount);
-        journalSequence.set(journalCount);
+        // Restore the authoritative journal count from the snapshot. (Previously
+        // derived from journalStore.size(); that breaks once journalStore is a
+        // bounded cache — the snapshot now carries the true count, which equals
+        // the journal count at snapshot time and is deterministic per Raft log.)
+        long restoredCount = data.journalSequence();
+        this.journalCount.set(restoredCount);
+        raftLogIndex.set(restoredCount);
+        journalSequence.set(restoredCount);
     }
 
     private java.util.function.LongSupplier lastAppliedIndexSource;
@@ -210,7 +217,7 @@ public class LedgerStateMachine {
     public long getRaftLogIndex() {
         return lastAppliedIndexSource != null ? lastAppliedIndexSource.getAsLong() : raftLogIndex.get();
     }
-    public long getJournalSequence() { return journalStore.size(); }
+    public long getJournalSequence() { return journalCount.get(); }
 
     public BalanceStore getBalanceStore() { return balanceStore; }
     public AccountMetaStore getAccountMetaStore() { return accountMetaStore; }
@@ -549,6 +556,7 @@ public class LedgerStateMachine {
             long tJournalEnd = System.nanoTime();
 
             journalStore.put(journalId, journal);
+            journalCount.incrementAndGet();
 
             // 7. Atomic balance update with accountSeq increment + collect events
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
@@ -908,8 +916,9 @@ public class LedgerStateMachine {
                     List.copyOf(reusableMirroredLines), crossPeriod, now);
 
             journalStore.put(reversalJournalId, reversalJournal);
+            journalCount.incrementAndGet();
 
-            // Mark original as reversed
+            // Mark original as reversed (status update — existing key, not a new journal)
             journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
 
             IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now);
