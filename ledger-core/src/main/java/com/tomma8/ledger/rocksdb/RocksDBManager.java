@@ -157,6 +157,12 @@ public class RocksDBManager implements AutoCloseable {
      *  exclusive. Used to prune old journals past the retention window. */
     public void deleteRange(String cfName, byte[] beginKey, byte[] endKey) throws Exception {
         ColumnFamilyHandle cf = getHandle(cfName);
+        // journal keys are monotonic (JNL-%016d), so old data sits in whole older SST
+        // files entirely within [begin,end). deleteFilesInRanges drops those files
+        // outright (cheap, immediate reclaim) — compactRange alone left them behind and
+        // the DB kept growing under load. deleteRange handles the one straddling SST's
+        // keys; compactRange then reclaims that straddler.
+        rocksDB.deleteFilesInRanges(cf, java.util.List.of(beginKey, endKey), false);
         rocksDB.deleteRange(cf, writeOptionsInstance, beginKey, endKey);
         try (CompactRangeOptions cro = new CompactRangeOptions()
                 .setExclusiveManualCompaction(false)) {
