@@ -27,11 +27,28 @@ public class RocksDBManager implements AutoCloseable {
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true);
+        // Direct I/O bypasses the OS page cache for SST reads + flush/compaction
+        // writes. Without it, sustained writes accumulate dirty page cache that
+        // the kernel can't reclaim fast enough → the cgroup/pod RSS climbs with DB
+        // size and gets OOM-killed (observed: file cache ~3GB driving RSS to the
+        // 8g limit). With direct I/O, RSS ≈ anon (bounded heap + block cache), flat
+        // under load. Read caching is served by the bounded RocksDB block cache.
+        // Default on; disable via LEDGER_ROCKSDB_DIRECT_IO=false if a filesystem
+        // doesn't support O_DIRECT (open() falls back automatically on failure).
+        if (parseBoolEnv("LEDGER_ROCKSDB_DIRECT_IO", true)) {
+            dbOptions.setUseDirectReads(true)
+                    .setUseDirectIoForFlushAndCompaction(true);
+        }
     }
 
     private static int parseIntEnv(String k, int def) {
         try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
         catch (Exception e) { return def; }
+    }
+
+    private static boolean parseBoolEnv(String k, boolean def) {
+        String v = System.getenv(k);
+        return v == null ? def : Boolean.parseBoolean(v.trim());
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
@@ -83,7 +100,20 @@ public class RocksDBManager implements AutoCloseable {
         }
 
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        rocksDB = RocksDB.open(dbOptions, dbPath, cfDescriptors, handles);
+        try {
+            rocksDB = RocksDB.open(dbOptions, dbPath, cfDescriptors, handles);
+        } catch (RocksDBException e) {
+            // Some filesystems reject O_DIRECT. Fall back to buffered I/O so the
+            // node still starts (RSS will rely on cgroup page-cache reclaim).
+            if (dbOptions.useDirectReads() || dbOptions.useDirectIoForFlushAndCompaction()) {
+                log.warn("RocksDB open with direct I/O failed ({}). Retrying with buffered I/O.", e.getMessage());
+                dbOptions.setUseDirectReads(false).setUseDirectIoForFlushAndCompaction(false);
+                handles.clear();
+                rocksDB = RocksDB.open(dbOptions, dbPath, cfDescriptors, handles);
+            } else {
+                throw e;
+            }
+        }
 
         for (int i = 0; i < handles.size(); i++) {
             String cfName = i == 0
@@ -92,7 +122,9 @@ public class RocksDBManager implements AutoCloseable {
             columnFamilyHandles.put(cfName, handles.get(i));
         }
 
-        log.info("RocksDB opened at {}, {} column families", dbPath, columnFamilyHandles.size());
+        log.info("RocksDB opened at {}, {} column families, directIO reads={}/flushCompaction={}",
+                dbPath, columnFamilyHandles.size(),
+                dbOptions.useDirectReads(), dbOptions.useDirectIoForFlushAndCompaction());
     }
 
     public boolean isOpen() {
