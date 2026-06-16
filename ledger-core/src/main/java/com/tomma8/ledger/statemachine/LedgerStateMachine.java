@@ -43,12 +43,11 @@ public class LedgerStateMachine {
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
     private final IdempotencyStore idempotencyStore;
-    // Bounded LRU cache over the RocksDB `journal` CF (the durable, authoritative
-    // store). Caps heap at O(working-set) instead of O(all-history) — the prior
-    // unbounded map was the dominant OOM cause. Reads fall through to RocksDB
-    // (readJournal); F-006 list queries scan the CF. NOT used as the snapshot
-    // source — the snapshot streams journals straight from RocksDB.
-    private final Map<String, Journal> journalStore;
+    // In-memory journal map used ONLY in standalone/test mode (no RocksDB). In
+    // production (RocksDB present) it is never written or read — journals are
+    // served straight from the RocksDB `journal` CF (durable, with its own bounded
+    // block cache). This removes the former unbounded heap map that caused OOM.
+    private final Map<String, Journal> journalStore = new ConcurrentHashMap<>();
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
@@ -196,13 +195,14 @@ public class LedgerStateMachine {
     }
 
     public byte[] snapshotBytes() throws Exception {
-        // Journals are NOT in the snapshot blob — they would materialize the whole
-        // history into heap and OOM at scale. They live in the RocksDB `journal` CF
-        // (durable; same-dir restart keeps them) and, for cross-node InstallSnapshot,
-        // are streamed as a separate snapshot file (see streamJournalsTo / adapter).
+        // With RocksDB: journals are NOT in the blob (would materialize all history
+        // into heap → OOM at scale); they live in the journal CF and stream as a
+        // separate snapshot file. Without RocksDB (standalone/test): the in-memory
+        // map is the only store, so it must go in the blob.
+        Map<String, Journal> journals = (rocksDB == null) ? journalStore : Map.of();
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                Map.of(), idempotencyStore,
+                journals, idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         return objectMapper.writeValueAsBytes(data);
     }
@@ -350,13 +350,6 @@ public class LedgerStateMachine {
         this.accountMetaStore = accountMetaStore;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
         this.idempotencyStore = new IdempotencyStore();
-        int cacheMax = parseIntEnv("LEDGER_JOURNAL_CACHE_MAX", 50_000);
-        this.journalStore = java.util.Collections.synchronizedMap(
-                new java.util.LinkedHashMap<>(1024, 0.75f, true) {
-                    @Override protected boolean removeEldestEntry(Map.Entry<String, Journal> e) {
-                        return size() > cacheMax;
-                    }
-                });
         this.raftLogIndex = new AtomicLong(0);
         this.journalSequence = new AtomicLong(0);
     }
@@ -366,17 +359,16 @@ public class LedgerStateMachine {
         catch (Exception e) { return def; }
     }
 
-    /** Read a journal: bounded cache → RocksDB read-through (authoritative). */
+    /** Read a journal straight from RocksDB (the durable, authoritative on-node
+     *  store). No heap cache — RocksDB's own bounded block cache serves hot blocks,
+     *  so a second heap copy would only double-cache and risk unbounded growth.
+     *  Falls back to the in-memory map only in standalone/test mode (no RocksDB). */
     private Journal readJournal(String journalId) {
-        Journal cached = journalStore.get(journalId);
-        if (cached != null) return cached;
-        if (rocksDB == null) return null;
+        if (rocksDB == null) return journalStore.get(journalId);
         try {
             byte[] raw = rocksDB.get("journal", journalId.getBytes(StandardCharsets.UTF_8));
             if (raw == null) return null;
-            Journal j = objectMapper.readValue(raw, Journal.class);
-            journalStore.put(journalId, j);   // warm cache
-            return j;
+            return objectMapper.readValue(raw, Journal.class);
         } catch (Exception e) {
             log.error("RocksDB journal read failed for {}", journalId, e);
             return null;
@@ -662,7 +654,7 @@ public class LedgerStateMachine {
                     List.copyOf(reusableJournalLines), false, now);
             long tJournalEnd = System.nanoTime();
 
-            journalStore.put(journalId, journal);
+            if (rocksDB == null) journalStore.put(journalId, journal); // in-memory mode only
             journalCount.incrementAndGet();
 
             // 7. Atomic balance update with accountSeq increment + collect events
@@ -1022,11 +1014,12 @@ public class LedgerStateMachine {
                     cmd.valueDate(), JournalStatus.CONFIRMED,
                     List.copyOf(reusableMirroredLines), crossPeriod, now);
 
-            journalStore.put(reversalJournalId, reversalJournal);
+            if (rocksDB == null) journalStore.put(reversalJournalId, reversalJournal); // in-memory mode only
             journalCount.incrementAndGet();
 
-            // Mark original as reversed (status update — existing key, not a new journal)
-            journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
+            // Mark original as reversed. RocksDB write below is authoritative;
+            // heap map only matters in standalone/test mode (no RocksDB).
+            if (rocksDB == null) journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
 
             IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now);
             idempotencyStore.put(cmd.requestId(), idempotencyEntry);
