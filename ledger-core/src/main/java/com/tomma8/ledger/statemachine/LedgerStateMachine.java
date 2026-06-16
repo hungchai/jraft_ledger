@@ -176,9 +176,13 @@ public class LedgerStateMachine {
 
     public void takeSnapshot() throws Exception {
         if (rocksDB == null) return;
+        // Journals are NOT in the snapshot blob — they would materialize the whole
+        // history into heap and OOM at scale. They live in the RocksDB `journal` CF
+        // (durable; same-dir restart keeps them) and, for cross-node InstallSnapshot,
+        // are streamed as a separate snapshot file (see streamJournalsTo / adapter).
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                allJournalsForSnapshot(), idempotencyStore,
+                Map.of(), idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
@@ -192,9 +196,13 @@ public class LedgerStateMachine {
     }
 
     public byte[] snapshotBytes() throws Exception {
+        // Journals are NOT in the snapshot blob — they would materialize the whole
+        // history into heap and OOM at scale. They live in the RocksDB `journal` CF
+        // (durable; same-dir restart keeps them) and, for cross-node InstallSnapshot,
+        // are streamed as a separate snapshot file (see streamJournalsTo / adapter).
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                allJournalsForSnapshot(), idempotencyStore,
+                Map.of(), idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         return objectMapper.writeValueAsBytes(data);
     }
@@ -251,6 +259,38 @@ public class LedgerStateMachine {
         Map<String, Journal> out = new HashMap<>();
         forEachJournal(j -> out.put(j.journalId(), j));
         return out;
+    }
+
+    // ── Journal snapshot streaming (cross-node InstallSnapshot) ─────────────
+    // Stream the RocksDB `journal` CF to/from a file without materializing all
+    // journals in heap. Format: repeated [int keyLen][key bytes][int valLen][val bytes].
+
+    public void streamJournalsTo(java.io.OutputStream os) throws Exception {
+        if (rocksDB == null) return;
+        try (var out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(os))) {
+            rocksDB.forEach("journal", (k, v) -> {
+                try {
+                    out.writeInt(k.length); out.write(k);
+                    out.writeInt(v.length); out.write(v);
+                } catch (Exception e) { throw new RuntimeException(e); }
+            });
+            out.writeInt(-1); // end marker
+            out.flush();
+        }
+    }
+
+    public void ingestJournalsFrom(java.io.InputStream is) throws Exception {
+        if (rocksDB == null) return;
+        try (var in = new java.io.DataInputStream(new java.io.BufferedInputStream(is))) {
+            while (true) {
+                int kl = in.readInt();
+                if (kl < 0) break;
+                byte[] k = in.readNBytes(kl);
+                int vl = in.readInt();
+                byte[] v = in.readNBytes(vl);
+                rocksDB.put("journal", k, v);
+            }
+        }
     }
 
     // ── Snapshot data record ───────────────────────────────────
