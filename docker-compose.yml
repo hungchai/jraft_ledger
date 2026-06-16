@@ -103,7 +103,6 @@ services:
         -XX:LogFile=/var/lib/ledger/vm.log
         -Djdk.tracePinnedThreads=full
         -XX:-OmitStackTraceInFastThrow
-        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
         --add-opens=java.base/java.util=ALL-UNNAMED
         --add-opens=java.base/java.lang=ALL-UNNAMED
@@ -158,7 +157,6 @@ services:
         -XX:LogFile=/var/lib/ledger/vm.log
         -Djdk.tracePinnedThreads=full
         -XX:-OmitStackTraceInFastThrow
-        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
         --add-opens=java.base/java.util=ALL-UNNAMED
         --add-opens=java.base/java.lang=ALL-UNNAMED
@@ -215,7 +213,6 @@ services:
         -XX:LogFile=/var/lib/ledger/vm.log
         -Djdk.tracePinnedThreads=full
         -XX:-OmitStackTraceInFastThrow
-        -Xcheck:jni
         -Dserver.shutdown.grace-period=30s
         --add-opens=java.base/java.util=ALL-UNNAMED
         --add-opens=java.base/java.lang=ALL-UNNAMED
