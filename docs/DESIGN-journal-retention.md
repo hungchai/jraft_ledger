@@ -100,3 +100,63 @@ pruneBelow = lastSnapshotIndex − LEDGER_JOURNAL_RETENTION
 Implementation is moderate but **consensus-critical** (deterministic prune in the apply/
 snapshot path) — needs TDD: prune determinism across nodes, reversal-of-near-window still
 works, fresh-follower-after-prune, snapshot size bounded, disk reclaimed after compaction.
+
+---
+
+## Addendum — memory/OOM root cause found during soak validation (2026-06-17)
+
+Validating retention under sustained ~1000-VU load surfaced a separate, more urgent OOM
+that was **not** disk/heap. Layered findings, in the order they were isolated:
+
+### 1. On-disk growth was WAL, not journal data
+`du` on the RocksDB dir showed 2.3GB while live SST (actual data) was only ~40MB —
+retention was working. The 2.3GB was **WAL `.log` files**: with 9 column families a WAL
+can't be deleted until the *oldest-unflushed* CF flushes past it; rarely-written CFs
+(balance_type, account_meta) pinned old WALs.
+**Fix:** `RocksDBManager` sets `setMaxTotalWalSize` (`LEDGER_ROCKSDB_MAX_WAL_MB`, default
+512) → forces flush of pinning CFs so WALs are reclaimed. WAL then oscillates in a bounded
+band instead of climbing monotonically.
+
+### 2. RSS hitting the cgroup ceiling was reclaimable page cache (benign)
+`memory.current` reached ~99% under load but **zero OOM-kills** across dozens of runs.
+Breakdown (`memory.stat`): `file` (page cache) ≈ 2.2GB and **reclaimable** — the kernel
+evicts it before any kill. Only `anon` (unreclaimable) is a real OOM risk. WAL writes are
+buffered (not direct I/O), so WAL size drives page cache; the WAL cap also trims this.
+
+### 3. The real OOM — a native `WriteBatch` handle leak
+`anon` ratcheted up monotonically to ~4GB and never released, even after a forced GC.
+NMT (`NativeMemoryTracking`) showed the **JVM** side flat (heap committed 2GB, Internal/
+direct ~6MB) — the growth was **off-NMT native** (`anon − NMT-committed` climbed +1.7GB).
+Root cause: `LedgerStateMachine.persistApply` created `new WriteBatch()` per apply but
+**never closed it**. RocksJava frees a `WriteBatch`'s off-heap buffer only on `close()`
+(no GC finalizer), so every posting leaked one batch → native RSS grew unbounded under
+load → cgroup OOM (manifesting as health-check-timeout restarts, `OOMKilled=false`).
+**Fix:** wrap the `WriteBatch` in try-with-resources. After the fix, `anon` collapsed from
+4GB-and-climbing to <1GB and **plateaus** (tracks heap-resident warmup, native gap flat).
+Regression test: `TC-ROCKS-LEAK-01` (high-volume apply persists every journal).
+
+### 4. jemalloc to bound native fragmentation/retention
+Independently, glibc malloc retains freed memory under RocksDB's heavy multithreaded
+malloc/free churn (`MALLOC_ARENA_MAX` caps arena *count*, not retention). The Docker image
+preloads **jemalloc** (`LD_PRELOAD`, `MALLOC_CONF=lg_dirty_mult:5`) so freed native memory
+returns to the OS promptly — defence-in-depth on top of the leak fix.
+
+### Resulting bounds (all enforced)
+| Component | Bound | Mechanism |
+|---|---|---|
+| Journal/JournalLine SST (disk) | retention window | index-triggered `pruneJournals` + `deleteFilesInRanges` |
+| WAL | `LEDGER_ROCKSDB_MAX_WAL_MB` (512) | `setMaxTotalWalSize` |
+| RocksDB block/index/filter cache | `LEDGER_ROCKSDB_CACHE_MB` (256) | shared `LRUCache` |
+| JVM heap | `-Xmx` (2g) | ZGC |
+| JVM direct memory | `-XX:MaxDirectMemorySize` (512m) | JVM |
+| Native (WriteBatch) | **0 leak** | try-with-resources |
+| Native fragmentation/retention | working set | jemalloc |
+
+Net: `anon` (the only unreclaimable, OOM-causing memory) is bounded ≈ heap + small native,
+flat under sustained load. Page cache fills the rest of the cgroup and is reclaimed on
+demand.
+
+### Config tuning shipped
+`docker-compose.yml`: heap 3g→2g, `MaxDirectMemorySize=512m`, `LEDGER_ROCKSDB_MAX_WAL_MB=256`,
+`MALLOC_ARENA_MAX=2`, `mem_limit=6g`. Retention/prune-every set low (50000/10000) to exercise
+pruning quickly under test; raise for production per the reversal-window/projection-lag buffer.

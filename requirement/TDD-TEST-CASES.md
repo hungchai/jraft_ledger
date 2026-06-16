@@ -789,6 +789,14 @@ TC-ROCKS-03  columnFamilyIsolation_writeToOneCF_notAffectOthers
              Given: 寫 CF_JOURNAL 一筆
              When:  讀 CF_BALANCE
              Then:  CF_BALANCE 不受影響，key 不衝突
+
+TC-ROCKS-LEAK-01  highVolumeApply_persistsEveryJournal_noWriteBatchLeak
+             Given: RocksDB-backed StateMachine，連續 apply 500 筆 PostingCommand
+             When:  每次 apply 經過 persistApply 的 WriteBatch try-with-resources 路徑
+             Then:  journalSequence=500，首/中/末筆 journal 均持久化可讀
+             備註:  回歸守護 persistApply 的 WriteBatch native handle 洩漏
+                    （RocksJava 僅在 close() 釋放 off-heap buffer，無 GC finalizer；
+                    未關閉時 native RSS 在持續壓力下無界增長 → OOM）。修復為 try-with-resources。
 ```
 
 ### 11.1 BalanceChangeEvent — accountSeq + position【v0.2 新增，v0.3 更新】

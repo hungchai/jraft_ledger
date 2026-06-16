@@ -554,4 +554,42 @@ class RocksDBIntegrationTest {
         assertThat(rev.status()).isEqualTo(CommandResult.COMPLETED);
         assertThat(sm.getJournal(recentId).status()).isEqualTo(JournalStatus.REVERSED);
     }
+
+    @Test
+    @DisplayName("TC-ROCKS-LEAK-01 high-volume apply persists every journal (WriteBatch close path)")
+    void highVolumeApply_persistsEveryJournal_noWriteBatchLeak() throws Exception {
+        // Regression guard for the per-apply WriteBatch native-handle leak: persistApply
+        // now wraps WriteBatch in try-with-resources so its off-heap buffer is freed every
+        // apply (RocksJava frees native memory only on close(), with no GC finalizer — the
+        // leak drove native RSS unbounded under sustained load → OOM). This drives many
+        // applies through that path and asserts every journal is durably persisted and
+        // readable, i.e. the close() does not drop the batch's writes.
+        BalanceStore bs = new BalanceStore();
+        AccountMetaStore ams = new AccountMetaStore();
+        BalanceTypeConfigStore cs = new BalanceTypeConfigStore();
+        LedgerStateMachine sm = new LedgerStateMachine(bs, ams, cs);
+        sm.setRocksDB(rocksDBManager);
+        cs.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
+                "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+        ams.put("A", new Account("A", AccountType.COMPANY, "A", null, AccountStatus.ACTIVE, null, Instant.now()));
+        ams.put("B", new Account("B", AccountType.COMPANY, "B", null, AccountStatus.ACTIVE, null, Instant.now()));
+        bs.put(new AccountBalanceKey("A", "AVAILABLE_BALANCE", "CURRENT", "USD"),
+                new BalanceEntry(new BigDecimal("100000.00"), 0, 1, "JNL-INIT", Instant.now()));
+
+        int n = 500;
+        for (int i = 1; i <= n; i++) {
+            CommandResult r = sm.applyPosting(new PostingCommand(
+                    "req-" + i, "TEST", "ref-" + i, LocalDate.now(),
+                    List.of(new PostingCommand.Leg("leg", "TEST", new BigDecimal("1.00"), "USD", List.of(
+                            new PostingCommand.Line("A", "AVAILABLE_BALANCE", "CURRENT", EntryType.DEBIT, "d"),
+                            new PostingCommand.Line("B", "AVAILABLE_BALANCE", "CURRENT", EntryType.CREDIT, "c"))))), i);
+            assertThat(r.status()).as("posting %s: %s", i, r.errorCodes()).isEqualTo(CommandResult.COMPLETED);
+        }
+
+        assertThat(sm.getJournalSequence()).isEqualTo((long) n);
+        // Every journal (first, middle, last) is durably present after its WriteBatch closed.
+        assertThat(sm.getJournal(String.format("JNL-%016d", 1))).isNotNull();
+        assertThat(sm.getJournal(String.format("JNL-%016d", n / 2))).isNotNull();
+        assertThat(sm.getJournal(String.format("JNL-%016d", n))).isNotNull();
+    }
 }

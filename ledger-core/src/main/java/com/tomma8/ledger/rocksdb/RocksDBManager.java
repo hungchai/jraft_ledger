@@ -26,7 +26,14 @@ public class RocksDBManager implements AutoCloseable {
         this.dbPath = dbPath;
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
+                .setCreateMissingColumnFamilies(true)
+                // Cap total WAL size. With many CFs, a WAL file can't be deleted until
+                // the OLDEST-unflushed CF flushes past it — rarely-written CFs (e.g.
+                // balance_type, account_meta) pin old WALs, so they accumulate to GBs
+                // even though live SST data is tiny (observed: 40MB SST vs 2.3GB WAL).
+                // This bound forces a flush of the pinning CFs when WAL exceeds it, so
+                // WALs are reclaimed and on-disk size tracks actual data.
+                .setMaxTotalWalSize((long) parseIntEnv("LEDGER_ROCKSDB_MAX_WAL_MB", 512) * 1024 * 1024);
         // Direct I/O bypasses the OS page cache for SST reads + flush/compaction
         // writes. Without it, sustained writes accumulate dirty page cache that
         // the kernel can't reclaim fast enough → the cgroup/pod RSS climbs with DB

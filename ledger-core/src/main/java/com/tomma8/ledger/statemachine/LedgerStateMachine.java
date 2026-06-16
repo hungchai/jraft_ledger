@@ -96,8 +96,11 @@ public class LedgerStateMachine {
                               IdempotencyEntry idempotencyEntry, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
-        try {
-            WriteBatch batch = new WriteBatch();
+        // try-with-resources: WriteBatch is a native RocksObject whose off-heap buffer
+        // is freed ONLY by close() (no GC finalizer). Without this, every apply leaked
+        // one WriteBatch per posting → native RSS climbed unbounded under load (not JVM
+        // heap/direct/block-cache, all bounded) and drove the cgroup to OOM.
+        try (WriteBatch batch = new WriteBatch()) {
             byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
             batch.put(rocksDB.getHandle("journal"),
                     journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
