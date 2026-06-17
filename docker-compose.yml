@@ -86,8 +86,8 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8081
       JAVA_OPTS: >-
-        -Xms1g
-        -Xmx2g
+        -Xms2g
+        -Xmx3g
         -XX:MaxDirectMemorySize=512m
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
@@ -140,8 +140,8 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8082
       JAVA_OPTS: >-
-        -Xms1g
-        -Xmx2g
+        -Xms2g
+        -Xmx3g
         -XX:MaxDirectMemorySize=512m
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
@@ -196,8 +196,8 @@ services:
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8083
       JAVA_OPTS: >-
-        -Xms1g
-        -Xmx2g
+        -Xms2g
+        -Xmx3g
         -XX:MaxDirectMemorySize=512m
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
