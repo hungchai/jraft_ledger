@@ -797,6 +797,20 @@ TC-ROCKS-LEAK-01  highVolumeApply_persistsEveryJournal_noWriteBatchLeak
              備註:  回歸守護 persistApply 的 WriteBatch native handle 洩漏
                     （RocksJava 僅在 close() 釋放 off-heap buffer，無 GC finalizer；
                     未關閉時 native RSS 在持續壓力下無界增長 → OOM）。修復為 try-with-resources。
+
+TC-F008-IDEM-01  store_boundedByCap_doesNotGrowUnbounded
+             Given: IdempotencyStore cap=100
+             When:  put 10,000 筆不同 requestId
+             Then:  size() <= 100（有界 LRU，非無界 map）
+             備註:  回歸守護 leader heap OOM — 原為無界 ConcurrentHashMap，
+                    每 requestId 永久保留（220k+ → JVM heap OOM）。
+
+TC-F008-IDEM-02  recentDedups_oldestEvicted
+             Given: IdempotencyStore cap=100，put 1,000 筆
+             When:  查最近的 req-999 與最舊的 req-0
+             Then:  req-999 命中（dedup 正常），req-0 已淘汰（無 RocksDB fallback — replay 安全）
+             備註:  不讀 idempotency CF 做 dedup：CF 領先於 balance snapshot，
+                    replay-after-snapshot 會誤判去重而跳過 balance 變更 → 分歧。
 ```
 
 ### 11.1 BalanceChangeEvent — accountSeq + position【v0.2 新增，v0.3 更新】

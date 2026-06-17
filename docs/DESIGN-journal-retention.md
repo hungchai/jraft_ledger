@@ -135,11 +135,11 @@ load → cgroup OOM (manifesting as health-check-timeout restarts, `OOMKilled=fa
 4GB-and-climbing to <1GB and **plateaus** (tracks heap-resident warmup, native gap flat).
 Regression test: `TC-ROCKS-LEAK-01` (high-volume apply persists every journal).
 
-### 4. jemalloc to bound native fragmentation/retention
-Independently, glibc malloc retains freed memory under RocksDB's heavy multithreaded
-malloc/free churn (`MALLOC_ARENA_MAX` caps arena *count*, not retention). The Docker image
-preloads **jemalloc** (`LD_PRELOAD`, `MALLOC_CONF=lg_dirty_mult:5`) so freed native memory
-returns to the OS promptly — defence-in-depth on top of the leak fix.
+### 4. jemalloc — tried and REJECTED
+Considered as defence-in-depth for glibc retention, but EPEL's libjemalloc 3.6 (2016)
+SIGSEGV-crash-looped followers in JNI (`jdk.net` socket-option native init) at startup on
+aarch64. Removed. The WriteBatch fix (native) + bounded idempotency (heap) bound memory
+without it. `MALLOC_ARENA_MAX=2` retained (caps glibc arena count; harmless).
 
 ### Resulting bounds (all enforced)
 | Component | Bound | Mechanism |
@@ -147,16 +147,46 @@ returns to the OS promptly — defence-in-depth on top of the leak fix.
 | Journal/JournalLine SST (disk) | retention window | index-triggered `pruneJournals` + `deleteFilesInRanges` |
 | WAL | `LEDGER_ROCKSDB_MAX_WAL_MB` (512) | `setMaxTotalWalSize` |
 | RocksDB block/index/filter cache | `LEDGER_ROCKSDB_CACHE_MB` (256) | shared `LRUCache` |
-| JVM heap | `-Xmx` (2g) | ZGC |
+| JVM heap | `-Xmx` (3g) | ZGC |
 | JVM direct memory | `-XX:MaxDirectMemorySize` (512m) | JVM |
 | Native (WriteBatch) | **0 leak** | try-with-resources |
-| Native fragmentation/retention | working set | jemalloc |
+| In-heap idempotency | `LEDGER_IDEMPOTENCY_CACHE` (100k) | bounded LRU |
 
 Net: `anon` (the only unreclaimable, OOM-causing memory) is bounded ≈ heap + small native,
 flat under sustained load. Page cache fills the rest of the cgroup and is reclaimed on
 demand.
 
+> jemalloc was tried and **rejected**: EPEL's libjemalloc 3.6 (2016) SIGSEGV-crash-looped
+> followers in JNI on aarch64. The fixes below bound memory without it.
+
+### 5. The leader heap-OOM — unbounded in-heap IdempotencyStore
+After the WriteBatch fix bounded *native* memory, a longer soak surfaced a JVM **heap** OOM
+on the leader (anon ≈ Xmx, `java.lang.OutOfMemoryError: Java heap space`). A heap histogram
+showed **220k+ `IdempotencyEntry`** (+ their LinkedHashMaps/Strings/byte[], ~580MB):
+`IdempotencyStore` was an unbounded `ConcurrentHashMap`, one entry per requestId kept
+**forever**, also serialized whole into the snapshot blob. Same unbounded-heap class as the
+original journalStore bug.
+**Fix:** `IdempotencyStore` is now a **bounded LRU** (`LEDGER_IDEMPOTENCY_CACHE`, default
+100k) — caps both heap and snapshot size. Soak confirms `IdempotencyEntry` pins at exactly
+the cap (was climbing).
+**Replay safety (important):** deliberately **no RocksDB-CF read-through fallback** for
+dedup. The `idempotency` CF is written per-apply and runs *ahead* of the periodic balance
+snapshot; reading it during replay-after-snapshot would falsely dedup not-yet-applied ops
+and skip their balance mutation → divergence (caught by `replayFromLog_afterSnapshot`).
+Idempotency state stays consistent with the snapshotted balance state: heap LRU, restored
+from the snapshot blob and rebuilt by log replay. Tradeoff: a retry older than the LRU
+window re-executes — standard finite dedup-window semantics, configurable via the cap.
+Regression tests: `TC-F008-IDEM-01/02`.
+*Note:* the on-disk `idempotency` CF is still unbounded (write-only now) — a separate
+disk-retention follow-up; not a heap/OOM risk.
+
+### Heap budget (3g) — why not 2g
+2g fits steady-state but a follower that falls behind and rejoins must load a leader
+snapshot + apply a catch-up backlog, whose transient heap demand exceeds 2g → heap-OOM
+restart loop (observed: a follower looped 30×). 3g gives catch-up headroom; with bounded
+idempotency the leader also stays well under it (anon ~1GB flat under sustained 1000-VU).
+
 ### Config tuning shipped
-`docker-compose.yml`: heap 3g→2g, `MaxDirectMemorySize=512m`, `LEDGER_ROCKSDB_MAX_WAL_MB=256`,
+`docker-compose.yml`: `-Xms2g/-Xmx3g`, `MaxDirectMemorySize=512m`, `LEDGER_ROCKSDB_MAX_WAL_MB=256`,
 `MALLOC_ARENA_MAX=2`, `mem_limit=6g`. Retention/prune-every set low (50000/10000) to exercise
 pruning quickly under test; raise for production per the reversal-window/projection-lag buffer.

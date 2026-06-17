@@ -172,6 +172,14 @@ public class LedgerStateMachine {
 
     public void setRocksDB(RocksDBManager rocksDB) {
         this.rocksDB = rocksDB;
+        // NOTE: deliberately NO RocksDB-CF fallback for idempotency dedup. The
+        // `idempotency` CF is written per-apply and runs AHEAD of the periodic balance
+        // snapshot, so on replay-after-snapshot it would falsely dedup not-yet-applied
+        // ops and skip their balance mutation → divergence. Idempotency state must stay
+        // consistent with the snapshotted balance state: it lives in the heap LRU,
+        // restored from the snapshot blob (a consistent point) and rebuilt by log
+        // replay. The LRU cap (LEDGER_IDEMPOTENCY_CACHE) bounds heap; a retry older than
+        // that window re-executes — the standard finite dedup-window tradeoff.
     }
 
     // Index-triggered pruning. raftIndex increments once per applied journal and DB
