@@ -1,21 +1,27 @@
 package com.tomma8.ledger.store;
 
-import com.tomma8.ledger.domain.model.IdempotencyEntry;
-
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Idempotency guard: maps requestId → journalId for completed (successful) requests only.
+ * Failed/rejected requests are NOT stored — a retry with the same requestId re-executes,
+ * which is safe because the original attempt mutated no state.
+ *
+ * <p>The store participates in Raft snapshots for cross-node determinism. Only completed
+ * entries are included, and all nodes see the same apply order → identical store contents.
+ */
 public class IdempotencyStore {
 
-    private final ConcurrentHashMap<String, IdempotencyEntry> store = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> store = new ConcurrentHashMap<>();
 
-    public Optional<IdempotencyEntry> get(String requestId) {
-        return Optional.ofNullable(store.get(requestId));
+    /** Returns the journalId if this requestId already completed, null otherwise. */
+    public String get(String requestId) {
+        return store.get(requestId);
     }
 
-    public void put(String requestId, IdempotencyEntry entry) {
-        store.put(requestId, entry);
+    public void put(String requestId, String journalId) {
+        store.put(requestId, journalId);
     }
 
     public boolean contains(String requestId) {
@@ -30,7 +36,7 @@ public class IdempotencyStore {
         store.clear();
     }
 
-    public Map<String, IdempotencyEntry> getAll() {
+    public Map<String, String> getAll() {
         return Map.copyOf(store);
     }
 

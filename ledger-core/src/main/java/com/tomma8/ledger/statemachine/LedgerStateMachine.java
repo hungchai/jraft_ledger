@@ -93,7 +93,7 @@ public class LedgerStateMachine {
     }
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
-                              IdempotencyEntry idempotencyEntry, List<BalanceChangeEvent> outboxEvents) {
+                              String requestId, String journalId, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
         try {
@@ -114,9 +114,10 @@ public class LedgerStateMachine {
                 batch.put(rocksDB.getHandle("balance"),
                         keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
+            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId);
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
-                    idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), idempotencyBytes);
+                    requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
             // Write outbox envelope inside same WriteBatch for atomicity.
             // One CF_OUTBOX entry per journal (not per line), keyed by journalId.
             // Gated by emitGate: skip when this node won't publish (follower / init phase).
@@ -300,7 +301,7 @@ public class LedgerStateMachine {
             Map<String, Account> accounts,
             Map<String, BalanceTypeConfig> configs,
             Map<String, Journal> journals,
-            Map<String, IdempotencyEntry> idempotency,
+            Map<String, String> idempotency,       // requestId → journalId (completed only)
             long raftLogIndex,
             long journalSequence) {
 
@@ -431,14 +432,10 @@ public class LedgerStateMachine {
 
         // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
         return withAccountLocks(reusableAccountSet, () -> {
-            // 1. Idempotency check
-            var existing = idempotencyStore.get(requestId);
-            if (existing.isPresent()) {
-                var entry = existing.get();
-                if (CommandResult.COMPLETED.equals(entry.status())) {
-                    return CommandResult.completed(entry.journalId());
-                }
-                return CommandResult.rejected(entry.errors(), entry.errorDetails());
+            // 1. Idempotency check — only completed entries stored; retry re-evaluates failures
+            var cachedJournalId = idempotencyStore.get(requestId);
+            if (cachedJournalId != null) {
+                return CommandResult.completed(cachedJournalId);
             }
 
             // 2. Account status check (before balance checks)
@@ -446,19 +443,13 @@ public class LedgerStateMachine {
             for (String accountId : reusableAccountSet) {
                 var account = accountMetaStore.get(accountId);
                 if (account.isEmpty()) {
-                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND,
+                    return CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND,
                             Map.of("accountId", accountId));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
                 accountCache.put(accountId, account.get());
                 if (account.get().status() == AccountStatus.FROZEN) {
-                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN,
+                    return CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN,
                             Map.of("accountId", accountId));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
             }
             long t3 = System.nanoTime();
@@ -472,18 +463,12 @@ public class LedgerStateMachine {
                         if (account.isPresent()) {
                             var type = account.get().accountType();
                             if (type == AccountType.CLIENT) {
-                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT,
+                                return CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT,
                                         Map.of("accountId", line.accountId()));
-                                idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                                return result;
                             }
                             if (type == AccountType.CONTROL) {
-                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL,
+                                return CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL,
                                         Map.of("accountId", line.accountId()));
-                                idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                                return result;
                             }
                         }
                     }
@@ -492,11 +477,8 @@ public class LedgerStateMachine {
                 // For multi-line legs, validate that the leg's amount is positive
                 // (debits and credits will use the same leg amount)
                 if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT,
+                    return CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT,
                             Map.of("legId", leg.legId(), "amount", leg.amount().toPlainString()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
             }
 
@@ -539,21 +521,15 @@ public class LedgerStateMachine {
                     BigDecimal debit = debitByCurrency.get(cc);
                     BigDecimal credit = creditByCurrency.getOrDefault(cc, BigDecimal.ZERO);
                     if (debit.compareTo(credit) != 0) {
-                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
+                        return CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", debit.toPlainString(), "creditTotal", credit.toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
                 for (String cc : creditByCurrency.keySet()) {
                     if (!debitByCurrency.containsKey(cc)) {
                         BigDecimal credit = creditByCurrency.get(cc);
-                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
+                        return CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", "0", "creditTotal", credit.toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
             }
@@ -577,12 +553,9 @@ public class LedgerStateMachine {
                 // V-13: LOCKED/FROZEN positions cannot go negative
                 if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
                         && after.compareTo(BigDecimal.ZERO) < 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.POSITION_BALANCE_FLOOR_BREACH,
+                    return CommandResult.rejected(LedgerErrorCode.POSITION_BALANCE_FLOOR_BREACH,
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
 
                 if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
@@ -595,23 +568,17 @@ public class LedgerStateMachine {
                             account.get().accountType() == AccountType.SUSPENSE ||
                             account.get().accountType() == AccountType.BANK);
                     if (!isInstitutional) {
-                        var result = CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE,
+                        return CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE,
                                 Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                         "currency", lwl.currency(), "position", line.position(),
                                         "required", lwl.amount().toPlainString(),
                                         "available", current.amount().toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
                 if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT,
+                    return CommandResult.rejected(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT,
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
                 reusableAfterBalances.put(key, after);
             }
@@ -719,11 +686,10 @@ public class LedgerStateMachine {
             }
 
             // 8. Idempotency
-            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(requestId, journalId, now);
-            idempotencyStore.put(requestId, idempotencyEntry);
+            idempotencyStore.put(requestId, journalId);
 
             // 9. Atomic RocksDB persistence (journal + balance + idempotency + outbox in one WriteBatch)
-            persistApply(journal, balanceUpdates, idempotencyEntry, eventsToPublish);
+            persistApply(journal, balanceUpdates, requestId, journalId, eventsToPublish);
 
             // 10. Publish to Kafka ONLY after outbox is committed to RocksDB
             // Bundled per-journal envelope: 1 Kafka record per posting/reversal
@@ -861,22 +827,15 @@ public class LedgerStateMachine {
     }
     private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
-        var existing = idempotencyStore.get(cmd.requestId());
-        if (existing.isPresent()) {
-            var entry = existing.get();
-            if (CommandResult.COMPLETED.equals(entry.status())) {
-                return CommandResult.completed(entry.journalId());
-            }
-            return CommandResult.rejected(entry.errors(), entry.errorDetails());
+        var cachedJournalId = idempotencyStore.get(cmd.requestId());
+        if (cachedJournalId != null) {
+            return CommandResult.completed(cachedJournalId);
         }
 
         Journal originalJournal = readJournal(cmd.originalJournalId());
         if (originalJournal == null) {
-            var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
+            return CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                     Map.of("journalId", cmd.originalJournalId()));
-            idempotencyStore.put(cmd.requestId(),
-                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-            return result;
         }
 
         Set<String> accountIds = new HashSet<>();
@@ -886,38 +845,25 @@ public class LedgerStateMachine {
 
         // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
         return withAccountLocks(accountIds, () -> {
-            // Re-check idempotency
-            var existing2 = idempotencyStore.get(cmd.requestId());
-            if (existing2.isPresent()) {
-                var entry = existing2.get();
-                if (CommandResult.COMPLETED.equals(entry.status())) {
-                    return CommandResult.completed(entry.journalId());
-                }
-                return CommandResult.rejected(entry.errors(), entry.errorDetails());
+            // Re-check idempotency — only completed entries stored
+            var cachedJournalId2 = idempotencyStore.get(cmd.requestId());
+            if (cachedJournalId2 != null) {
+                return CommandResult.completed(cachedJournalId2);
             }
 
         // Re-fetch original journal
             Journal orig = readJournal(cmd.originalJournalId());
             if (orig == null) {
-                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
+                return CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
             if (orig.status() == JournalStatus.REVERSED) {
-                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED,
+                return CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
             if (orig.journalType() == JournalType.REVERSAL) {
-                var result = CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL,
+                return CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
 
             long seq = raftIndex > 0
@@ -1021,11 +967,10 @@ public class LedgerStateMachine {
             // heap map only matters in standalone/test mode (no RocksDB).
             if (rocksDB == null) journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
 
-            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now);
-            idempotencyStore.put(cmd.requestId(), idempotencyEntry);
+            idempotencyStore.put(cmd.requestId(), reversalJournalId);
 
             // Atomic RocksDB persistence
-            persistApply(reversalJournal, balanceUpdates, idempotencyEntry, reversalEvents);
+            persistApply(reversalJournal, balanceUpdates, cmd.requestId(), reversalJournalId, reversalEvents);
             // Also persist updated original journal
             if (rocksDB != null) {
                 try {

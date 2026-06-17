@@ -9,7 +9,7 @@
 >
 > **v0.16 變更摘要**：新增 TC-F011-13~17（JournalEventEnvelope 1-record-per-journal）。驗證 applyPosting 走 `onPosting(envelope)` 路徑、EmitGate 關閉時零發送、CF_OUTBOX 一筆 journal 一筆 envelope 條目、AsyncOutboxPublisher 走 envelope 路徑。對應 v0.3 F-011 §8 envelope 模型。
 >
-> **v0.14 變更摘要**：新增 Module 15.1（Apache Ratis Engine，ADR-003），新增 TC-RAFT-RATIS-01~04 與 TC-NFR-OOM-01。涵蓋 Ratis log 提交餘額變更、冪等重放、snapshot 還原、引擎可切換，以及 OOM 災難復原（0 已提交遺失 + 乾淨復原 + 無跨節點分歧）。
+> **v0.17 變更摘要**：IdempotencyStore v0.13：僅緩存成功請求（COMPLETED），不再緩存失敗請求。更新 TC-F008-34~35、TC-F013-02、TC-F013-11 以反映新行為。新增 TC-F013-12（失敗後狀態變更重試成功）、TC-F013-13（成功請求冪等不受影響）。
 >
 > **v0.13 變更摘要**：新增 Module 22（SnowflakeIdGenerator 時鐘回退容錯），新增 TC-SNOW-01~04。涵蓋 monotonic ID、序列號回捲、≤5ms 時鐘回退等待、>5ms 時鐘回退拒絕。
 >
@@ -374,15 +374,17 @@ TC-F008-33  applyReversal_journalNotFound_errorDetailsContainJournalId
             Then:  CommandResult.status=REJECTED，errorCode=JOURNAL_NOT_FOUND
                    CommandResult.errorDetails={"journalId":"JNL-9999"}
 
-TC-F008-34  applyPosting_idempotency_rejectedRequestReturnsSameErrorDetails
+TC-F008-34  applyPosting_idempotency_rejectedRequestNotStored_retriesAndReevaluates
             Given: req-001 第一次被拒絕（ACCOUNT_NOT_FOUND，accountId=GHOST_ACC）
             When:  第二次以相同 req-001 apply
-            Then:  返回相同 CommandResult（含相同 errorDetails），不重新執行帳務邏輯
+            Then:  不命中 idempotencyStore（失敗不緩存，v0.13），重新執行帳務邏輯，再次返回 ACCOUNT_NOT_FOUND
+                   （若期間 GHOST_ACC 被建立，則第二次應成功——失敗重試可獲得不同結果）
 
-TC-F008-35  applyPosting_idempotency_afterRestart_replayedRejectedRequestReturnsSameErrorDetails
-            Given: req-002 被拒絕並已寫入 RocksDB idempotency CF
-            When:  重啟 State Machine（restoreFromSnapshot）後以相同 req-002 apply
-            Then:  從 RocksDB 恢復的 idempotencyStore 命中，返回原 errorDetails
+TC-F008-35  applyPosting_idempotency_afterRestart_onlyCompletedEntriesRestored
+            Given: req-002（成功）已寫入 RocksDB idempotency CF；req-003（失敗）未寫入
+            When:  重啟 State Machine（restoreFromSnapshot）後以 req-002、req-003 apply
+            Then:  req-002 命中 idempotencyStore → 返回 cached journalId
+                   req-003 不命中 → 重新執行（失敗不緩存，v0.13）
 ```
 
 ---
@@ -1059,10 +1061,11 @@ TC-F013-01  duplicateRequestId_returnsCachedResult_noReExecution
             When:  重複發送相同 req-001
             Then:  返回原結果（journalId=JNL-001），State Machine 不重新 apply
 
-TC-F013-02  duplicateRequestId_rejected_returnsOriginalErrors
-            Given: Posting req-002 rejected（INSUFFICIENT_BALANCE）
+TC-F013-02  duplicateRequestId_rejected_retriesAndReevaluates
+            Given: Posting req-002 rejected（INSUFFICIENT_BALANCE），idempotencyStore 不包含 req-002
             When:  重複發送 req-002
-            Then:  返回原錯誤碼（INSUFFICIENT_BALANCE），不做餘額校驗
+            Then:  不命中 idempotencyStore（失敗不緩存，v0.13），重新執行帳務校驗，再次返回 INSUFFICIENT_BALANCE
+                   （若期間餘額補足，則第二次應成功——失敗重試可獲得不同結果）
 
 TC-F013-03  idempotencySurvivesLeaderFailover
             Given: Leader 完成 req-003 apply → idempotencyStore.put → Leader 宕機
@@ -1108,10 +1111,21 @@ TC-F013-10  virtualThreadWorkerCrash_queueRecoversAndResumesConsumption
             When:  模擬 Worker thread 中斷/崩潰
             Then:  系統自動重建 Worker-3，queue 中 pending 請求繼續被消費
 
-TC-F013-11  duplicateRejectedRequest_returnsSameErrorDetails
+TC-F013-11  duplicateRejectedRequest_notStored_retriesReevaluates
             Given: Posting req-001 rejected（ACCOUNT_NOT_FOUND，accountId=GHOST_ACC）
             When:  重複發送 req-001
-            Then:  返回原錯誤碼與相同 errorDetails，不做餘額校驗
+            Then:  不命中 idempotencyStore（v0.13：失敗不緩存），重新執行帳務校驗
+                   再次返回 ACCOUNT_NOT_FOUND（因 GHOST_ACC 仍不存在）
+
+TC-F013-12  rejectedRequest_succeedsOnRetryAfterStateChange
+            Given: Posting req-001 rejected（INSUFFICIENT_BALANCE），idempotencyStore 不包含 req-001
+            When:  補充帳戶餘額後，重複發送 req-001
+            Then:  不命中 idempotencyStore → 重新執行 → 成功，idempotencyStore 寫入 req-001 → journalId
+
+TC-F013-13  completedRequest_stillDedupedAfterRejectedRetryLogicChange
+            Given: Posting req-001 completed, journalId=JNL-001
+            When:  重複發送 req-001
+            Then:  命中 idempotencyStore → 返回 cached journalId=JNL-001，不重新 apply（行為不變）
 
 TC-F013-12  idempotencySurvivesRestart_errorDetailsPreserved
             Given: req-002 rejected 並已寫入 RocksDB idempotency CF（含 errorDetails）

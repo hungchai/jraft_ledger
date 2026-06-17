@@ -29,6 +29,7 @@
 | v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
 | v0.4 | 2026-05-23 | 新增 Core Concepts 章節：定義 Account、BalanceType、Position 三大核心概念與關聯功能 | Ledger Platform Team |
 | v0.5 | 2026-05-23 | 合併 docs/architecture.md、docs/persistence-flow.md 為 Appendix A/B/C；新增 F-013 Idempotency & Hotspot Account Concurrency 規格 | Ledger Platform Team |
+| v0.13 | 2026-06-17 | F-013/F-008 Idempotency: 僅緩存成功請求（COMPLETED），不再緩存失敗請求（REJECTED）。IdempotencyEntry 簡化為 (requestId, journalId)。失敗重試將重新評估當前狀態，避免因暫態錯誤永久阻斷重試 | Ledger Platform Team |
 | v0.6 | 2026-05-24 | 新增 F-014 Java Client SDK 規格：Raft Leader 自動發現、冪等重試、同步/非同步 API、效能目標 ≤0.5ms overhead | Ledger Platform Team |
 | v0.7 | 2026-05-24 | 新增 F-011 Balance Change Event / Kafka Outbox 規格、F-013 Idempotency & Hotspot Account Concurrency 規格、OPS-001 SRE 運維指南；修正 F-007/F-009 章節標題層級；修正 account_balance 表結構：position 為邏輯映射概念（amount=CURRENT, locked_amount=LOCKED, frozen_amount=FROZEN），移除 position 實體欄位；更新 TOC | Ledger Platform Team |
 | v0.13 | 2026-05-31 | F-011：修正 Outbox Pattern 為 callback-driven deletion，消除重複發布；KafkaEventPublisher send callback 負責刪除 outbox，AsyncOutboxPublisher 不再直接調用 markSent | Ledger Platform Team |
@@ -2850,18 +2851,17 @@ Map<String, BigDecimal> getPositions(AccountBalanceKey key) {
 
 ```java
 // 冪等 Key：requestId（含 posting / reversal / adjustment）
-// Value：已完成的結果摘要
+// Value：成功時的 journalId（僅緩存 COMPLETED 的請求）
+// 設計決策 v0.13：只緩存成功的請求。失敗請求不緩存——重試時重新評估，
+// 因原始請求未改變任何狀態，且重試時的狀態可能已不同（如餘額補足、帳戶已建立）
 record IdempotencyEntry(
     String requestId,
-    String status,          // COMPLETED / REJECTED
-    String journalId,       // 成功時的 journalId
-    List<String> errors,    // 失敗時的錯誤列表
-    Instant completedAt
+    String journalId        // 成功時的 journalId
 ) {}
 
-// TTL：保留 24 小時（可配置），避免 map 無限增長
-// 實現：ConcurrentHashMap + 定期 eviction job
-ConcurrentHashMap<String, IdempotencyEntry> idempotencyStore;
+// 實現：ConcurrentHashMap<String, String>，requestId → journalId
+// 僅成功請求寫入，失敗請求不存。記憶體用量約為舊方案的 1/35
+ConcurrentHashMap<String, String> idempotencyStore;
 ```
 
 ### 2.3 Account Metadata Store
@@ -3820,14 +3820,14 @@ Kafka Broker 宕機或網路中斷：
 雙層保障：
 
 L1: In-Memory Idempotency Store（State Machine 內存）
-    ├─ 數據結構：ConcurrentHashMap<String, IdempotencyEntry>
+    ├─ 數據結構：ConcurrentHashMap<String, String>（requestId → journalId）
     ├─ 讀取延遲：< 0.01ms
-    ├─ TTL：24 小時（定期 eviction job 清理過期條目）
+    ├─ 僅存成功請求（v0.13：失敗不緩存）
     └─ 用途：正常路徑的快速冪等檢查
 
 L2: RocksDB CF_IDEMPOTENCY（持久化層）
     ├─ Key：requestId
-    ├─ Value：序列化的 IdempotencyEntry（含狀態、journalId、errors、timestamp）
+    ├─ Value：序列化的 IdempotencyEntry（requestId, journalId）
     ├─ 用途：節點重啟後恢復、跨 Leader 切換保持冪等
     └─ 與帳務數據在同一 WriteBatch，原子寫入
 ```
@@ -3837,39 +3837,35 @@ L2: RocksDB CF_IDEMPOTENCY（持久化層）
 ```java
 record IdempotencyEntry(
     String requestId,          // 原始 requestId
-    String status,             // COMPLETED / REJECTED
-    String journalId,          // 成功時的 journalId（失敗時為 null）
-    List<String> errors,       // 失敗時的錯誤碼列表（成功時為空）
-    String resultJson,         // 原始 Response JSON（用於冪等返回）
-    Instant completedAt,       // 完成時間
-    Instant expiresAt          // 過期時間（completedAt + TTL）
+    String journalId           // 成功時的 journalId
 ) {}
 ```
+
+> **v0.13 設計決策**：僅緩存成功（COMPLETED）的請求。失敗請求不寫入 idempotencyStore。
+> - 失敗請求未改變任何帳務狀態，重試是安全的
+> - 重試時系統狀態可能已變更（如餘額補充、帳戶創建），重新評估可獲得不同結果
+> - 記憶體減量：僅 ~1/7 的請求為成功（大部分為校驗失敗），加上每筆條目從 6 欄位縮減為 2 欄位，總記憶體約為舊方案的 1/35
 
 ### 2.4 冪等檢查流程
 
 ```
 1. Client 發送 Posting 請求（含 requestId = "req-001"）
 
-2. Account Worker 執行前：
-   ├─ L1 檢查：idempotencyStore.contains("req-001")?
-   │   ├─ YES, status=COMPLETED → 直接返回緩存結果，不執行
-   │   ├─ YES, status=REJECTED  → 直接返回緩存錯誤，不執行
-   │   └─ NO                    → 繼續執行
+2. State Machine apply 前：
+   ├─ L1 檢查：idempotencyStore.get("req-001")?
+   │   ├─ 返回 journalId → requestId 已成功處理，直接返回 CommandResult.completed(journalId)
+   │   └─ 返回 null       → 繼續執行
 
 3. 執行 Posting（Balance 校驗 → State Machine apply → RocksDB 持久化）
 
 4. 成功後：
-   ├─ 構建 IdempotencyEntry（status=COMPLETED, journalId=...）
-   ├─ 寫入 L1（idempotencyStore.put）
-   ├─ 寫入 L2（RocksDB CF_IDEMPOTENCY，同一 WriteBatch）
+   ├─ idempotencyStore.put(requestId, journalId)
+   ├─ 寫入 RocksDB CF_IDEMPOTENCY（同一 WriteBatch）
    └─ 返回 PostingResult
 
 5. 失敗後：
-   ├─ 構建 IdempotencyEntry（status=REJECTED, errors=[...]）
-   ├─ 寫入 L1（idempotencyStore.put）
-   ├─ 寫入 L2（RocksDB CF_IDEMPOTENCY，同一 WriteBatch）
-   └─ 返回錯誤 Response
+   ├─ 不寫入 idempotencyStore（v0.13：失敗不緩存）
+   └─ 返回錯誤 Response。Client 重試時將重新評估
 ```
 
 ### 2.5 冪等性與 Leader 切換
