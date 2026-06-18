@@ -85,7 +85,7 @@ services:
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:+ExitOnOutOfMemoryError
+        # -XX:+ExitOnOutOfMemoryError removed: allow heap dump to complete before JVM exit
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
@@ -134,7 +134,7 @@ services:
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:+ExitOnOutOfMemoryError
+        # -XX:+ExitOnOutOfMemoryError removed: allow heap dump to complete before JVM exit
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
@@ -185,7 +185,7 @@ services:
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
-        -XX:+ExitOnOutOfMemoryError
+        # -XX:+ExitOnOutOfMemoryError removed: allow heap dump to complete before JVM exit
         -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
@@ -265,7 +265,7 @@ services:
         -Xmx3g
         -XX:+UseG1GC
         -XX:MaxGCPauseMillis=50
-        -XX:+ExitOnOutOfMemoryError
+        # -XX:+ExitOnOutOfMemoryError removed: allow heap dump to complete before JVM exit
         -XX:+HeapDumpOnOutOfMemoryError
         -XX:HeapDumpPath=/var/lib/projection/
         -XX:ErrorFile=/var/lib/projection/hs_err_pid_%p.log

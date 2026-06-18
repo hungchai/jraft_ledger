@@ -19,14 +19,15 @@ export function handleSummary(data) {
 
 export const options = {
   stages: [
-    { duration: '30s', target: 100 },   // warm-up
-    { duration: '60s', target: 1000 },  // peak RFQ load
-    { duration: '30s', target: 0 },     // cool-down
+    { duration: '2m',  target: 100 },   // warm-up
+    { duration: '5m',  target: 800 },   // ramp to 800 VU
+    { duration: '50m', target: 800 },   // sustained OOM stress
+    { duration: '3m',  target: 0 },     // cool-down
   ],
   thresholds: {
-    http_req_duration: ['p(95)<50', 'p(99)<100'],
-    http_req_failed: ['rate<0.01'],
-    checks: ['rate>0.99'],
+    // Relaxed for OOM stress test: queue depth + Raft contention
+    // cause latency spikes. Goal is heap dump, not SLA.
+    http_req_failed: ['rate<0.50'],
   },
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)'],
 };
@@ -243,9 +244,12 @@ export default function () {
   const reqId = `k6-${vu}-${iter}-${Date.now()}`;
 
   const isBuy = (vu % 2) === 0;
-  // Trade: 100 USDT (16dp) for equivalent BTC (8dp)
-  const amountUsdt = '100.0000000000000000';
-  const amountBtc = (100.0 / BTC_USDT_RATE).toFixed(BTC_DP); // "0.00100000"
+  // Trade: 1 USDT (16dp) for equivalent BTC (8dp) — small size prevents
+  // INSUFFICIENT_BALANCE exhaustion under 800 VU / 60 min stress tests.
+  // At 850 TPS system cap, each of 50 BUY clients burns ~30,600 USDT in 60 min;
+  // 1M USDT seed gives 32× headroom. BTC: similar.
+  const amountUsdt = '1.0000000000000000';
+  const amountBtc = (1.0 / BTC_USDT_RATE).toFixed(BTC_DP);
 
   let payload;
   if (isBuy) {
