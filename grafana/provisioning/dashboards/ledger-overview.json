@@ -462,7 +462,7 @@
     {
       "id": 101,
       "title": "Kafka Consumer Lag",
-      "description": "Projection consumer lag per topic/partition. Warning > 100, critical > 1000.",
+      "description": "Kafka consumer group lag and committed offset per topic/partition (kafka-exporter polls broker admin API). Warning > 100, critical > 1000.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -509,13 +509,18 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{topic}} p{{partition}}",
-          "expr": "sum by (topic, partition) (kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}} lag",
+          "expr": "sum by (consumergroup, topic, partition) (kafka_consumergroup_lag{job=\"kafka\"})"
         },
         {
           "refId": "B",
-          "legendFormat": "total",
-          "expr": "sum(kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+          "legendFormat": "total lag",
+          "expr": "sum(kafka_consumergroup_lag{job=\"kafka\"})"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}} offset",
+          "expr": "kafka_consumergroup_current_offset{job=\"kafka\"}"
         }
       ]
     },

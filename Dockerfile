@@ -35,7 +35,7 @@ USER ledger
 
 EXPOSE 8080 28080
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+HEALTHCHECK --interval=15s --timeout=3s --start-period=180s --retries=10 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
 ENV JAVA_OPTS=""

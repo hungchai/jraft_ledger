@@ -319,7 +319,20 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                         ledgerStateMachine.ingestJournalsFrom(is);
                     }
                 }
-                log.info("Snapshot loaded from leader transfer");
+                // Critical: align the FSM-side lastAppliedIndex with the snapshot's
+                // lastIncludedIndex. Without this, leader sees the follower's
+                // lastAppliedIndex=0 forever and tries to send diff log entries
+                // (instead of triggering another InstallSnapshot), keeping the
+                // follower permanently out-of-sync until its local RaftDB is wiped.
+                com.alipay.sofa.jraft.entity.RaftOutter.SnapshotMeta meta = reader.load();
+                if (meta != null) {
+                    long snapIdx = meta.getLastIncludedIndex();
+                    lastAppliedIndex.set(snapIdx);
+                    log.info("Snapshot loaded from leader transfer — lastAppliedIndex aligned to {} (term={})",
+                            snapIdx, meta.getLastIncludedTerm());
+                } else {
+                    log.info("Snapshot loaded from leader transfer (no meta — lastAppliedIndex unchanged)");
+                }
             } else {
                 // No fallback to local RocksDB — stale local snapshot caused
                 // balance divergence across nodes (non-deterministic replay).
