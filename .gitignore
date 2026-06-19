@@ -2,3 +2,7 @@
 /.idea/
 /jraft_ledger/
 /.tmp/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
