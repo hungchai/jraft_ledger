@@ -46,7 +46,7 @@ const RETRY_BACKOFF_MS = [100, 200, 400];
 // Shared mutable leader URL — refreshed on connection failure or TTL expiry
 let leaderUrl = __ENV.BASE_URL || null;
 let leaderUrlTimestamp = 0;
-const LEADER_TTL_MS = 10_000;
+const LEADER_TTL_MS = 3_000;  // 3s: fast refresh during Raft churn
 
 function findLeader() {
   for (const port of LEADER_PORTS) {
@@ -325,7 +325,7 @@ export default function () {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       sleep(RETRY_BACKOFF_MS[attempt - 1] / 1000);
-      if (lastStatus === 0 || lastStatus === 504) {
+      if (lastStatus === 0 || lastStatus === 503 || lastStatus === 504) {
         refreshLeader();
       }
     }
