@@ -243,7 +243,7 @@ export default function () {
   const clientAcc = `${CLIENT_PREFIX}${String(clientIdx).padStart(4, '0')}`;
   const reqId = `k6-${vu}-${iter}-${Date.now()}`;
 
-  const isBuy = (vu % 2) === 0;
+  const isBuy = (iter % 2) === 0;  // alternate per-iteration: each client stays balanced
   // Trade: 1 USDT (16dp) for equivalent BTC (8dp) — small size prevents
   // INSUFFICIENT_BALANCE exhaustion under 800 VU / 60 min stress tests.
   // At 850 TPS system cap, each of 50 BUY clients burns ~30,600 USDT in 60 min;
