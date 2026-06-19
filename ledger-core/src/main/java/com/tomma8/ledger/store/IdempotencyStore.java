@@ -91,15 +91,15 @@ public class IdempotencyStore {
     /** Returns count of entries removed. O(n) but n is bounded by the TTL. */
     public int evictExpired() {
         long now = clock.millis();
-        int[] removed = {0};
-        store.entrySet().removeIf(e -> {
-            if (isExpired(e.getValue(), now)) {
-                removed[0]++;
-                return true;
+        int removed = 0;
+        var it = store.entrySet().iterator();
+        while (it.hasNext()) {
+            if (isExpired(it.next().getValue(), now)) {
+                it.remove();
+                removed++;
             }
-            return false;
-        });
-        return removed[0];
+        }
+        return removed;
     }
 
     public long getTtlMillis() {
