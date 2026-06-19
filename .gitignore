@@ -1,3 +1,4 @@
 */target/
 /.idea/
 /jraft_ledger/
+/.tmp/
