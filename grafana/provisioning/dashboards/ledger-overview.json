@@ -22,114 +22,106 @@
   "links": [],
   "panels": [
     {
-      "description": "Posting API P95 latency in milliseconds. NFR target: ≤ 3ms. Yellow: 3-10ms. Red: > 10ms. Uses histogram_quantile over 5m window.",
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "max": 50,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 3 },
-              { "color": "red", "value": 10 }
-            ]
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "id": 1,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
+      "title": "Posting Latency P50/P95/P99",
+      "description": "Posting API latency percentiles in milliseconds. NFR: P95 <= 3ms. 5m histogram window.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 0
       },
       "pluginVersion": "12.0.1+security-01",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le, businessEventType) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000",
-          "legendFormat": "{{businessEventType}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Posting P95 Latency",
-      "type": "gauge"
-    },
-    {
-      "description": "Posting API P50 (median) latency in milliseconds. Typical values: < 1ms under normal load.",
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
+          "unit": "ms",
           "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 2 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           },
-          "unit": "ms"
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 6, "y": 0 },
-      "id": 2,
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le, businessEventType) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000",
-          "legendFormat": "{{businessEventType}}",
-          "refId": "A"
+          "refId": "A",
+          "legendFormat": "P50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "P95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "P99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
         }
-      ],
-      "title": "Posting P50 Latency",
-      "type": "stat"
+      ]
     },
     {
-      "description": "Number of accounts with active command queues. Indicates how many distinct accounts have pending operations.",
+      "description": "Global command ingress queue depth (CommandQueueManager). Only the leader receives postings; max(ledger_command_queue_depth) across nodes. Default max-size: 50,000.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 50 },
-              { "color": "red", "value": 100 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 5000
+              },
+              {
+                "color": "red",
+                "value": 20000
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -138,7 +130,9 @@
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -149,12 +143,12 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "sum(ledger_account_queue_active)",
-          "legendFormat": "Active",
+          "expr": "max(ledger_command_queue_depth)",
+          "legendFormat": "Queue depth",
           "refId": "A"
         }
       ],
-      "title": "Active Accounts",
+      "title": "Command Queue Depth",
       "type": "stat"
     },
     {
@@ -167,15 +161,25 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red" },
-              { "color": "green", "value": 1 }
+              {
+                "color": "red"
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           },
           "unit": "none"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 14, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -184,7 +188,9 @@
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -212,16 +218,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 10 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
       "id": 5,
       "options": {
         "colorMode": "value",
@@ -230,7 +249,9 @@
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -250,7 +271,7 @@
       "type": "stat"
     },
     {
-      "description": "Live balance query P95 latency. NFR target: ≤ 2ms. Covers current balance reads from in-memory state.",
+      "description": "Live balance query P95 latency. NFR target: \u2264 2ms. Covers current balance reads from in-memory state.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -259,23 +280,38 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 2 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
       "id": 6,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -295,7 +331,7 @@
       "type": "gauge"
     },
     {
-      "description": "As-of balance query P95 latency. NFR target: ≤ 30ms. Typically higher as it replays journal entries since snapshot. Yellow: 30-60ms. Red: > 60ms.",
+      "description": "As-of balance query P95 latency. NFR target: \u2264 30ms. Typically higher as it replays journal entries since snapshot. Yellow: 30-60ms. Red: > 60ms.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -304,23 +340,38 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 30 },
-              { "color": "red", "value": 60 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
       "id": 7,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -340,51 +391,6 @@
       "type": "gauge"
     },
     {
-      "description": "Maximum JVM GC pause time across all nodes. ZGC target: < 1ms normal. Yellow: 1-5ms. Red: > 5ms. Sustained red indicates GC pressure.",
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "max": 50,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
-            ]
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
-      "id": 8,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "12.0.1+security-01",
-      "targets": [
-        {
-          "expr": "max(jvm_gc_pause_seconds_max) * 1000",
-          "legendFormat": "Max GC Pause (ms)",
-          "refId": "A"
-        }
-      ],
-      "title": "GC Pause Max",
-      "type": "gauge"
-    },
-    {
       "description": "Top 5 accounts by command queue depth. Green: < 100. Yellow: 100-500. Red: > 500 (backpressure threshold). Max queue size before rejection is 1000.",
       "fieldConfig": {
         "defaults": {
@@ -394,16 +400,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 100 },
-              { "color": "red", "value": 500 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "id": 9,
       "options": {
         "displayMode": "gradient",
@@ -419,7 +438,9 @@
         "namePlacement": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -439,6 +460,255 @@
       "type": "bargauge"
     },
     {
+      "id": 101,
+      "title": "Kafka Consumer Lag",
+      "description": "Projection consumer lag per topic/partition. Warning > 100, critical > 1000.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{topic}} p{{partition}}",
+          "expr": "sum by (topic, partition) (kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total",
+          "expr": "sum(kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "title": "MySQL Performance",
+      "description": "MySQL server QPS/connections/slow queries plus projection write throughput.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "MySQL QPS",
+          "expr": "rate(mysql_global_status_questions{job=\"mysql\"}[1m])"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "connections",
+          "expr": "mysql_global_status_threads_connected{job=\"mysql\"}"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "slow queries/s",
+          "expr": "rate(mysql_global_status_slow_queries{job=\"mysql\"}[1m])"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "projection flush rows/s",
+          "expr": "rate(ledger_projection_journal_flush_rows{job=\"projection\"}[1m])"
+        },
+        {
+          "refId": "E",
+          "legendFormat": "balance writes/s",
+          "expr": "rate(ledger_projection_balance_writes{job=\"projection\"}[1m])"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "JVM GC Events (per minute)",
+      "description": "GC pause count per minute across ledger nodes and projection. ZGC target: near-zero on ledger nodes.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}} {{action}}",
+          "expr": "sum by (instance, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "JVM GC Pause Max (ms)",
+      "description": "Max GC pause per instance. ZGC target < 1ms. Yellow 1-5ms, red > 5ms.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}}",
+          "expr": "max by (instance) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
+        }
+      ]
+    },
+    {
       "description": "Journal reversal P95 latency. Typically higher than posting due to Raft + cross-period validation. Yellow: 5-15ms. Red: > 15ms.",
       "fieldConfig": {
         "defaults": {
@@ -448,23 +718,38 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 5 },
-              { "color": "red", "value": 15 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 22
+      },
       "id": 10,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -484,7 +769,7 @@
       "type": "gauge"
     },
     {
-      "description": "Apply (state machine) P95 latency — includes deserialize + persist + RocksDB write. Yellow: 5-15ms. Red: > 15ms.",
+      "description": "Apply (state machine) P95 latency \u2014 includes deserialize + persist + RocksDB write. Yellow: 5-15ms. Red: > 15ms.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -493,23 +778,38 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 5 },
-              { "color": "red", "value": 15 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 22
+      },
       "id": 11,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -537,23 +837,38 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow", "value": 1000 },
-              { "color": "red", "value": 10000 }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
       "id": 12,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -573,23 +888,34 @@
       "type": "gauge"
     },
     {
-      "description": "Posting throughput in transactions per second. Derived from rate of posting duration metric (1m window). NFR target: ≥ 10,000 TPS peak.",
+      "description": "Posting throughput in transactions per second. Derived from rate of posting duration metric (1m window). NFR target: \u2265 10,000 TPS peak.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow" },
-              { "color": "red" }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
             ]
           },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
       "id": 13,
       "options": {
         "legend": {
@@ -623,16 +949,27 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow" },
-              { "color": "red" }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
             ]
           },
           "unit": "ops"
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
       "id": 14,
       "options": {
         "legend": {
@@ -666,16 +1003,27 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow" },
-              { "color": "red" }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "id": 15,
       "options": {
         "legend": {
@@ -714,16 +1062,27 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow" },
-              { "color": "red" }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "id": 16,
       "options": {
         "legend": {
@@ -757,9 +1116,15 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green" },
-              { "color": "yellow" },
-              { "color": "red" }
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
             ]
           },
           "unit": "bytes"
@@ -771,12 +1136,20 @@
               "options": "Max"
             },
             "properties": [
-              { "id": "custom.fillOpacity", "value": 10 }
+              {
+                "id": "custom.fillOpacity",
+                "value": 10
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
       "id": 17,
       "options": {
         "legend": {
@@ -811,13 +1184,19 @@
   "preload": false,
   "refresh": "30s",
   "schemaVersion": 41,
-  "tags": ["ledger", "raft", "observability"],
+  "tags": [
+    "ledger",
+    "raft",
+    "observability"
+  ],
   "templating": {
     "list": [
       {
         "current": {
           "text": "All",
-          "value": ["$__all"]
+          "value": [
+            "$__all"
+          ]
         },
         "datasource": "Prometheus",
         "definition": "label_values(ledger_raft_is_leader, node_id)",
@@ -856,5 +1235,5 @@
   "timezone": "browser",
   "title": "Ledger Platform Overview",
   "uid": "ledger-overview",
-  "version": 2
+  "version": 3
 }

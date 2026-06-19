@@ -218,6 +218,19 @@ services:
       - ledger-net
     restart: unless-stopped
 
+  mysql-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: ledger-mysql-exporter
+    environment:
+      DATA_SOURCE_NAME: "ledger:ledger123@(ledger-mysql:3306)/"
+    ports:
+      - "9104:9104"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ledger-net
+
   prometheus:
     image: prom/prometheus:latest
     container_name: ledger-prometheus

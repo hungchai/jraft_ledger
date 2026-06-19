@@ -22,6 +22,13 @@ scrape_configs:
           app: 'ledger'
           component: 'projection'
 
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['ledger-mysql-exporter:9104']
+        labels:
+          app: 'ledger'
+          component: 'mysql'
+
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']

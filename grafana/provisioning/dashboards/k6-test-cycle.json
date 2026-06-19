@@ -1,0 +1,1068 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Ledger Overview",
+      "type": "link",
+      "url": "/d/ledger-overview/ledger-platform-overview",
+      "icon": "dashboard",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "test-cycle.sh Monitor",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Live view for `./scripts/test-cycle.sh` k6 stress runs. Watch end-to-end TPS, posting latency, Kafka lag, projection pipeline, GC, and MySQL while the test is running. Refresh: 5s."
+      }
+    },
+    {
+      "id": 2,
+      "title": "API Posting TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))",
+          "legendFormat": "TPS"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Raft Apply TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ledger_raft_last_applied_index{node_id=~\"$node\"}[1m]))",
+          "legendFormat": "apply/s"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Outbox Publish TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ledger_outbox_published[1m]))",
+          "legendFormat": "publish/s"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Projection Write TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])",
+          "legendFormat": "events/s"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Posting Latency P50/P95/P99",
+      "description": "Client-visible posting latency during k6 load. NFR P95 <= 3ms.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "P50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "P95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "P99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "End-to-End Throughput",
+      "description": "Same TPS stack as test-cycle.sh summary: API -> Raft -> Outbox -> Projection.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "API posting",
+          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "Raft applied",
+          "expr": "sum(rate(ledger_raft_last_applied_index{node_id=~\"$node\"}[1m]))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "Outbox published",
+          "expr": "sum(rate(ledger_outbox_published[1m]))"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "Projection events",
+          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Kafka Consumer Lag",
+      "description": "Projection consumer lag. test-cycle waits for consumer assignment before k6.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{topic}} p{{partition}}",
+          "expr": "sum by (topic, partition) (kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total",
+          "expr": "sum(kafka_consumer_fetch_manager_records_lag{job=\"projection\"})"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Projection Pipeline",
+      "description": "Metrics polled by test-cycle.sh wait_projection_catchup.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "journal buffer depth",
+          "expr": "ledger_projection_journal_buffer_depth{job=\"projection\"}"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "outbox pending (max)",
+          "expr": "max(ledger_outbox_pending)"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "seconds since last event",
+          "expr": "ledger_projection_seconds_since_last_event_seconds{job=\"projection\"}"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "events/s",
+          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Posting Rejections by Error",
+      "description": "Spikes during k6 often indicate NOT_LEADER, QUEUE_FULL, or INSUFFICIENT_BALANCE.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{errorCode}}",
+          "expr": "sum(rate(ledger_posting_rejected_count_total[1m])) by (errorCode)"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Account Queue Depth (Top 5)",
+      "description": "Hotspot backpressure during stress. Max before rejection: 1000.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{accountId}}",
+          "expr": "topk(5, ledger_account_queue_depth)"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "JVM GC Events (per minute)",
+      "description": "GC activity on ledger nodes + projection during k6.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}} {{action}}",
+          "expr": "sum by (instance, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "JVM GC Pause Max (ms)",
+      "description": "ZGC on ledger nodes target < 1ms; G1 on projection target < 50ms.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}}",
+          "expr": "max by (instance) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "MySQL Performance",
+      "description": "Server QPS/connections plus projection write rates.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "MySQL QPS",
+          "expr": "rate(mysql_global_status_questions{job=\"mysql\"}[1m])"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "connections",
+          "expr": "mysql_global_status_threads_connected{job=\"mysql\"}"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "slow queries/s",
+          "expr": "rate(mysql_global_status_slow_queries{job=\"mysql\"}[1m])"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "flush rows/s",
+          "expr": "rate(ledger_projection_journal_flush_rows{job=\"projection\"}[1m])"
+        },
+        {
+          "refId": "E",
+          "legendFormat": "balance writes/s",
+          "expr": "rate(ledger_projection_balance_writes{job=\"projection\"}[1m])"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Raft Last Applied Index",
+      "description": "Follower lag vs leader during k6. Alert if > 100 behind.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{node_id}}",
+          "expr": "ledger_raft_last_applied_index{node_id=~\"$node\"}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "L1 Reconciliation",
+      "description": "Unbalanced journals from L1 reconciliation (test-cycle post-check).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "unbalanced total",
+          "expr": "ledger_reconciliation_l1_unbalanced_total"
+        }
+      ]
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "k6",
+    "test-cycle",
+    "ledger",
+    "stress"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(ledger_raft_is_leader, node_id)",
+        "includeAll": true,
+        "multi": true,
+        "name": "node",
+        "query": "label_values(ledger_raft_is_leader, node_id)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
+        "includeAll": true,
+        "multi": true,
+        "name": "businessEventType",
+        "query": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "k6 Test Cycle (test-cycle.sh)",
+  "uid": "k6-test-cycle",
+  "version": 1
+}
