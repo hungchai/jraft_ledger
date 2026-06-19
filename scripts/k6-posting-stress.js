@@ -141,7 +141,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '5000.00000000',
+      amount: '500000.00000000',
       currency: 'BTC',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -159,7 +159,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '200000000.0000000000000000',
+      amount: '20000000000.0000000000000000',
       currency: 'USDT',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -196,7 +196,7 @@ export function setup() {
         {
           legId: 'leg-1',
           postingType: 'DEPOSIT',
-          amount: '1000000.0000000000000000',
+          amount: '20000000000.0000000000000000',
           currency: 'USDT',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -206,7 +206,7 @@ export function setup() {
         {
           legId: 'leg-2',
           postingType: 'DEPOSIT',
-          amount: '10.00000000',
+          amount: '500000.00000000',
           currency: 'BTC',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},

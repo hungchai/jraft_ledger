@@ -158,3 +158,9 @@ Next: qa-engineer traceability check → final summary
 | Journal count SM vs MySQL | 21,830 = 21,830 (lag=0) ✅ |
 | Reconstructed (journal_line) | 202/202 match ✅ |
 | **Total checks** | **236 passed, 0 failed, 0 warnings** ✅
+
+## [2026-06-19] Step 0 — ledger-orchestrator (F-016 Stress Seed Budget)
+Status: ⏸ BLOCKED → dispatching
+Issue: `scripts/k6-posting-stress.js` uses STATIC seed amounts (5000 BTC + 200M USDT per account). For long-run stress test (50min × 800 VU), per-client drawdown exceeds seed → INSUFFICIENT_BALANCE late in run.
+Proposed fix: derive seed amounts proportional to TARGET_VU × SAFETY_MARGIN. Add `__ENV.TARGET_VU` (default 800) and compute HOTSPOT/CLIENT seed dynamically.
+Next: ledger-requirements → spec F-016 → ops-sre → impl k6 script → qa-engineer
