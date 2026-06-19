@@ -394,8 +394,12 @@ public class LedgerStateMachine {
                 cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", 0);
     }
     public CommandResult applyPosting(PostingCommand cmd, long raftIndex) {
+        return applyPosting(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    public CommandResult applyPosting(PostingCommand cmd, RaftApplyContext ctx) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", ctx);
     }
 
     public CommandResult applyAdjustment(AdjustmentCommand cmd) {
@@ -403,8 +407,12 @@ public class LedgerStateMachine {
                 cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", 0);
     }
     public CommandResult applyAdjustment(AdjustmentCommand cmd, long raftIndex) {
+        return applyAdjustment(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    public CommandResult applyAdjustment(AdjustmentCommand cmd, RaftApplyContext ctx) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", ctx);
     }
 
     private CommandResult applyJournalCommand(String requestId, String businessEventType,
@@ -412,6 +420,15 @@ public class LedgerStateMachine {
                                               List<PostingCommand.Leg> legs,
                                               JournalType journalType, String commandLabel,
                                               long raftIndex) {
+        return applyJournalCommand(requestId, businessEventType, businessEventRef, valueDate,
+                legs, journalType, commandLabel, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult applyJournalCommand(String requestId, String businessEventType,
+                                              String businessEventRef, LocalDate valueDate,
+                                              List<PostingCommand.Leg> legs,
+                                              JournalType journalType, String commandLabel,
+                                              RaftApplyContext ctx) {
         long t0 = System.nanoTime();
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
@@ -588,13 +605,11 @@ public class LedgerStateMachine {
             // index/seq/journalId must all derive from the Raft log index so they
             // are identical across nodes. Fall back to local counters only on the
             // non-Raft path (raftIndex == 0: standalone/tests).
-            long seq = raftIndex > 0
-                    ? raftIndex
+            long seq = ctx.useRaftIndex()
+                    ? ctx.logicalIndex()
                     : journalSequence.incrementAndGet();
-            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
-            String journalId = raftIndex > 0
-                    ? String.format("JNL-%016d", raftIndex)
-                    : String.format("JNL-%04d", seq);
+            long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
+            String journalId = ctx.journalId(seq);
             Instant now = Instant.now();
 
             for (var lwl : reusableLines) {
@@ -823,9 +838,18 @@ public class LedgerStateMachine {
         return applyReversalInternal(cmd, 0);
     }
     public CommandResult applyReversal(ReversalCommand cmd, long raftIndex) {
-        return applyReversalInternal(cmd, raftIndex);
+        return applyReversal(cmd, RaftApplyContext.single(raftIndex));
     }
+
+    public CommandResult applyReversal(ReversalCommand cmd, RaftApplyContext ctx) {
+        return applyReversalInternal(cmd, ctx);
+    }
+
     private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
+        return applyReversalInternal(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult applyReversalInternal(ReversalCommand cmd, RaftApplyContext ctx) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
         var cachedJournalId = idempotencyStore.get(cmd.requestId());
         if (cachedJournalId != null) {
@@ -866,13 +890,11 @@ public class LedgerStateMachine {
                         Map.of("journalId", cmd.originalJournalId()));
             }
 
-            long seq = raftIndex > 0
-                    ? raftIndex
+            long seq = ctx.useRaftIndex()
+                    ? ctx.logicalIndex()
                     : journalSequence.incrementAndGet();
-            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
-            String reversalJournalId = raftIndex > 0
-                    ? String.format("JNL-%016d", raftIndex)
-                    : String.format("JNL-%04d", seq);
+            long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
+            String reversalJournalId = ctx.journalId(seq);
             Instant now = Instant.now();
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();

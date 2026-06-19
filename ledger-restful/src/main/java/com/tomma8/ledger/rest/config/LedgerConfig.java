@@ -19,6 +19,7 @@ import com.tomma8.ledger.service.*;
 import com.tomma8.ledger.rest.controller.ClusterController;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.queue.AccountQueueManager;
+import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
@@ -393,12 +394,43 @@ public class LedgerConfig {
     }
 
     @Bean(destroyMethod = "close")
+    public CommandQueueManager commandQueueManager(
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            MeterRegistry meterRegistry,
+            Environment env) {
+        if (raftNodeManager == null) {
+            log.info("CommandQueueManager not created — standalone mode");
+            return null;
+        }
+        boolean enabled = env.getProperty("ledger.command-queue.enabled", Boolean.class, true);
+        if (!enabled) {
+            log.info("CommandQueueManager disabled via ledger.command-queue.enabled=false");
+            return null;
+        }
+        int maxSize = env.getProperty("ledger.command-queue.max-size", Integer.class, 50_000);
+        int batchSize = env.getProperty("ledger.command-queue.batch-size", Integer.class, 16);
+        long batchWaitMs = env.getProperty("ledger.command-queue.batch-wait-ms", Long.class, 1L);
+        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs);
+        Gauge.builder("ledger.command.queue.depth", cqm::getQueueDepth)
+                .description("Depth of global command ingress queue")
+                .register(meterRegistry);
+        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={}",
+                maxSize, batchSize, batchWaitMs);
+        return cqm;
+    }
+
+    @Bean(destroyMethod = "close")
     public AccountQueueManager accountQueueManager(
             @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
                                                    MeterRegistry meterRegistry,
                                                    Environment env) {
         if (raftNodeManager == null) {
             log.info("AccountQueueManager not created — standalone mode");
+            return null;
+        }
+        if (commandQueueManager != null) {
+            log.info("AccountQueueManager skipped — CommandQueueManager is primary ingress");
             return null;
         }
         AccountQueueManager aqm = new AccountQueueManager(raftNodeManager::submit);
