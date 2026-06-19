@@ -467,9 +467,37 @@ if ! $RECON_ONLY; then
   echo "=== Step 3: k6 stress test ($VUS VUs, $DURATION) ==="
   echo "Leader: $BASE_URL"
 
+  # Background leader watcher: logs leader changes during the k6 test
+  LEADER_LOG=$(mktemp)
+  (
+    prev=""
+    while true; do
+      curr=$(find_leader)
+      if [ "$curr" != "$prev" ] && [ -n "$curr" ]; then
+        ts=$(date +%H:%M:%S)
+        echo "[$ts] Leader → $curr"
+        prev="$curr"
+      fi
+      sleep 2
+    done
+  ) > "$LEADER_LOG" 2>/dev/null &
+  WATCHER_PID=$!
+
   K6_OUTPUT=$(k6 run --vus "$VUS" --duration "$DURATION" \
     -e BASE_URL="$BASE_URL" \
     "$K6_SCRIPT" 2>&1) || true
+
+  # Kill watcher, print leader change log
+  kill "$WATCHER_PID" 2>/dev/null || true
+  wait "$WATCHER_PID" 2>/dev/null || true
+  LEADER_CHANGES=$(wc -l < "$LEADER_LOG" | tr -d ' ')
+  if [ "$LEADER_CHANGES" -gt 0 ]; then
+    echo "  Leader changes during test ($LEADER_CHANGES):"
+    cat "$LEADER_LOG" | sed 's/^/    /'
+  else
+    echo "  Leader: stable (no changes)"
+  fi
+  rm -f "$LEADER_LOG"
 
   # Strip ANSI color codes injected by handleSummary/textSummary so the metric
   # greps below can match the embedded "iterations...........:" / "p(50)=..." rows.
