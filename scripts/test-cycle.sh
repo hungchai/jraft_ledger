@@ -367,6 +367,19 @@ raft_status() {
     | python3 -c "import sys,json;print(json.load(sys.stdin).get('${field}','ERR'))" 2>/dev/null || echo "ERR"
 }
 
+# Auto-discover current leader, update BASE_URL. Call before recon queries.
+ensure_leader() {
+  local new_leader
+  new_leader=$(find_leader)
+  if [ -n "$new_leader" ] && [ "$new_leader" != "$BASE_URL" ]; then
+    BASE_URL="$new_leader"
+  fi
+  if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -qE 'LEADER|UP'; then
+    BASE_URL=$(find_leader)
+  fi
+  echo "$BASE_URL"
+}
+
 # ============================================================
 # 1. Flush data
 # ============================================================
@@ -494,6 +507,8 @@ fi
 
 echo ""
 echo "=== Step 4: Wait for projection catch-up ==="
+# Refresh leader after k6 stress — may have changed
+BASE_URL=$(ensure_leader)
 if wait_projection_catchup "post-stress"; then
   if [ "$LAG" -le "$PROJ_LAG_MAX" ]; then
     pass "Projection caught up (journal lag=$LAG)"
@@ -536,6 +551,10 @@ fi
 
 echo ""
 echo "=== Step 5: Reconciliation (journal_lag=$PROJ_LAG_AT_RECON pipeline_ready=$PROJ_PIPELINE_READY) ==="
+
+# Refresh leader — may have changed during k6 stress test
+BASE_URL=$(ensure_leader)
+echo "  Current leader: $BASE_URL"
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
 HOTSPOT_ACC="STRESS-HOT-CO-001"
