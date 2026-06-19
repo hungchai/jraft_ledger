@@ -43,10 +43,19 @@ public class LedgerStateMachine {
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
     private final IdempotencyStore idempotencyStore;
-    private final ConcurrentHashMap<String, Journal> journalStore;
+    // In-memory journal map used ONLY in standalone/test mode (no RocksDB). In
+    // production (RocksDB present) it is never written or read — journals are
+    // served straight from the RocksDB `journal` CF (durable, with its own bounded
+    // block cache). This removes the former unbounded heap map that caused OOM.
+    private final Map<String, Journal> journalStore = new ConcurrentHashMap<>();
 
     private final AtomicLong raftLogIndex;
     private final AtomicLong journalSequence;
+    // Authoritative count of journals applied. Incremented once per NEW journal
+    // (deterministic — same Raft log => same count on every node). Replaces
+    // journalStore.size() as the journalSequence source so the count stays correct
+    // once journalStore becomes a bounded cache (disk-backed design, stage 3).
+    private final AtomicLong journalCount = new AtomicLong(0);
     private final ConcurrentHashMap<String, ReentrantLock> accountLocks = new ConcurrentHashMap<>();
 
     private LedgerEventListener eventListener;
@@ -84,7 +93,7 @@ public class LedgerStateMachine {
     }
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
-                              IdempotencyEntry idempotencyEntry, List<BalanceChangeEvent> outboxEvents) {
+                              String requestId, String journalId, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
         try {
@@ -105,9 +114,10 @@ public class LedgerStateMachine {
                 batch.put(rocksDB.getHandle("balance"),
                         keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
+            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId);
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
-                    idempotencyEntry.requestId().getBytes(StandardCharsets.UTF_8), idempotencyBytes);
+                    requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
             // Write outbox envelope inside same WriteBatch for atomicity.
             // One CF_OUTBOX entry per journal (not per line), keyed by journalId.
             // Gated by emitGate: skip when this node won't publish (follower / init phase).
@@ -166,10 +176,14 @@ public class LedgerStateMachine {
 
     public void takeSnapshot() throws Exception {
         if (rocksDB == null) return;
+        // Journals are NOT in the snapshot blob — they would materialize the whole
+        // history into heap and OOM at scale. They live in the RocksDB `journal` CF
+        // (durable; same-dir restart keeps them) and, for cross-node InstallSnapshot,
+        // are streamed as a separate snapshot file (see streamJournalsTo / adapter).
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                journalStore, idempotencyStore,
-                raftLogIndex.get(), journalSequence.get());
+                Map.of(), idempotencyStore,
+                raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
     }
@@ -182,10 +196,15 @@ public class LedgerStateMachine {
     }
 
     public byte[] snapshotBytes() throws Exception {
+        // With RocksDB: journals are NOT in the blob (would materialize all history
+        // into heap → OOM at scale); they live in the journal CF and stream as a
+        // separate snapshot file. Without RocksDB (standalone/test): the in-memory
+        // map is the only store, so it must go in the blob.
+        Map<String, Journal> journals = (rocksDB == null) ? journalStore : Map.of();
         SnapshotData data = SnapshotData.from(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
-                journalStore, idempotencyStore,
-                raftLogIndex.get(), journalSequence.get());
+                journals, idempotencyStore,
+                raftLogIndex.get(), journalCount.get());
         return objectMapper.writeValueAsBytes(data);
     }
 
@@ -193,12 +212,28 @@ public class LedgerStateMachine {
         SnapshotData data = objectMapper.readValue(bytes, SnapshotData.class);
         data.restoreTo(balanceStore, accountMetaStore, balanceTypeConfigStore,
                 journalStore, idempotencyStore);
-        // Derive counters from actual journal count, not stored snapshot values.
-        // Stored counters can diverge when snapshot is taken on a different node
-        // that had a different application history (e.g., after leader change).
-        long journalCount = journalStore.size();
-        raftLogIndex.set(journalCount);
-        journalSequence.set(journalCount);
+        // Persist the snapshot's journals to the RocksDB `journal` CF so a node
+        // bootstrapped purely from InstallSnapshot (empty local RocksDB) can still
+        // read/reverse any historical journal. (Same-dir restart already has them;
+        // the write is idempotent.) journalStore itself is only a bounded cache.
+        if (rocksDB != null) {
+            try {
+                for (Journal j : data.journals().values()) {
+                    rocksDB.put("journal", j.journalId().getBytes(StandardCharsets.UTF_8),
+                            objectMapper.writeValueAsBytes(j));
+                }
+            } catch (Exception e) {
+                log.error("Failed to persist restored journals to RocksDB", e);
+            }
+        }
+        // Restore the authoritative journal count from the snapshot. (Previously
+        // derived from journalStore.size(); that breaks once journalStore is a
+        // bounded cache — the snapshot now carries the true count, which equals
+        // the journal count at snapshot time and is deterministic per Raft log.)
+        long restoredCount = data.journalSequence();
+        this.journalCount.set(restoredCount);
+        raftLogIndex.set(restoredCount);
+        journalSequence.set(restoredCount);
     }
 
     private java.util.function.LongSupplier lastAppliedIndexSource;
@@ -210,12 +245,54 @@ public class LedgerStateMachine {
     public long getRaftLogIndex() {
         return lastAppliedIndexSource != null ? lastAppliedIndexSource.getAsLong() : raftLogIndex.get();
     }
-    public long getJournalSequence() { return journalStore.size(); }
+    public long getJournalSequence() { return journalCount.get(); }
 
     public BalanceStore getBalanceStore() { return balanceStore; }
     public AccountMetaStore getAccountMetaStore() { return accountMetaStore; }
     public BalanceTypeConfigStore getBalanceTypeConfigStore() { return balanceTypeConfigStore; }
-    public Map<String, Journal> getAllJournals() { return new HashMap<>(journalStore); }
+    public Map<String, Journal> getAllJournals() { return allJournalsForSnapshot(); }
+
+    /** Complete journal set for snapshotting / cross-node comparison: from RocksDB
+     *  (authoritative, all history) if present, else the in-heap cache (standalone/tests).
+     *  Transiently materializes all journals — only invoked at snapshot time, not on the hot path. */
+    private Map<String, Journal> allJournalsForSnapshot() {
+        if (rocksDB == null) return new HashMap<>(journalStore);
+        Map<String, Journal> out = new HashMap<>();
+        forEachJournal(j -> out.put(j.journalId(), j));
+        return out;
+    }
+
+    // ── Journal snapshot streaming (cross-node InstallSnapshot) ─────────────
+    // Stream the RocksDB `journal` CF to/from a file without materializing all
+    // journals in heap. Format: repeated [int keyLen][key bytes][int valLen][val bytes].
+
+    public void streamJournalsTo(java.io.OutputStream os) throws Exception {
+        if (rocksDB == null) return;
+        try (var out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(os))) {
+            rocksDB.forEach("journal", (k, v) -> {
+                try {
+                    out.writeInt(k.length); out.write(k);
+                    out.writeInt(v.length); out.write(v);
+                } catch (Exception e) { throw new RuntimeException(e); }
+            });
+            out.writeInt(-1); // end marker
+            out.flush();
+        }
+    }
+
+    public void ingestJournalsFrom(java.io.InputStream is) throws Exception {
+        if (rocksDB == null) return;
+        try (var in = new java.io.DataInputStream(new java.io.BufferedInputStream(is))) {
+            while (true) {
+                int kl = in.readInt();
+                if (kl < 0) break;
+                byte[] k = in.readNBytes(kl);
+                int vl = in.readInt();
+                byte[] v = in.readNBytes(vl);
+                rocksDB.put("journal", k, v);
+            }
+        }
+    }
 
     // ── Snapshot data record ───────────────────────────────────
 
@@ -224,26 +301,26 @@ public class LedgerStateMachine {
             Map<String, Account> accounts,
             Map<String, BalanceTypeConfig> configs,
             Map<String, Journal> journals,
-            Map<String, IdempotencyEntry> idempotency,
+            Map<String, String> idempotency,       // requestId → journalId (completed only)
             long raftLogIndex,
             long journalSequence) {
 
         static SnapshotData from(BalanceStore bs, AccountMetaStore ams,
                                  BalanceTypeConfigStore bcs,
-                                 ConcurrentHashMap<String, Journal> js,
+                                 Map<String, Journal> allJournals,
                                  IdempotencyStore is,
                                  long raftLogIndex, long journalSeq) {
             Map<String, BalanceEntry> balMap = new HashMap<>();
             bs.getAll().forEach((k, v) -> balMap.put(keyStr(k), v));
             Map<String, Account> accMap = new HashMap<>();
             ams.getAll().forEach(accMap::put);
-            return new SnapshotData(balMap, accMap, bcs.getAll(), Map.copyOf(js),
+            return new SnapshotData(balMap, accMap, bcs.getAll(), Map.copyOf(allJournals),
                     Map.copyOf(is.getAll()), raftLogIndex, journalSeq);
         }
 
         void restoreTo(BalanceStore bs, AccountMetaStore ams,
                        BalanceTypeConfigStore bcs,
-                       ConcurrentHashMap<String, Journal> js,
+                       Map<String, Journal> journalCache,
                        IdempotencyStore is) {
             bs.clear();
             balances.forEach((k, v) -> bs.put(parseKey(k), v));
@@ -251,8 +328,9 @@ public class LedgerStateMachine {
             accounts.forEach(ams::put);
             bcs.clear();
             configs.forEach(bcs::put);
-            js.clear();
-            js.putAll(journals);
+            // journalCache is a bounded LRU; warm it (eldest evicted automatically).
+            journalCache.clear();
+            journalCache.putAll(journals);
             is.clear();
             idempotency.forEach(is::put);
         }
@@ -273,9 +351,38 @@ public class LedgerStateMachine {
         this.accountMetaStore = accountMetaStore;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
         this.idempotencyStore = new IdempotencyStore();
-        this.journalStore = new ConcurrentHashMap<>();
         this.raftLogIndex = new AtomicLong(0);
         this.journalSequence = new AtomicLong(0);
+    }
+
+    private static int parseIntEnv(String k, int def) {
+        try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
+        catch (Exception e) { return def; }
+    }
+
+    /** Read a journal straight from RocksDB (the durable, authoritative on-node
+     *  store). No heap cache — RocksDB's own bounded block cache serves hot blocks,
+     *  so a second heap copy would only double-cache and risk unbounded growth.
+     *  Falls back to the in-memory map only in standalone/test mode (no RocksDB). */
+    private Journal readJournal(String journalId) {
+        if (rocksDB == null) return journalStore.get(journalId);
+        try {
+            byte[] raw = rocksDB.get("journal", journalId.getBytes(StandardCharsets.UTF_8));
+            if (raw == null) return null;
+            return objectMapper.readValue(raw, Journal.class);
+        } catch (Exception e) {
+            log.error("RocksDB journal read failed for {}", journalId, e);
+            return null;
+        }
+    }
+
+    /** Scan all journals from RocksDB (F-006 list queries; bounded memory per-call by the caller's filter+limit). */
+    private void forEachJournal(java.util.function.Consumer<Journal> consumer) {
+        if (rocksDB == null) { journalStore.values().forEach(consumer); return; }
+        rocksDB.forEach("journal", (k, v) -> {
+            try { consumer.accept(objectMapper.readValue(v, Journal.class)); }
+            catch (Exception e) { log.error("RocksDB journal scan decode failed", e); }
+        });
     }
 
     private record LineWithLeg(String legId, BigDecimal amount, String currency, PostingCommand.Line line) {}
@@ -325,14 +432,10 @@ public class LedgerStateMachine {
 
         // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
         return withAccountLocks(reusableAccountSet, () -> {
-            // 1. Idempotency check
-            var existing = idempotencyStore.get(requestId);
-            if (existing.isPresent()) {
-                var entry = existing.get();
-                if (CommandResult.COMPLETED.equals(entry.status())) {
-                    return CommandResult.completed(entry.journalId());
-                }
-                return CommandResult.rejected(entry.errors(), entry.errorDetails());
+            // 1. Idempotency check — only completed entries stored; retry re-evaluates failures
+            var cachedJournalId = idempotencyStore.get(requestId);
+            if (cachedJournalId != null) {
+                return CommandResult.completed(cachedJournalId);
             }
 
             // 2. Account status check (before balance checks)
@@ -340,19 +443,13 @@ public class LedgerStateMachine {
             for (String accountId : reusableAccountSet) {
                 var account = accountMetaStore.get(accountId);
                 if (account.isEmpty()) {
-                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND,
+                    return CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND,
                             Map.of("accountId", accountId));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
                 accountCache.put(accountId, account.get());
                 if (account.get().status() == AccountStatus.FROZEN) {
-                    var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN,
+                    return CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN,
                             Map.of("accountId", accountId));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
             }
             long t3 = System.nanoTime();
@@ -366,18 +463,12 @@ public class LedgerStateMachine {
                         if (account.isPresent()) {
                             var type = account.get().accountType();
                             if (type == AccountType.CLIENT) {
-                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT,
+                                return CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT,
                                         Map.of("accountId", line.accountId()));
-                                idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                                return result;
                             }
                             if (type == AccountType.CONTROL) {
-                                var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL,
+                                return CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL,
                                         Map.of("accountId", line.accountId()));
-                                idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                                return result;
                             }
                         }
                     }
@@ -386,11 +477,8 @@ public class LedgerStateMachine {
                 // For multi-line legs, validate that the leg's amount is positive
                 // (debits and credits will use the same leg amount)
                 if (leg.amount().compareTo(BigDecimal.ZERO) <= 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT,
+                    return CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT,
                             Map.of("legId", leg.legId(), "amount", leg.amount().toPlainString()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
             }
 
@@ -433,21 +521,15 @@ public class LedgerStateMachine {
                     BigDecimal debit = debitByCurrency.get(cc);
                     BigDecimal credit = creditByCurrency.getOrDefault(cc, BigDecimal.ZERO);
                     if (debit.compareTo(credit) != 0) {
-                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
+                        return CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", debit.toPlainString(), "creditTotal", credit.toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
                 for (String cc : creditByCurrency.keySet()) {
                     if (!debitByCurrency.containsKey(cc)) {
                         BigDecimal credit = creditByCurrency.get(cc);
-                        var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
+                        return CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", "0", "creditTotal", credit.toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
             }
@@ -471,12 +553,9 @@ public class LedgerStateMachine {
                 // V-13: LOCKED/FROZEN positions cannot go negative
                 if (("LOCKED".equals(line.position()) || "FROZEN".equals(line.position()))
                         && after.compareTo(BigDecimal.ZERO) < 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.POSITION_BALANCE_FLOOR_BREACH,
+                    return CommandResult.rejected(LedgerErrorCode.POSITION_BALANCE_FLOOR_BREACH,
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
 
                 if (!config.allowNegative() && after.compareTo(BigDecimal.ZERO) < 0) {
@@ -489,23 +568,17 @@ public class LedgerStateMachine {
                             account.get().accountType() == AccountType.SUSPENSE ||
                             account.get().accountType() == AccountType.BANK);
                     if (!isInstitutional) {
-                        var result = CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE,
+                        return CommandResult.rejected(LedgerErrorCode.INSUFFICIENT_BALANCE,
                                 Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                         "currency", lwl.currency(), "position", line.position(),
                                         "required", lwl.amount().toPlainString(),
                                         "available", current.amount().toPlainString()));
-                        idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                        return result;
                     }
                 }
                 if (config.allowNegative() && after.compareTo(BigDecimal.ZERO) > 0) {
-                    var result = CommandResult.rejected(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT,
+                    return CommandResult.rejected(LedgerErrorCode.CREDIT_EXCEEDS_LIMIT,
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
-                    idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
-                    return result;
                 }
                 reusableAfterBalances.put(key, after);
             }
@@ -548,7 +621,8 @@ public class LedgerStateMachine {
                     List.copyOf(reusableJournalLines), false, now);
             long tJournalEnd = System.nanoTime();
 
-            journalStore.put(journalId, journal);
+            if (rocksDB == null) journalStore.put(journalId, journal); // in-memory mode only
+            journalCount.incrementAndGet();
 
             // 7. Atomic balance update with accountSeq increment + collect events
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
@@ -612,11 +686,10 @@ public class LedgerStateMachine {
             }
 
             // 8. Idempotency
-            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(requestId, journalId, now);
-            idempotencyStore.put(requestId, idempotencyEntry);
+            idempotencyStore.put(requestId, journalId);
 
             // 9. Atomic RocksDB persistence (journal + balance + idempotency + outbox in one WriteBatch)
-            persistApply(journal, balanceUpdates, idempotencyEntry, eventsToPublish);
+            persistApply(journal, balanceUpdates, requestId, journalId, eventsToPublish);
 
             // 10. Publish to Kafka ONLY after outbox is committed to RocksDB
             // Bundled per-journal envelope: 1 Kafka record per posting/reversal
@@ -754,22 +827,15 @@ public class LedgerStateMachine {
     }
     private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
-        var existing = idempotencyStore.get(cmd.requestId());
-        if (existing.isPresent()) {
-            var entry = existing.get();
-            if (CommandResult.COMPLETED.equals(entry.status())) {
-                return CommandResult.completed(entry.journalId());
-            }
-            return CommandResult.rejected(entry.errors(), entry.errorDetails());
+        var cachedJournalId = idempotencyStore.get(cmd.requestId());
+        if (cachedJournalId != null) {
+            return CommandResult.completed(cachedJournalId);
         }
 
-        Journal originalJournal = journalStore.get(cmd.originalJournalId());
+        Journal originalJournal = readJournal(cmd.originalJournalId());
         if (originalJournal == null) {
-            var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
+            return CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                     Map.of("journalId", cmd.originalJournalId()));
-            idempotencyStore.put(cmd.requestId(),
-                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-            return result;
         }
 
         Set<String> accountIds = new HashSet<>();
@@ -779,38 +845,25 @@ public class LedgerStateMachine {
 
         // Belt-and-suspenders: AQM serializes before Raft, lock serializes during apply
         return withAccountLocks(accountIds, () -> {
-            // Re-check idempotency
-            var existing2 = idempotencyStore.get(cmd.requestId());
-            if (existing2.isPresent()) {
-                var entry = existing2.get();
-                if (CommandResult.COMPLETED.equals(entry.status())) {
-                    return CommandResult.completed(entry.journalId());
-                }
-                return CommandResult.rejected(entry.errors(), entry.errorDetails());
+            // Re-check idempotency — only completed entries stored
+            var cachedJournalId2 = idempotencyStore.get(cmd.requestId());
+            if (cachedJournalId2 != null) {
+                return CommandResult.completed(cachedJournalId2);
             }
 
         // Re-fetch original journal
-            Journal orig = journalStore.get(cmd.originalJournalId());
+            Journal orig = readJournal(cmd.originalJournalId());
             if (orig == null) {
-                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
+                return CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
             if (orig.status() == JournalStatus.REVERSED) {
-                var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED,
+                return CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
             if (orig.journalType() == JournalType.REVERSAL) {
-                var result = CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL,
+                return CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL,
                         Map.of("journalId", cmd.originalJournalId()));
-                idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
-                return result;
             }
 
             long seq = raftIndex > 0
@@ -907,16 +960,17 @@ public class LedgerStateMachine {
                     cmd.valueDate(), JournalStatus.CONFIRMED,
                     List.copyOf(reusableMirroredLines), crossPeriod, now);
 
-            journalStore.put(reversalJournalId, reversalJournal);
+            if (rocksDB == null) journalStore.put(reversalJournalId, reversalJournal); // in-memory mode only
+            journalCount.incrementAndGet();
 
-            // Mark original as reversed
-            journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
+            // Mark original as reversed. RocksDB write below is authoritative;
+            // heap map only matters in standalone/test mode (no RocksDB).
+            if (rocksDB == null) journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
 
-            IdempotencyEntry idempotencyEntry = IdempotencyEntry.completed(cmd.requestId(), reversalJournalId, now);
-            idempotencyStore.put(cmd.requestId(), idempotencyEntry);
+            idempotencyStore.put(cmd.requestId(), reversalJournalId);
 
             // Atomic RocksDB persistence
-            persistApply(reversalJournal, balanceUpdates, idempotencyEntry, reversalEvents);
+            persistApply(reversalJournal, balanceUpdates, cmd.requestId(), reversalJournalId, reversalEvents);
             // Also persist updated original journal
             if (rocksDB != null) {
                 try {
@@ -934,45 +988,45 @@ public class LedgerStateMachine {
     // ── Journal access ─────────────────────────────────────────
 
     public Journal getJournal(String journalId) {
-        return journalStore.get(journalId);
+        return readJournal(journalId);
     }
 
+    // F-006 list queries scan the RocksDB journal CF (authoritative, unbounded
+    // history) instead of an in-heap map. Same O(n) as before; not the hot path.
+
     public List<Journal> getJournalsByAccount(String accountId, int page, int size) {
-        return journalStore.values().stream()
-                .filter(j -> j.lines().stream().anyMatch(l -> l.accountId().equals(accountId)))
-                .skip((long) page * size)
-                .limit(size)
-                .toList();
+        List<Journal> all = new ArrayList<>();
+        forEachJournal(j -> { if (j.lines().stream().anyMatch(l -> l.accountId().equals(accountId))) all.add(j); });
+        all.sort(java.util.Comparator.comparing(Journal::createdAt).reversed());
+        return all.stream().skip((long) page * size).limit(size).toList();
     }
 
     public long countJournalsByAccount(String accountId) {
-        return journalStore.values().stream()
-                .filter(j -> j.lines().stream().anyMatch(l -> l.accountId().equals(accountId)))
-                .count();
+        long[] n = {0};
+        forEachJournal(j -> { if (j.lines().stream().anyMatch(l -> l.accountId().equals(accountId))) n[0]++; });
+        return n[0];
     }
 
     public List<Journal> getJournalsByBusinessEventRef(String businessEventRef) {
-        return journalStore.values().stream()
-                .filter(j -> businessEventRef.equals(j.businessEventRef()))
-                .toList();
+        List<Journal> out = new ArrayList<>();
+        forEachJournal(j -> { if (businessEventRef.equals(j.businessEventRef())) out.add(j); });
+        return out;
     }
 
     public List<Journal> getJournalChain(String originalJournalId) {
-        Journal original = journalStore.get(originalJournalId);
-        if (original == null) return List.of();
-        // All journals sharing the same businessEventRef form the chain
+        Journal original = readJournal(originalJournalId);
+        if (original == null || original.businessEventRef() == null) return List.of();
         String ref = original.businessEventRef();
-        return journalStore.values().stream()
-                .filter(j -> ref != null && ref.equals(j.businessEventRef()))
-                .sorted(java.util.Comparator.comparing(Journal::createdAt))
-                .toList();
+        List<Journal> chain = new ArrayList<>();
+        forEachJournal(j -> { if (ref.equals(j.businessEventRef())) chain.add(j); });
+        chain.sort(java.util.Comparator.comparing(Journal::createdAt));
+        return chain;
     }
 
     public Journal getJournalByRequestId(String requestId) {
-        return journalStore.values().stream()
-                .filter(j -> requestId.equals(j.requestId()))
-                .findFirst()
-                .orElse(null);
+        Journal[] found = {null};
+        forEachJournal(j -> { if (found[0] == null && requestId.equals(j.requestId())) found[0] = j; });
+        return found[0];
     }
 
     // ── Balance computation ────────────────────────────────────

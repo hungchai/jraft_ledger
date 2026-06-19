@@ -19,14 +19,15 @@ export function handleSummary(data) {
 
 export const options = {
   stages: [
-    { duration: '30s', target: 100 },   // warm-up
-    { duration: '60s', target: 1000 },  // peak RFQ load
-    { duration: '30s', target: 0 },     // cool-down
+    { duration: '2m',  target: 100 },   // warm-up
+    { duration: '5m',  target: 800 },   // ramp to 800 VU
+    { duration: '50m', target: 800 },   // sustained OOM stress
+    { duration: '3m',  target: 0 },     // cool-down
   ],
   thresholds: {
-    http_req_duration: ['p(95)<50', 'p(99)<100'],
-    http_req_failed: ['rate<0.01'],
-    checks: ['rate>0.99'],
+    // Relaxed for OOM stress test: queue depth + Raft contention
+    // cause latency spikes. Goal is heap dump, not SLA.
+    http_req_failed: ['rate<0.50'],
   },
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)'],
 };
@@ -45,7 +46,7 @@ const RETRY_BACKOFF_MS = [100, 200, 400];
 // Shared mutable leader URL — refreshed on connection failure or TTL expiry
 let leaderUrl = __ENV.BASE_URL || null;
 let leaderUrlTimestamp = 0;
-const LEADER_TTL_MS = 10_000;
+const LEADER_TTL_MS = 3_000;  // 3s: fast refresh during Raft churn
 
 function findLeader() {
   for (const port of LEADER_PORTS) {
@@ -140,7 +141,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '5000.00000000',
+      amount: '500000.00000000',
       currency: 'BTC',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -158,7 +159,7 @@ export function setup() {
     legs: [{
       legId: 'leg-1',
       postingType: 'DEPOSIT',
-      amount: '200000000.0000000000000000',
+      amount: '20000000000.0000000000000000',
       currency: 'USDT',
       lines: [
         {accountId: 'SYSTEM_SEED', balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -195,7 +196,7 @@ export function setup() {
         {
           legId: 'leg-1',
           postingType: 'DEPOSIT',
-          amount: '1000000.0000000000000000',
+          amount: '20000000000.0000000000000000',
           currency: 'USDT',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -205,7 +206,7 @@ export function setup() {
         {
           legId: 'leg-2',
           postingType: 'DEPOSIT',
-          amount: '10.00000000',
+          amount: '500000.00000000',
           currency: 'BTC',
           lines: [
             {accountId: HOTSPOT_ACC, balanceType: 'AVAILABLE_BALANCE', position: 'CURRENT', entryType: 'DEBIT'},
@@ -242,10 +243,13 @@ export default function () {
   const clientAcc = `${CLIENT_PREFIX}${String(clientIdx).padStart(4, '0')}`;
   const reqId = `k6-${vu}-${iter}-${Date.now()}`;
 
-  const isBuy = (vu % 2) === 0;
-  // Trade: 100 USDT (16dp) for equivalent BTC (8dp)
-  const amountUsdt = '100.0000000000000000';
-  const amountBtc = (100.0 / BTC_USDT_RATE).toFixed(BTC_DP); // "0.00100000"
+  const isBuy = (iter % 2) === 0;  // alternate per-iteration: each client stays balanced
+  // Trade: 1 USDT (16dp) for equivalent BTC (8dp) — small size prevents
+  // INSUFFICIENT_BALANCE exhaustion under 800 VU / 60 min stress tests.
+  // At 850 TPS system cap, each of 50 BUY clients burns ~30,600 USDT in 60 min;
+  // 1M USDT seed gives 32× headroom. BTC: similar.
+  const amountUsdt = '1.0000000000000000';
+  const amountBtc = (1.0 / BTC_USDT_RATE).toFixed(BTC_DP);
 
   let payload;
   if (isBuy) {
@@ -321,7 +325,7 @@ export default function () {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       sleep(RETRY_BACKOFF_MS[attempt - 1] / 1000);
-      if (lastStatus === 0 || lastStatus === 504) {
+      if (lastStatus === 0 || lastStatus === 503 || lastStatus === 504) {
         refreshLeader();
       }
     }

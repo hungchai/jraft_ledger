@@ -34,7 +34,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -42,6 +41,8 @@ import org.springframework.boot.actuate.autoconfigure.metrics.MeterRegistryCusto
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 
 @Configuration
 public class LedgerConfig {
@@ -394,29 +395,33 @@ public class LedgerConfig {
     @Bean(destroyMethod = "close")
     public AccountQueueManager accountQueueManager(
             @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
-                                                   MeterRegistry meterRegistry) {
+                                                   MeterRegistry meterRegistry,
+                                                   Environment env) {
         if (raftNodeManager == null) {
             log.info("AccountQueueManager not created — standalone mode");
             return null;
         }
         AccountQueueManager aqm = new AccountQueueManager(raftNodeManager::submit);
 
-        // Register queue depth gauges for hot accounts
-        Set<String> hotAccounts = Set.of(
-                "STRESS-HOT-CO-001", "COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD");
-        AtomicInteger gaugeSeq = new AtomicInteger(0);
-        for (String acc : hotAccounts) {
-            int idx = gaugeSeq.getAndIncrement();
-            Gauge.builder("ledger.account.queue.depth", () -> aqm.getQueueDepth(acc))
-                    .description("Depth of pending command queue for account")
-                    .tag("accountId", acc)
-                    .register(meterRegistry);
+        // Register queue depth gauges for hot accounts (non-prod only — hardcoded
+        // IDs include stress fixtures; prod must opt in via config)
+        if (!env.acceptsProfiles(Profiles.of("prod"))) {
+            Set<String> hotAccounts = Set.of(
+                    "STRESS-HOT-CO-001", "COMPANY_FX_ACC", "NOSTRO_USD", "SUSPENSE_USD");
+            for (String acc : hotAccounts) {
+                Gauge.builder("ledger.account.queue.depth", () -> aqm.getQueueDepth(acc))
+                        .description("Depth of pending command queue for account")
+                        .tag("accountId", acc)
+                        .register(meterRegistry);
+            }
+            log.info("Hot-account queue gauges registered for {} accounts", hotAccounts.size());
+        } else {
+            log.info("Hot-account queue gauges skipped in prod profile");
         }
         Gauge.builder("ledger.account.queue.active", () -> aqm.getActiveAccountCount())
                 .description("Number of active account queues")
                 .register(meterRegistry);
 
-        log.info("AccountQueueManager wired — {} hot-account gauges registered", hotAccounts.size());
         return aqm;
     }
 

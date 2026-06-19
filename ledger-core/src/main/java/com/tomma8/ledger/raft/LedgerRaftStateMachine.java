@@ -259,7 +259,15 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
             java.nio.file.Files.write(java.nio.file.Paths.get(filePath), data);
             writer.addFile("state_machine_snapshot");
-            ledgerStateMachine.takeSnapshot(); // also persist to local RocksDB
+            // Journals streamed to a separate file (not in the blob — would OOM at
+            // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
+            // journal CF without the leader materializing all journals in heap.
+            String journalsPath = writer.getPath() + File.separator + "journals.dat";
+            try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
+                ledgerStateMachine.streamJournalsTo(os);
+            }
+            writer.addFile("journals.dat");
+            ledgerStateMachine.takeSnapshot(); // local sm_snapshot blob (small, no journals)
             done.run(Status.OK());
         } catch (Exception e) {
             log.error("Snapshot save failed", e);
@@ -277,6 +285,13 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
                 byte[] data = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath));
                 ledgerStateMachine.restoreFromBytes(data);
+                // Restore journals (streamed separately) into the RocksDB journal CF.
+                java.nio.file.Path jp = java.nio.file.Paths.get(reader.getPath() + File.separator + "journals.dat");
+                if (java.nio.file.Files.exists(jp)) {
+                    try (var is = java.nio.file.Files.newInputStream(jp)) {
+                        ledgerStateMachine.ingestJournalsFrom(is);
+                    }
+                }
                 log.info("Snapshot loaded from leader transfer");
             } else {
                 // No fallback to local RocksDB — stale local snapshot caused

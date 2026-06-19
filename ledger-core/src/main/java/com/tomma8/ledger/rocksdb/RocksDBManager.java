@@ -19,12 +19,29 @@ public class RocksDBManager implements AutoCloseable {
     private final Map<String, ColumnFamilyHandle> columnFamilyHandles = new HashMap<>();
     private RocksDB rocksDB;
     private WriteOptions writeOptionsInstance;
+    private Cache sharedCache;
+    private final List<ColumnFamilyOptions> cfOptionsList = new ArrayList<>();
 
     public RocksDBManager(String dbPath) {
         this.dbPath = dbPath;
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true);
+    }
+
+    private static int parseIntEnv(String k, int def) {
+        try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
+        catch (Exception e) { return def; }
+    }
+
+    /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
+    private ColumnFamilyOptions cfOptions(BlockBasedTableConfig tableConfig, long writeBufBytes) {
+        ColumnFamilyOptions o = new ColumnFamilyOptions()
+                .setTableFormatConfig(tableConfig)
+                .setWriteBufferSize(writeBufBytes)
+                .setMaxWriteBufferNumber(2);
+        cfOptionsList.add(o);
+        return o;
     }
 
     public void open() throws Exception {
@@ -42,15 +59,27 @@ public class RocksDBManager implements AutoCloseable {
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
 
+        // Bound RocksDB off-heap memory so RSS stays flat under sustained write.
+        // Without this the block cache + index/filter blocks grow with the DB and
+        // eventually trip a cgroup/host RSS OOM-kill (exit 137) — separate from the
+        // JVM heap. One shared block cache caps total block-cache RSS across all CFs.
+        long cacheBytes = (long) parseIntEnv("LEDGER_ROCKSDB_CACHE_MB", 256) * 1024 * 1024;
+        long writeBufBytes = (long) parseIntEnv("LEDGER_ROCKSDB_WRITE_BUFFER_MB", 32) * 1024 * 1024;
+        this.sharedCache = new LRUCache(cacheBytes);
+        BlockBasedTableConfig tableConfig = new BlockBasedTableConfig()
+                .setBlockCache(sharedCache)
+                .setCacheIndexAndFilterBlocks(true)                 // count index/filter against the cache (bounded)
+                .setPinL0FilterAndIndexBlocksInCache(true);
+
         // Default CF must be first
         cfDescriptors.add(new ColumnFamilyDescriptor(
-                RocksDB.DEFAULT_COLUMN_FAMILY, new ColumnFamilyOptions()));
+                RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions(tableConfig, writeBufBytes)));
 
         // Named column families
         for (String cfName : ColumnFamilyRegistry.allColumnFamilies()) {
             if (cfName.equals(ColumnFamilyRegistry.CF_DEFAULT)) continue;
             cfDescriptors.add(new ColumnFamilyDescriptor(
-                    cfName.getBytes(), new ColumnFamilyOptions()));
+                    cfName.getBytes(), cfOptions(tableConfig, writeBufBytes)));
         }
 
         List<ColumnFamilyHandle> handles = new ArrayList<>();
@@ -91,6 +120,28 @@ public class RocksDBManager implements AutoCloseable {
     }
 
     /**
+     * Iterate every key/value in a column family, in RocksDB key order
+     * (deterministic — identical on every node). Used to scan/stream journals
+     * and idempotency entries without holding the whole CF in heap.
+     */
+    public void forEach(String cfName, java.util.function.BiConsumer<byte[], byte[]> consumer) {
+        try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                consumer.accept(it.key(), it.value());
+            }
+        }
+    }
+
+    /** Count keys in a column family (CF scan; used for F-006 counts). */
+    public long count(String cfName) {
+        long n = 0;
+        try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
+            for (it.seekToFirst(); it.isValid(); it.next()) n++;
+        }
+        return n;
+    }
+
+    /**
      * Cached WriteOptions (initialised in {@link #open()} after the JNI library
      * is loaded). Avoids allocating a new WriteOptions per write — small but
      * real allocation/GC win on the hot path.
@@ -117,6 +168,9 @@ public class RocksDBManager implements AutoCloseable {
         if (rocksDB != null) {
             rocksDB.close();
         }
+        cfOptionsList.forEach(ColumnFamilyOptions::close);
+        cfOptionsList.clear();
+        if (sharedCache != null) sharedCache.close();
         dbOptions.close();
     }
 }

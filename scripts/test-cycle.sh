@@ -367,6 +367,19 @@ raft_status() {
     | python3 -c "import sys,json;print(json.load(sys.stdin).get('${field}','ERR'))" 2>/dev/null || echo "ERR"
 }
 
+# Auto-discover current leader, update BASE_URL. Call before recon queries.
+ensure_leader() {
+  local new_leader
+  new_leader=$(find_leader)
+  if [ -n "$new_leader" ] && [ "$new_leader" != "$BASE_URL" ]; then
+    BASE_URL="$new_leader"
+  fi
+  if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -qE 'LEADER|UP'; then
+    BASE_URL=$(find_leader)
+  fi
+  echo "$BASE_URL"
+}
+
 # ============================================================
 # 1. Flush data
 # ============================================================
@@ -454,9 +467,37 @@ if ! $RECON_ONLY; then
   echo "=== Step 3: k6 stress test ($VUS VUs, $DURATION) ==="
   echo "Leader: $BASE_URL"
 
+  # Background leader watcher: logs leader changes during the k6 test
+  LEADER_LOG=$(mktemp)
+  (
+    prev=""
+    while true; do
+      curr=$(find_leader)
+      if [ "$curr" != "$prev" ] && [ -n "$curr" ]; then
+        ts=$(date +%H:%M:%S)
+        echo "[$ts] Leader → $curr"
+        prev="$curr"
+      fi
+      sleep 2
+    done
+  ) > "$LEADER_LOG" 2>/dev/null &
+  WATCHER_PID=$!
+
   K6_OUTPUT=$(k6 run --vus "$VUS" --duration "$DURATION" \
     -e BASE_URL="$BASE_URL" \
     "$K6_SCRIPT" 2>&1) || true
+
+  # Kill watcher, print leader change log
+  kill "$WATCHER_PID" 2>/dev/null || true
+  wait "$WATCHER_PID" 2>/dev/null || true
+  LEADER_CHANGES=$(wc -l < "$LEADER_LOG" | tr -d ' ')
+  if [ "$LEADER_CHANGES" -gt 0 ]; then
+    echo "  Leader changes during test ($LEADER_CHANGES):"
+    cat "$LEADER_LOG" | sed 's/^/    /'
+  else
+    echo "  Leader: stable (no changes)"
+  fi
+  rm -f "$LEADER_LOG"
 
   # Strip ANSI color codes injected by handleSummary/textSummary so the metric
   # greps below can match the embedded "iterations...........:" / "p(50)=..." rows.
@@ -494,6 +535,8 @@ fi
 
 echo ""
 echo "=== Step 4: Wait for projection catch-up ==="
+# Refresh leader after k6 stress — may have changed
+BASE_URL=$(ensure_leader)
 if wait_projection_catchup "post-stress"; then
   if [ "$LAG" -le "$PROJ_LAG_MAX" ]; then
     pass "Projection caught up (journal lag=$LAG)"
@@ -536,6 +579,10 @@ fi
 
 echo ""
 echo "=== Step 5: Reconciliation (journal_lag=$PROJ_LAG_AT_RECON pipeline_ready=$PROJ_PIPELINE_READY) ==="
+
+# Refresh leader — may have changed during k6 stress test
+BASE_URL=$(ensure_leader)
+echo "  Current leader: $BASE_URL"
 
 NODES=("http://localhost:8081" "http://localhost:8082" "http://localhost:8083")
 HOTSPOT_ACC="STRESS-HOT-CO-001"

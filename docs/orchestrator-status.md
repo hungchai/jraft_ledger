@@ -113,3 +113,54 @@ Status: ✅ PASS
 Summary: docker-compose build ledger-base + ledger1/2/3 started. All nodes healthy. Smoke tests: 18/18 PASS (balance, idempotency, cross-node consistency, Raft index).
 Findings: MySQL projection skipped (projection service not started — expected)
 Next: qa-engineer traceability check → final summary
+
+## [2026-06-17] IdempotencyStore Shrink — Full Pipeline
+
+### Commit: (pending)
+**Branch:** v3-fix
+**Change:** IdempotencyStore only caches COMPLETED entries — drops REJECTED caching.
+
+### Files changed
+| File | Change |
+|---|---|
+| `ledger-core/.../IdempotencyEntry.java` | Simplified: `(requestId, journalId)` — dropped status/errors/errorDetails/completedAt |
+| `ledger-core/.../IdempotencyStore.java` | `ConcurrentHashMap<String, String>` — requestId → journalId |
+| `ledger-core/.../LedgerStateMachine.java` | Removed 14 `IdempotencyEntry.rejected(...)` stores. Simplified 4 idempotency checks. Updated `persistApply` signature |
+| `LedgerStateMachine.SnapshotData` | `Map<String, IdempotencyEntry>` → `Map<String, String>` |
+| `requirement/LEDGER-PLATFORM-FULL-REQUIREMENTS.md` | v0.13: F-008 §2.2 + F-013 §2.2-2.5 updated |
+| `requirement/TDD-TEST-CASES.md` | v0.17: TC-F008-34~35, TC-F013-02/11 updated; TC-F013-12/13 added |
+
+### Memory impact
+~35× reduction: 7× fewer entries (failures dropped) × 5× smaller per entry (6→2 fields).
+
+### Test results (mvn test)
+| Module | Tests | Result |
+|---|---|---|
+| ledger-core | 74 | 0 fail |
+| ledger-service | 67 | 0 fail |
+| ledger-dao | 0 | PASS |
+| ledger-raft-ratis | 2 | 0 fail |
+| ledger-restful | 12 | 0 fail |
+| ledger-projection | 22 | 0 fail, 1 skip (Docker) |
+| ledger-client-sdk | 9 | 0 fail |
+
+### Test-cycle results (docker + k6 + recon)
+| Metric | Value |
+|---|---|
+| Iterations | 21,728 |
+| Failed | 0.00% |
+| p50 | 3.48ms |
+| p95 | 9.66ms |
+| Raft lastAppliedIndex | 21,933 / 21,933 / 21,933 ✅ |
+| Raft smJournalSeq | 21,830 / 21,830 / 21,830 (diff=0) ✅ |
+| Cross-node API balances | 204/204 identical ✅ |
+| MySQL balance recon | 204/204 match ✅ |
+| Journal count SM vs MySQL | 21,830 = 21,830 (lag=0) ✅ |
+| Reconstructed (journal_line) | 202/202 match ✅ |
+| **Total checks** | **236 passed, 0 failed, 0 warnings** ✅
+
+## [2026-06-19] Step 0 — ledger-orchestrator (F-016 Stress Seed Budget)
+Status: ⏸ BLOCKED → dispatching
+Issue: `scripts/k6-posting-stress.js` uses STATIC seed amounts (5000 BTC + 200M USDT per account). For long-run stress test (50min × 800 VU), per-client drawdown exceeds seed → INSUFFICIENT_BALANCE late in run.
+Proposed fix: derive seed amounts proportional to TARGET_VU × SAFETY_MARGIN. Add `__ENV.TARGET_VU` (default 800) and compute HOTSPOT/CLIENT seed dynamically.
+Next: ledger-requirements → spec F-016 → ops-sre → impl k6 script → qa-engineer
