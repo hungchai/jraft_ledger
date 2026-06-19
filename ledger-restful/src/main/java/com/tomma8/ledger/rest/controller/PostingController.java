@@ -6,6 +6,7 @@ import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.EntryType;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.queue.AccountQueueManager;
+import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.service.PostingService;
@@ -28,6 +29,7 @@ public class PostingController {
 
     private final PostingService postingService;
     private final ConsensusEngine raftNodeManager;
+    private final CommandQueueManager commandQueueManager;
     private final AccountQueueManager accountQueueManager;
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
@@ -40,12 +42,14 @@ public class PostingController {
 
     public PostingController(PostingService postingService,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+                              @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                               NodeRole nodeRole,
                               MeterRegistry meterRegistry,
                               ConfigService cs) {
         this.postingService = postingService;
         this.raftNodeManager = raftNodeManager;
+        this.commandQueueManager = commandQueueManager;
         this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
@@ -119,7 +123,13 @@ public class PostingController {
             PostingCommand cmd = new PostingCommand(requestId, businessEventType, businessEventRef, valueDate, legs);
 
             CommandResult result;
-            if (accountQueueManager != null) {
+            if (commandQueueManager != null) {
+                try {
+                    result = commandQueueManager.submitAsync(cmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("CommandQueue submit failed for " + cmd.requestId(), e);
+                }
+            } else if (accountQueueManager != null) {
                 // Extract all accountIds from posting, sort to get deterministic queue anchor (deadlock prevention)
                 String anchorAccount = cmd.legs().stream()
                         .flatMap(leg -> leg.lines().stream())

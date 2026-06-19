@@ -30,6 +30,11 @@ ledger:
     topics:
       balance-change: ledger.balance.change.v1
       posting-completion: ledger.posting.completion.v1
+  command-queue:
+    enabled: ${LEDGER_COMMAND_QUEUE_ENABLED:true}
+    max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
+    batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
+    batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
 
 outbox:
   poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}

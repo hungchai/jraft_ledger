@@ -6,8 +6,11 @@ import com.tomma8.ledger.domain.command.AccountCloseCommand;
 import com.tomma8.ledger.domain.command.AccountCreateCommand;
 import com.tomma8.ledger.domain.command.AccountFreezeCommand;
 import com.tomma8.ledger.domain.command.AdjustmentCommand;
+import com.tomma8.ledger.domain.command.BatchApplyResult;
+import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
+import com.tomma8.ledger.domain.command.RaftApplyContext;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.domain.command.ReversalCommand;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
@@ -110,6 +113,16 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
         CommandResult result;
         try {
             RaftCommand cmd = CommandSerializer.deserialize(bytes, bytes.length);
+            if (cmd instanceof BatchRaftCommand batch) {
+                var results = new java.util.ArrayList<CommandResult>(batch.commands().size());
+                for (int i = 0; i < batch.commands().size(); i++) {
+                    results.add(executeCommand(batch.commands().get(i), RaftApplyContext.batchEntry(index, i)));
+                }
+                com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(batch.commands().size());
+                byte[] out = mapper.writeValueAsBytes(BatchApplyResult.of(results));
+                updateLastAppliedTermIndex(term, index);
+                return CompletableFuture.completedFuture(Message.valueOf(ByteString.copyFrom(out)));
+            }
             result = executeCommand(cmd, index);
         } catch (Exception e) {
             log.error("[RATIS_APPLY_FAIL] index={} len={}", index, bytes.length, e);
@@ -129,27 +142,31 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
 
     /** Mirror of LedgerRaftStateMachine.executeCommand — same command → apply mapping. */
     private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
+        return executeCommand(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult executeCommand(RaftCommand cmd, RaftApplyContext ctx) {
         if (cmd instanceof AdjustmentCommand a) {
-            return ledger.applyAdjustment(a, raftIndex);
+            return ledger.applyAdjustment(a, ctx);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledger.applyPosting(p, raftIndex);
+            return ledger.applyPosting(p, ctx);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledger.applyReversal(r, raftIndex);
+            return ledger.applyReversal(r, ctx);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledger.applyAccountCreate(a, raftIndex);
+            return ledger.applyAccountCreate(a, ctx.raftIndex());
         }
         if (cmd instanceof AccountFreezeCommand f) {
-            return f.freeze() ? ledger.applyFreeze(f, raftIndex)
-                    : ledger.applyUnfreeze(f, raftIndex);
+            return f.freeze() ? ledger.applyFreeze(f, ctx.raftIndex())
+                    : ledger.applyUnfreeze(f, ctx.raftIndex());
         }
         if (cmd instanceof AccountCloseCommand c) {
-            return ledger.applyCloseAccount(c.accountId(), c.requestId(), raftIndex);
+            return ledger.applyCloseAccount(c.accountId(), c.requestId(), ctx.raftIndex());
         }
         if (cmd instanceof AccountAddBalanceTypeCommand a) {
-            return ledger.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), raftIndex);
+            return ledger.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), ctx.raftIndex());
         }
         throw new IllegalArgumentException("Unknown command: " + cmd.getClass().getName());
     }

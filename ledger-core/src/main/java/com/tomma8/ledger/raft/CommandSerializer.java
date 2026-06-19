@@ -25,6 +25,20 @@ public final class CommandSerializer {
     public static RaftCommand deserialize(byte[] data, int length) {
         try {
             String json = new String(data, 0, length, StandardCharsets.UTF_8);
+            if (json.contains("\"commands\"")) {
+                var root = mapper.readTree(data, 0, length);
+                var commandsNode = root.get("commands");
+                if (commandsNode == null || !commandsNode.isArray()) {
+                    throw new IllegalArgumentException("Invalid batch command: missing commands array");
+                }
+                java.util.List<RaftCommand> commands = new java.util.ArrayList<>(commandsNode.size());
+                for (var node : commandsNode) {
+                    byte[] cmdBytes = mapper.writeValueAsBytes(node);
+                    commands.add(deserialize(cmdBytes, cmdBytes.length));
+                }
+                String requestId = root.hasNonNull("requestId") ? root.get("requestId").asText() : null;
+                return new BatchRaftCommand(requestId, commands);
+            }
             // Heuristic detection based on presence of distinctive fields
             if (json.contains("\"adjustmentType\"")) {
                 return mapper.readValue(data, AdjustmentCommand.class);

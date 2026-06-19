@@ -25,6 +25,14 @@ public interface ConsensusEngine extends AutoCloseable {
      */
     CommandResult submit(RaftCommand command);
 
+    /**
+     * Submit multiple commands in one Raft log entry when possible.
+     * Returns results in the same order as {@code commands}.
+     */
+    default List<CommandResult> submitBatch(List<RaftCommand> commands) {
+        return commands.stream().map(this::submit).toList();
+    }
+
     /** True if this node is the current Raft leader (writes only accepted here). */
     boolean isLeader();
 

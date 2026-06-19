@@ -7,6 +7,7 @@ import com.alipay.sofa.jraft.conf.Configuration;
 import com.alipay.sofa.jraft.entity.PeerId;
 import com.alipay.sofa.jraft.entity.Task;
 import com.alipay.sofa.jraft.option.NodeOptions;
+import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import org.slf4j.Logger;
@@ -14,6 +15,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -131,6 +134,62 @@ public class RaftNodeManager implements ConsensusEngine {
             log.error("Raft command timeout: requestId={} elapsedMs={}", command.requestId(), elapsedMs);
             pendingCommands.remove(command.requestId());
             throw new RuntimeException("Raft command timeout: " + command.requestId() + " after " + elapsedMs + "ms", e);
+        }
+    }
+
+    @Override
+    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+        if (commands == null || commands.isEmpty()) {
+            throw new IllegalArgumentException("commands must not be empty");
+        }
+        if (commands.size() == 1) {
+            return List.of(submit(commands.get(0)));
+        }
+
+        long tSubmit = System.nanoTime();
+        List<CompletableFuture<CommandResult>> futures = new ArrayList<>(commands.size());
+        for (RaftCommand command : commands) {
+            CompletableFuture<CommandResult> future = new CompletableFuture<>();
+            pendingCommands.put(command.requestId(), future);
+            futures.add(future);
+        }
+
+        BatchRaftCommand batch = BatchRaftCommand.of(commands);
+        byte[] data = CommandSerializer.serialize(batch);
+        Task task = new Task(ByteBuffer.wrap(data), status -> {
+            if (!status.isOk()) {
+                RuntimeException ex = new RuntimeException("Raft batch apply failed: " + status);
+                for (RaftCommand command : commands) {
+                    CompletableFuture<CommandResult> future = pendingCommands.remove(command.requestId());
+                    if (future != null) future.completeExceptionally(ex);
+                }
+            }
+        });
+
+        this.node.apply(task);
+        long tApplied = System.nanoTime();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftEnqueue(tApplied - tSubmit);
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
+
+        try {
+            long tWaitStart = System.nanoTime();
+            List<CommandResult> results = new ArrayList<>(commands.size());
+            for (int i = 0; i < futures.size(); i++) {
+                results.add(futures.get(i).get(10, TimeUnit.SECONDS));
+            }
+            long tWaitEnd = System.nanoTime();
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(tWaitEnd - tWaitStart);
+            long tReturn = System.nanoTime();
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(tReturn - tWaitEnd);
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(tReturn - tSubmit);
+            return results;
+        } catch (Exception e) {
+            long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(elapsedMs * 1_000_000L);
+            for (RaftCommand command : commands) {
+                pendingCommands.remove(command.requestId());
+            }
+            throw new RuntimeException("Raft batch timeout after " + elapsedMs + "ms", e);
         }
     }
 

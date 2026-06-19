@@ -16,8 +16,10 @@ import com.tomma8.ledger.domain.command.AccountCloseCommand;
 import com.tomma8.ledger.domain.command.AccountCreateCommand;
 import com.tomma8.ledger.domain.command.AccountFreezeCommand;
 import com.tomma8.ledger.domain.command.AdjustmentCommand;
+import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
+import com.tomma8.ledger.domain.command.RaftApplyContext;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.domain.command.ReversalCommand;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
@@ -173,33 +175,10 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                     long tDeserEnd = System.nanoTime();
                     com.tomma8.ledger.metrics.LedgerMetrics.recordApplyDeserialize(tDeserEnd - tStart);
 
-                    if (log.isDebugEnabled()) {
-                        log.debug("[APPLY] index={} cmd={} reqId={} len={} deser={}us",
-                                index, cmd.getClass().getSimpleName(), cmd.requestId(),
-                                len, (tDeserEnd - tStart) / 1000);
-                    }
-
-                    CommandResult result = executeCommand(cmd, index);
-                    long tExecEnd = System.nanoTime();
-                    com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
-
-                    if (pendingCommands != null) {
-                        var future = pendingCommands.remove(cmd.requestId());
-                        if (future != null) future.complete(result);
-                    }
-                    if (done != null) {
-                        done.run(result.isCompleted() ? Status.OK()
-                                : new Status(RaftError.EBUSY, result.errorCodes().toString()));
-                    }
-
-                    long totalUs = (tExecEnd - tStart) / 1000;
-                    // APPLY_SLOW warn disabled: onApply is the Raft apply hot path
-                    // and the string formatting + log dispatch on the slow path itself
-                    // made contention worse during stress tests. Metrics are still
-                    // recorded above (recordApplyTotal); use Prometheus to inspect.
-                    if (false && totalUs > 5000) {
-                        log.warn("[APPLY_SLOW] cmd={} index={} total={}us",
-                                cmd.getClass().getSimpleName(), index, totalUs);
+                    if (cmd instanceof BatchRaftCommand batch) {
+                        applyBatch(batch, index, done, tStart);
+                    } else {
+                        applySingle(cmd, index, done, tStart, tDeserEnd);
                     }
                 } catch (Exception e) {
                     log.error("[APPLY_FAIL] index={} len={}", index, len, e);
@@ -225,28 +204,76 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
+    private void applySingle(RaftCommand cmd, long index, Closure done, long tStart, long tDeserEnd) {
+        if (log.isDebugEnabled()) {
+            log.debug("[APPLY] index={} cmd={} reqId={} deser={}us",
+                    index, cmd.getClass().getSimpleName(), cmd.requestId(),
+                    (tDeserEnd - tStart) / 1000);
+        }
+
+        CommandResult result = executeCommand(cmd, RaftApplyContext.single(index));
+        long tExecEnd = System.nanoTime();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
+
+        if (pendingCommands != null) {
+            var future = pendingCommands.remove(cmd.requestId());
+            if (future != null) future.complete(result);
+        }
+        if (done != null) {
+            done.run(result.isCompleted() ? Status.OK()
+                    : new Status(RaftError.EBUSY, result.errorCodes().toString()));
+        }
+    }
+
+    private void applyBatch(BatchRaftCommand batch, long index, Closure done, long tStart) {
+        var commands = batch.commands();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
+        boolean allOk = true;
+        for (int i = 0; i < commands.size(); i++) {
+            RaftCommand sub = commands.get(i);
+            RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i);
+            CommandResult result = executeCommand(sub, ctx);
+            if (pendingCommands != null) {
+                var future = pendingCommands.remove(sub.requestId());
+                if (future != null) future.complete(result);
+            }
+            if (!result.isCompleted()) {
+                allOk = false;
+            }
+        }
+        long tExecEnd = System.nanoTime();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
+        if (done != null) {
+            done.run(allOk ? Status.OK() : new Status(RaftError.EBUSY, "batch rejected"));
+        }
+    }
+
     private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
+        return executeCommand(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult executeCommand(RaftCommand cmd, RaftApplyContext ctx) {
         if (cmd instanceof AdjustmentCommand a) {
-            return ledgerStateMachine.applyAdjustment(a, raftIndex);
+            return ledgerStateMachine.applyAdjustment(a, ctx);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledgerStateMachine.applyPosting(p, raftIndex);
+            return ledgerStateMachine.applyPosting(p, ctx);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledgerStateMachine.applyReversal(r, raftIndex);
+            return ledgerStateMachine.applyReversal(r, ctx);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledgerStateMachine.applyAccountCreate(a, raftIndex);
+            return ledgerStateMachine.applyAccountCreate(a, ctx.raftIndex());
         }
         if (cmd instanceof AccountFreezeCommand f) {
-            return f.freeze() ? ledgerStateMachine.applyFreeze(f, raftIndex)
-                    : ledgerStateMachine.applyUnfreeze(f, raftIndex);
+            return f.freeze() ? ledgerStateMachine.applyFreeze(f, ctx.raftIndex())
+                    : ledgerStateMachine.applyUnfreeze(f, ctx.raftIndex());
         }
         if (cmd instanceof AccountCloseCommand c) {
-            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId(), raftIndex);
+            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId(), ctx.raftIndex());
         }
         if (cmd instanceof AccountAddBalanceTypeCommand a) {
-            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), raftIndex);
+            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), ctx.raftIndex());
         }
         throw new IllegalArgumentException("Unknown command: " + cmd.getClass().getName());
     }
