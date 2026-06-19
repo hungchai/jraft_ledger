@@ -21,13 +21,19 @@ import com.tomma8.ledger.util.LedgerMappers;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import jakarta.annotation.PreDestroy;
 import org.rocksdb.WriteBatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +49,10 @@ public class LedgerStateMachine {
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
     private final IdempotencyStore idempotencyStore;
+    private final Clock clock;
+    // Periodically prunes expired idempotency entries. null when constructed via the
+    // test-friendly 3-arg constructor (no scheduler; tests rely on lazy-evict + clear()).
+    private final ScheduledExecutorService evictionScheduler;
     // In-memory journal map used ONLY in standalone/test mode (no RocksDB). In
     // production (RocksDB present) it is never written or read — journals are
     // served straight from the RocksDB `journal` CF (durable, with its own bounded
@@ -114,7 +124,7 @@ public class LedgerStateMachine {
                 batch.put(rocksDB.getHandle("balance"),
                         keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
-            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId);
+            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId, clock.millis());
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
                     requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
@@ -344,15 +354,79 @@ public class LedgerStateMachine {
         }
     }
 
+    /**
+     * Backward-compatible 3-arg constructor used by unit tests.
+     * Uses default 30-day TTL and {@link Clock#systemUTC()}; no eviction scheduler is started
+     * (tests rely on lazy-eviction in {@link IdempotencyStore#get(String)} and explicit {@code clear()}).
+     */
     public LedgerStateMachine(BalanceStore balanceStore,
                               AccountMetaStore accountMetaStore,
                               BalanceTypeConfigStore balanceTypeConfigStore) {
+        this(balanceStore, accountMetaStore, balanceTypeConfigStore,
+                Duration.ofDays(30), Clock.systemUTC(), false);
+    }
+
+    /**
+     * Production constructor. {@code ttl} controls how long completed idempotency entries
+     * live in memory before being evicted (lazy on read + periodic background sweep).
+     *
+     * @param ttl     idempotency entry lifetime; pass {@code 30d} for prod, {@code 3m} for stress
+     * @param clock   injected for testability (systemUTC in prod)
+     * @param withScheduler when true, start a daemon scheduler that calls
+     *                      {@link IdempotencyStore#evictExpired()} every 60s. Pass false
+     *                      in tests to avoid stray background threads.
+     */
+    public LedgerStateMachine(BalanceStore balanceStore,
+                              AccountMetaStore accountMetaStore,
+                              BalanceTypeConfigStore balanceTypeConfigStore,
+                              Duration ttl,
+                              Clock clock,
+                              boolean withScheduler) {
         this.balanceStore = balanceStore;
         this.accountMetaStore = accountMetaStore;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
-        this.idempotencyStore = new IdempotencyStore();
+        this.clock = clock != null ? clock : Clock.systemUTC();
+        this.idempotencyStore = new IdempotencyStore(ttl != null ? ttl : Duration.ofDays(30), this.clock);
         this.raftLogIndex = new AtomicLong(0);
         this.journalSequence = new AtomicLong(0);
+        if (withScheduler) {
+            ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "idempotency-evictor");
+                t.setDaemon(true);
+                return t;
+            });
+            sched.scheduleWithFixedDelay(this::runEvict, 60, 60, TimeUnit.SECONDS);
+            this.evictionScheduler = sched;
+            log.info("IdempotencyStore scheduled evictor started (interval=60s, ttl={})", ttl);
+        } else {
+            this.evictionScheduler = null;
+        }
+    }
+
+    private void runEvict() {
+        try {
+            int removed = idempotencyStore.evictExpired();
+            if (removed > 0) {
+                log.debug("IdempotencyStore evictExpired removed={} size={}", removed, idempotencyStore.size());
+            }
+        } catch (Exception e) {
+            log.warn("idempotency eviction tick failed", e);
+        }
+    }
+
+    @PreDestroy
+    public void shutdownEviction() {
+        if (evictionScheduler != null) {
+            evictionScheduler.shutdown();
+            try {
+                if (!evictionScheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                    evictionScheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                evictionScheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static int parseIntEnv(String k, int def) {

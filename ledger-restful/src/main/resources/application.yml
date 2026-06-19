@@ -35,6 +35,8 @@ ledger:
     max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
     batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
     batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
+  idempotency:
+    ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
 
 outbox:
   poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}

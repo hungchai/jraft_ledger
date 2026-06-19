@@ -247,8 +247,14 @@ public class LedgerConfig {
             BalanceTypeConfigStore balanceTypeConfigStore,
             @org.springframework.beans.factory.annotation.Autowired(required = false) RocksDBManager rocksDBManager,
             @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher) {
-        LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
+            @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
+            @org.springframework.beans.factory.annotation.Value("${ledger.idempotency.ttl:30d}") Duration idempotencyTtl) {
+        // Spring Boot 3.x binds the @Value string ("30d", "3m", "1h") to java.time.Duration
+        // via ApplicationConversionService. Production default 30d; pressure tests can run
+        // with --spring.config.additional-location or env LEDGER_IDEMPOTENCY_TTL=3m.
+        LedgerStateMachine sm = new LedgerStateMachine(
+                balanceStore, accountMetaStore, balanceTypeConfigStore,
+                idempotencyTtl, java.time.Clock.systemUTC(), true);
 
         // Wire Kafka event publisher
         if (kafkaPublisher != null) {

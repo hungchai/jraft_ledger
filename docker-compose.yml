@@ -80,6 +80,7 @@ services:
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8081
+      LEDGER_IDEMPOTENCY_TTL: 3m
       JAVA_OPTS: >-
         -Xms2g
         -Xmx3g
@@ -129,6 +130,7 @@ services:
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8082
+      LEDGER_IDEMPOTENCY_TTL: 3m
       JAVA_OPTS: >-
         -Xms2g
         -Xmx3g
@@ -180,6 +182,7 @@ services:
       LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
       LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
       LEDGER_ADVERTISE_URL: http://localhost:8083
+      LEDGER_IDEMPOTENCY_TTL: 3m
       JAVA_OPTS: >-
         -Xms2g
         -Xmx3g
