@@ -40,12 +40,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Client-side **end-to-end** metrics from the k6 load generator (`experimental-prometheus-rw`). Measures full HTTP round-trip: connect \u2192 send \u2192 **wait (TTFB)** \u2192 receive. Enabled by default in `test-cycle.sh`; filter by **testid** tag. Server-side ledger metrics: [Ledger Overview](/d/ledger-overview). Refresh: 5s."
+        "content": "Client-side **end-to-end** metrics from k6 (`experimental-prometheus-rw`). Pick a **testid** from the dropdown (latest at top). **All** aggregates across runs. Latency: min / avg / max / P50 / P95 / P99 for `POST /ledger/postings`, successful responses only. **No data?** Widen time range or re-run `./scripts/test-cycle.sh` (min/avg/max need a new run)."
       }
     },
     {
       "id": 2,
-      "title": "HTTP Request Rate",
+      "title": "Posting Request Rate",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -93,10 +93,11 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))",
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\", name=~\".*/ledger/postings\"}[1m]))",
           "legendFormat": "req/s"
         }
-      ]
+      ],
+      "description": "HTTP requests/s to /ledger/postings"
     },
     {
       "id": 3,
@@ -155,7 +156,7 @@
     },
     {
       "id": 4,
-      "title": "HTTP Failed Rate",
+      "title": "Posting Failed Rate",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -203,7 +204,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "avg(k6_http_req_failed_rate{testid=~\"$testid\"})",
+          "expr": "max(k6_http_req_failed_rate{testid=~\"$testid\", name=~\".*/ledger/postings\"})",
           "legendFormat": "failed"
         }
       ]
@@ -265,8 +266,8 @@
     },
     {
       "id": 6,
-      "title": "HTTP Request Duration E2E (P50 / P95 / P99)",
-      "description": "k6 client-side http_req_duration \u2014 full request lifecycle in ms.",
+      "title": "Posting E2E Latency (min / avg / max / P50 / P95 / P99)",
+      "description": "k6 http_req_duration for POST /ledger/postings, successful responses only. avg = mean.",
       "type": "timeseries",
       "gridPos": {
         "h": 7,
@@ -305,7 +306,9 @@
         "legend": {
           "calcs": [
             "lastNotNull",
-            "max"
+            "min",
+            "max",
+            "mean"
           ],
           "displayMode": "table",
           "placement": "bottom",
@@ -320,25 +323,40 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "P50",
-          "expr": "k6_http_req_duration_p50{testid=~\"$testid\"}"
+          "legendFormat": "min",
+          "expr": "max(k6_http_req_duration_min{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
         },
         {
           "refId": "B",
-          "legendFormat": "P95",
-          "expr": "k6_http_req_duration_p95{testid=~\"$testid\"}"
+          "legendFormat": "avg (mean)",
+          "expr": "max(k6_http_req_duration_avg{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
         },
         {
           "refId": "C",
+          "legendFormat": "max",
+          "expr": "max(k6_http_req_duration_max{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "P50",
+          "expr": "max(k6_http_req_duration_p50{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "E",
+          "legendFormat": "P95",
+          "expr": "max(k6_http_req_duration_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "F",
           "legendFormat": "P99",
-          "expr": "k6_http_req_duration_p99{testid=~\"$testid\"}"
+          "expr": "max(k6_http_req_duration_p99{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
         }
       ]
     },
     {
       "id": 7,
-      "title": "HTTP Request Rate",
-      "description": "Successful + failed requests per second from k6.",
+      "title": "Posting Request Rate",
+      "description": "Requests/s to /ledger/postings.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -379,7 +397,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -393,14 +411,14 @@
         {
           "refId": "A",
           "legendFormat": "req/s",
-          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))"
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\", name=~\".*/ledger/postings\"}[1m]))"
         }
       ]
     },
     {
       "id": 8,
       "title": "Virtual Users",
-      "description": "Active VUs during the test run.",
+      "description": "Active VUs.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -441,7 +459,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -461,8 +479,8 @@
     },
     {
       "id": 9,
-      "title": "HTTP Failed Rate",
-      "description": "Fraction of failed HTTP requests (k6 check + status).",
+      "title": "Posting Failed Rate",
+      "description": "Failed /ledger/postings requests.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -504,7 +522,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -518,14 +536,14 @@
         {
           "refId": "A",
           "legendFormat": "failed rate",
-          "expr": "avg(k6_http_req_failed_rate{testid=~\"$testid\"})"
+          "expr": "max(k6_http_req_failed_rate{testid=~\"$testid\", name=~\".*/ledger/postings\"})"
         }
       ]
     },
     {
       "id": 10,
       "title": "Checks Pass Rate",
-      "description": "k6 check() success rate during the run.",
+      "description": "k6 check() success rate.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -567,7 +585,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -581,14 +599,14 @@
         {
           "refId": "A",
           "legendFormat": "checks rate",
-          "expr": "avg(k6_checks_rate{testid=~\"$testid\"})"
+          "expr": "max(k6_checks_rate{testid=~\"$testid\"})"
         }
       ]
     },
     {
       "id": 11,
-      "title": "HTTP Waiting Time (P95) \u2014 TTFB",
-      "description": "Time waiting for first byte (server + network). Dominates posting latency from client view.",
+      "title": "Posting TTFB (P95)",
+      "description": "Time waiting for first byte on successful postings.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -629,7 +647,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -643,14 +661,14 @@
         {
           "refId": "A",
           "legendFormat": "waiting P95",
-          "expr": "k6_http_req_waiting_p95{testid=~\"$testid\"}"
+          "expr": "max(k6_http_req_waiting_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
         }
       ]
     },
     {
       "id": 12,
-      "title": "HTTP Receiving Time (P95)",
-      "description": "Time to read response body after TTFB.",
+      "title": "Posting Receive (P95)",
+      "description": "Response body read time on successful postings.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -691,7 +709,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -705,14 +723,14 @@
         {
           "refId": "A",
           "legendFormat": "receiving P95",
-          "expr": "k6_http_req_receiving_p95{testid=~\"$testid\"}"
+          "expr": "max(k6_http_req_receiving_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
         }
       ]
     },
     {
       "id": 13,
       "title": "Dropped Iterations",
-      "description": "k6 could not start iterations (VUs saturated). Should stay at 0.",
+      "description": "k6 could not schedule iterations (VU saturation).",
       "type": "timeseries",
       "gridPos": {
         "h": 5,
@@ -753,7 +771,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -772,14 +790,14 @@
         {
           "refId": "B",
           "legendFormat": "dropped total",
-          "expr": "sum(k6_dropped_iterations_total{testid=~\"$testid\"})"
+          "expr": "max(k6_dropped_iterations_total{testid=~\"$testid\"})"
         }
       ]
     },
     {
       "id": 14,
       "title": "Iteration Duration (P95)",
-      "description": "Full iteration wall time including sleeps between requests.",
+      "description": "Full iteration wall time including think time.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -820,7 +838,7 @@
             "lastNotNull",
             "max"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -834,7 +852,7 @@
         {
           "refId": "A",
           "legendFormat": "iteration P95",
-          "expr": "k6_iteration_duration_p95{testid=~\"$testid\"}"
+          "expr": "max(k6_iteration_duration_p95{testid=~\"$testid\"}) * 1000"
         }
       ]
     }
@@ -851,29 +869,28 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        },
         "datasource": "Prometheus",
         "definition": "label_values(k6_vus, testid)",
         "includeAll": true,
+        "allValue": ".+",
         "multi": false,
         "name": "testid",
         "query": "label_values(k6_vus, testid)",
-        "refresh": 2,
+        "refresh": 1,
+        "regex": "",
         "sort": 2,
-        "type": "query"
+        "type": "query",
+        "label": "testid"
       }
     ]
   },
   "time": {
-    "from": "now-30m",
+    "from": "now-6h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "k6 Test Cycle (test-cycle.sh)",
   "uid": "k6-test-cycle",
-  "version": 3
+  "version": 5
 }

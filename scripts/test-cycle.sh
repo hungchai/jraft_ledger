@@ -626,7 +626,8 @@ if ! $RECON_ONLY; then
   if [ "$K6_PROMETHEUS_RW" != "0" ]; then
     K6_TEST_ID="${K6_TEST_ID:-test-cycle-$(date +%Y%m%d-%H%M%S)}"
     export K6_PROMETHEUS_RW_SERVER_URL="${K6_PROMETHEUS_RW_SERVER_URL:-${PROMETHEUS_URL}/api/v1/write}"
-    export K6_PROMETHEUS_RW_TREND_STATS="p(50),p(95),p(99)"
+    export K6_PROMETHEUS_RW_TREND_STATS="min,max,avg,p(50),p(95),p(99)"
+    export K6_PROMETHEUS_RW_STALE_MARKERS=true
     K6_PROM_ARGS=( -o experimental-prometheus-rw --tag "testid=${K6_TEST_ID}" )
     echo "  k6 → Prometheus remote-write: ${K6_PROMETHEUS_RW_SERVER_URL} testid=${K6_TEST_ID}"
     echo "  Grafana: http://localhost:3000/d/k6-test-cycle (filter testid=${K6_TEST_ID})"

@@ -1272,6 +1272,70 @@
         }
       ],
       "id": 105
+    },
+    {
+      "id": 106,
+      "title": "Ledger Start Time",
+      "description": "JVM process start time per ledger node and projection (Spring Boot process_start_time_seconds).",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 50 },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue" }] },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_start_time_seconds{job=~\"ledger-nodes|projection\"} * 1000",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 107,
+      "title": "Ledger Running Time",
+      "description": "JVM uptime since start per ledger node and projection (process_uptime_seconds). Resets on restart.",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 50 },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "unit": "dtdurations"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_uptime_seconds{job=~\"ledger-nodes|projection\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
     }
   ],
   "preload": false,
@@ -1328,5 +1392,5 @@
   "timezone": "browser",
   "title": "Ledger Platform Overview",
   "uid": "ledger-overview",
-  "version": 4
+  "version": 5
 }
