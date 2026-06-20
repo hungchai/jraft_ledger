@@ -218,6 +218,19 @@ services:
       - ledger-net
     restart: unless-stopped
 
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: ledger-kafka-exporter
+    command:
+      - '--kafka.server=ledger-kafka:9092'
+    ports:
+      - "9308:9308"
+    depends_on:
+      - kafka
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: ledger-prometheus
