@@ -106,8 +106,12 @@ public class LedgerStateMachine {
                               String requestId, String journalId, List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
-        try {
-            WriteBatch batch = new WriteBatch();
+        // WriteBatch holds native memory (librocksdb WriteBatch handler). Must close
+        // deterministically — leaking it under sustained write causes native-heap
+        // growth and eventually corrupted handle reads (the SIGBUS pattern in
+        // hs_err_pid_*.log: GetColumnFamilyIdAndTimestampSize dereferences a freed
+        // ColumnFamilyHandle because the native heap backed it was overwritten).
+        try (WriteBatch batch = new WriteBatch()) {
             byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
             batch.put(rocksDB.getHandle("journal"),
                     journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
