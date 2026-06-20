@@ -1184,6 +1184,94 @@
       ],
       "title": "JVM Heap Usage",
       "type": "timeseries"
+    },
+    {
+      "pluginVersion": "12.0.1+security-01",
+      "type": "timeseries",
+      "title": "JVM CPU Usage",
+      "description": "Process and system CPU for ledger nodes and projection (0-100%). In Docker this is cgroup-scoped, not host-wide.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/system/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{instance}} process",
+          "expr": "process_cpu_usage{job=~\"ledger-nodes|projection\"} * 100"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "{{instance}} system",
+          "expr": "system_cpu_usage{job=~\"ledger-nodes|projection\"} * 100"
+        }
+      ],
+      "id": 105
     }
   ],
   "preload": false,
@@ -1240,5 +1328,5 @@
   "timezone": "browser",
   "title": "Ledger Platform Overview",
   "uid": "ledger-overview",
-  "version": 3
+  "version": 4
 }

@@ -27,6 +27,17 @@ K6_SCRIPT="$SCRIPT_DIR/k6-posting-stress.js"
 BASE_URL=""
 DIAG_DIR="$PROJECT_DIR/jraft_ledger/diagnostics"
 mkdir -p "$DIAG_DIR"
+
+# Reseed watcher — auto-top-up CLIENT accounts when they drop below threshold.
+# ON by default. Runs during k6 phase in the background, polls balances every
+# --reseed-interval seconds, and tops up any CLIENT whose USDT or BTC balance
+# < --reseed-threshold by debiting HOTSPOT_ACC. Pass --no-reseed to disable.
+RESEED=true
+RESEED_INTERVAL=20
+RESEED_THRESHOLD=1.0
+RESEED_AMOUNT_USDT=1000000
+RESEED_AMOUNT_BTC=5000
+RESEED_LOG=""
 # Projection catch-up: journal-count lag must be <= PROJ_LAG_MAX before MySQL
 # balance checks count as FAIL (otherwise WARN only — async pipeline).
 PROJ_LAG_MAX=10
@@ -39,6 +50,7 @@ PROJ_RATE_IDLE_MAX=1.0    # events/s threshold; below = "no new work"
 PROJ_IDLE_READY_SEC=3     # seconds since last event before pipeline is "quiet"
 PROJ_IDLE_REQUIRED_POLLS=2  # need N consecutive idle polls before ready=true
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
+K6_PROMETHEUS_RW="${K6_PROMETHEUS_RW:-1}"
 PROJECTION_URL="${PROJECTION_URL:-http://localhost:8089}"
 PROJ_PRE_K6_POLL_SEC=2
 PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
@@ -46,6 +58,9 @@ PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
   echo "         [--proj-lag-max N] [--proj-wait-max-loops N] [--prometheus-url URL]"
+  echo "         [--no-k6-prometheus]"
+  echo "         [--reseed] [--reseed-interval SEC] [--reseed-threshold NUM]"
+  echo "         [--reseed-amount-usdt NUM] [--reseed-amount-btc NUM]"
   echo "  --vus N         Number of VUs (default: 10)"
   echo "  --duration M    Test duration (default: 2m)"
   echo "  --no-flush      Skip data flush"
@@ -54,6 +69,12 @@ usage() {
   echo "  --proj-lag-max N   Max SM-MySQL journal lag for strict balance FAIL (default: 10)"
   echo "  --proj-wait-max-loops N  Poll iterations in each wait phase (default: 120 = 600s)"
   echo "  --prometheus-url URL  Prometheus query API (default: http://localhost:9090)"
+  echo "  --no-k6-prometheus    Skip k6 experimental-prometheus-rw (Grafana k6 dashboard stays empty)"
+  echo "  --no-reseed                   Disable auto top-up of CLIENT balances during k6 (default: on)"
+  echo "  --reseed-interval SEC         Poll period for reseed watcher (default: 20)"
+  echo "  --reseed-threshold NUM        Trigger top-up when balance < this (default: 1.0)"
+  echo "  --reseed-amount-usdt NUM      USDT top-up amount per trigger (default: 1000000)"
+  echo "  --reseed-amount-btc NUM       BTC top-up amount per trigger (default: 5000)"
   exit 1
 }
 
@@ -67,6 +88,13 @@ while [ $# -gt 0 ]; do
     --proj-lag-max) PROJ_LAG_MAX="$2"; shift 2 ;;
     --proj-wait-max-loops) PROJ_WAIT_MAX_LOOPS="$2"; shift 2 ;;
     --prometheus-url) PROMETHEUS_URL="$2"; shift 2 ;;
+    --no-k6-prometheus) K6_PROMETHEUS_RW=0; shift ;;
+    --reseed) RESEED=true; shift ;;
+    --no-reseed) RESEED=false; shift ;;
+    --reseed-interval) RESEED_INTERVAL="$2"; shift 2 ;;
+    --reseed-threshold) RESEED_THRESHOLD="$2"; shift 2 ;;
+    --reseed-amount-usdt) RESEED_AMOUNT_USDT="$2"; shift 2 ;;
+    --reseed-amount-btc) RESEED_AMOUNT_BTC="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -322,6 +350,99 @@ find_leader() {
   echo "http://localhost:8081"
 }
 
+# Reseed watcher — background loop that top-ups CLIENT accounts whose USDT or
+# BTC balance has dropped below --reseed-threshold. Debits HOTSPOT_ACC. Each
+# top-up is a single balanced posting (HOTSPOT DEBIT, CLIENT CREDIT). All
+# writes go through Raft, so they don't bypass consensus. The watcher refreshes
+# its leader URL every iteration and skips posting if any node is unhealthy.
+#
+# Logs to $RESEED_LOG (one line per top-up: timestamp, account, currency,
+# before-amount, after-amount).
+reseed_topup() {
+  local client_acc="$1" currency="$2" amount="$3" before="$4"
+  local req_id="reseed-$(date +%s%N)-${RANDOM}"
+  local amt_str=""
+  case "$currency" in
+    USDT) amt_str="$(python3 -c "print(format($amount, '.16f'))")" ;;
+    BTC)  amt_str="$(python3 -c "print(format($amount, '.8f'))")" ;;
+  esac
+  local leg_id="leg-1"
+  local payload
+  payload=$(cat <<JSON
+{
+  "requestId": "${req_id}",
+  "businessEventType": "DEPOSIT",
+  "businessEventRef": "RESEED-${client_acc}-${currency}",
+  "valueDate": "$(date +%Y-%m-%d)",
+  "legs": [{
+    "legId": "${leg_id}",
+    "postingType": "DEPOSIT",
+    "amount": "${amt_str}",
+    "currency": "${currency}",
+    "lines": [
+      {"accountId": "${HOTSPOT_ACC}", "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "entryType": "DEBIT"},
+      {"accountId": "${client_acc}", "balanceType": "AVAILABLE_BALANCE", "position": "CURRENT", "entryType": "CREDIT"}
+    ]
+  }]
+}
+JSON
+)
+  local res
+  res=$(curl -s --max-time 15 -X POST "${RESEED_LEADER_URL}/ledger/postings" \
+    -H "Content-Type: application/json" \
+    -d "$payload")
+  local status
+  status=$(echo "$res" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('status', d.get('error', '?')))" 2>/dev/null || echo "PARSE_ERR")
+  local ts
+  ts=$(date +%H:%M:%S)
+  echo "[$ts] RESEED ${currency} ${client_acc} before=${before} amount=${amount} status=${status} leader=${RESEED_LEADER_URL}" >> "$RESEED_LOG"
+}
+
+reseed_check_account() {
+  local acc="$1"
+  for ccy in USDT BTC; do
+    local bal
+    bal=$(api_balance "${RESEED_LEADER_URL}" "$acc" "AVAILABLE_BALANCE" "$ccy")
+    if [ "$bal" = "ERR" ] || [ -z "$bal" ]; then continue; fi
+    local below
+    below=$(python3 -c "print(1 if float('${bal}') < ${RESEED_THRESHOLD} else 0)" 2>/dev/null || echo "0")
+    if [ "$below" = "1" ]; then
+      local amount
+      if [ "$ccy" = "USDT" ]; then amount="$RESEED_AMOUNT_USDT"
+      else amount="$RESEED_AMOUNT_BTC"; fi
+      reseed_topup "$acc" "$ccy" "$amount" "$bal"
+    fi
+  done
+}
+
+reseed_watcher_loop() {
+  # Refresh leader URL per iteration (Raft may switch mid-test).
+  while true; do
+    RESEED_LEADER_URL=$(find_leader)
+    # Quick health check — if any node is down, skip this iteration.
+    local any_down=0
+    for port in 8081 8082 8083; do
+      curl -s --max-time 2 "http://localhost:${port}/health" 2>/dev/null | grep -q "UP" || any_down=1
+    done
+    if [ "$any_down" = "1" ]; then
+      sleep "$RESEED_INTERVAL"
+      continue
+    fi
+    # Discover CLIENT accounts from MySQL (account_balance has every account).
+    local acc_list
+    acc_list=$(mysql_query "SELECT DISTINCT account_account_id FROM account_balance WHERE account_account_id LIKE '${CLIENT_PREFIX}%' ORDER BY account_account_id;" 2>/dev/null)
+    if [ -z "$acc_list" ]; then
+      sleep "$RESEED_INTERVAL"
+      continue
+    fi
+    while IFS= read -r acc; do
+      [ -z "$acc" ] && continue
+      reseed_check_account "$acc"
+    done <<< "$acc_list"
+    sleep "$RESEED_INTERVAL"
+  done
+}
+
 mysql_query() {
   docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN -e "$1" 2>/dev/null
 }
@@ -466,6 +587,11 @@ if ! $RECON_ONLY; then
   echo ""
   echo "=== Step 3: k6 stress test ($VUS VUs, $DURATION) ==="
   echo "Leader: $BASE_URL"
+  if $RESEED; then
+    echo "  Reseed watcher: ON (interval=${RESEED_INTERVAL}s threshold=${RESEED_THRESHOLD} USDT=${RESEED_AMOUNT_USDT} BTC=${RESEED_AMOUNT_BTC})"
+  else
+    echo "  Reseed watcher: OFF (--no-reseed)"
+  fi
 
   # Background leader watcher: logs leader changes during the k6 test
   LEADER_LOG=$(mktemp)
@@ -483,7 +609,31 @@ if ! $RECON_ONLY; then
   ) > "$LEADER_LOG" 2>/dev/null &
   WATCHER_PID=$!
 
+  # Background reseed watcher — only when --reseed / default-on
+  RESEED_PID=""
+  if $RESEED; then
+    RESEED_LOG=$(mktemp)
+    : > "$RESEED_LOG"
+    # Mirror k6 env vars so we top up the same accounts the test trades on.
+    HOTSPOT_ACC="${HOTSPOT_ACC:-STRESS-HOT-CO-001}"
+    CLIENT_PREFIX="${CLIENT_PREFIX:-STRESS-CLI-}"
+    RESEED_LEADER_URL="$BASE_URL"
+    (reseed_watcher_loop) >/dev/null 2>&1 &
+    RESEED_PID=$!
+  fi
+
+  K6_PROM_ARGS=()
+  if [ "$K6_PROMETHEUS_RW" != "0" ]; then
+    K6_TEST_ID="${K6_TEST_ID:-test-cycle-$(date +%Y%m%d-%H%M%S)}"
+    export K6_PROMETHEUS_RW_SERVER_URL="${K6_PROMETHEUS_RW_SERVER_URL:-${PROMETHEUS_URL}/api/v1/write}"
+    export K6_PROMETHEUS_RW_TREND_STATS="p(50),p(95),p(99)"
+    K6_PROM_ARGS=( -o experimental-prometheus-rw --tag "testid=${K6_TEST_ID}" )
+    echo "  k6 → Prometheus remote-write: ${K6_PROMETHEUS_RW_SERVER_URL} testid=${K6_TEST_ID}"
+    echo "  Grafana: http://localhost:3000/d/k6-test-cycle (filter testid=${K6_TEST_ID})"
+  fi
+
   K6_OUTPUT=$(k6 run --vus "$VUS" --duration "$DURATION" \
+    "${K6_PROM_ARGS[@]}" \
     -e BASE_URL="$BASE_URL" \
     "$K6_SCRIPT" 2>&1) || true
 
@@ -498,6 +648,20 @@ if ! $RECON_ONLY; then
     echo "  Leader: stable (no changes)"
   fi
   rm -f "$LEADER_LOG"
+
+  # Kill reseed watcher and summarize top-ups
+  if $RESEED && [ -n "$RESEED_PID" ]; then
+    kill "$RESEED_PID" 2>/dev/null || true
+    wait "$RESEED_PID" 2>/dev/null || true
+    if [ -s "$RESEED_LOG" ]; then
+      RESEED_COUNT=$(wc -l < "$RESEED_LOG" | tr -d ' ')
+      echo "  Reseed top-ups during test: $RESEED_COUNT"
+      cat "$RESEED_LOG" | sed 's/^/    /'
+    else
+      echo "  Reseed: 0 top-ups (all CLIENT balances stayed above ${RESEED_THRESHOLD})"
+    fi
+    rm -f "$RESEED_LOG"
+  fi
 
   # Strip ANSI color codes injected by handleSummary/textSummary so the metric
   # greps below can match the embedded "iterations...........:" / "p(50)=..." rows.

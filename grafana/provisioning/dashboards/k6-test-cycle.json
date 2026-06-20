@@ -20,7 +20,7 @@
   "graphTooltip": 1,
   "links": [
     {
-      "title": "Ledger Overview",
+      "title": "Ledger Overview (server-side)",
       "type": "link",
       "url": "/d/ledger-overview/ledger-platform-overview",
       "icon": "dashboard",
@@ -31,7 +31,7 @@
     {
       "id": 1,
       "type": "text",
-      "title": "test-cycle.sh Monitor",
+      "title": "k6 Client E2E (test-cycle.sh)",
       "gridPos": {
         "h": 3,
         "w": 24,
@@ -40,12 +40,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Live view for `./scripts/test-cycle.sh` k6 stress runs. Watch end-to-end TPS, posting latency, Kafka lag, projection pipeline, GC, and MySQL while the test is running. Refresh: 5s."
+        "content": "Client-side **end-to-end** metrics from the k6 load generator (`experimental-prometheus-rw`). Measures full HTTP round-trip: connect \u2192 send \u2192 **wait (TTFB)** \u2192 receive. Enabled by default in `test-cycle.sh`; filter by **testid** tag. Server-side ledger metrics: [Ledger Overview](/d/ledger-overview). Refresh: 5s."
       }
     },
     {
       "id": 2,
-      "title": "API Posting TPS",
+      "title": "HTTP Request Rate",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -71,7 +71,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "reqps"
         },
         "overrides": []
       },
@@ -93,14 +93,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))",
-          "legendFormat": "TPS"
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))",
+          "legendFormat": "req/s"
         }
       ]
     },
     {
       "id": 3,
-      "title": "Raft Apply TPS",
+      "title": "Virtual Users",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -126,7 +126,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -148,14 +148,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ledger_raft_last_applied_index{node_id=~\"$node\"}[1m]))",
-          "legendFormat": "apply/s"
+          "expr": "max(k6_vus{testid=~\"$testid\"})",
+          "legendFormat": "VUs"
         }
       ]
     },
     {
       "id": 4,
-      "title": "Outbox Publish TPS",
+      "title": "HTTP Failed Rate",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -181,7 +181,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "percentunit"
         },
         "overrides": []
       },
@@ -203,14 +203,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ledger_outbox_published[1m]))",
-          "legendFormat": "publish/s"
+          "expr": "avg(k6_http_req_failed_rate{testid=~\"$testid\"})",
+          "legendFormat": "failed"
         }
       ]
     },
     {
       "id": 5,
-      "title": "Projection Write TPS",
+      "title": "Iteration Rate",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -258,19 +258,19 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])",
-          "legendFormat": "events/s"
+          "expr": "sum(rate(k6_iterations_total{testid=~\"$testid\"}[1m]))",
+          "legendFormat": "iter/s"
         }
       ]
     },
     {
       "id": 6,
-      "title": "Posting Latency P50/P95/P99",
-      "description": "Client-visible posting latency during k6 load. NFR P95 <= 3ms.",
+      "title": "HTTP Request Duration E2E (P50 / P95 / P99)",
+      "description": "k6 client-side http_req_duration \u2014 full request lifecycle in ms.",
       "type": "timeseries",
       "gridPos": {
-        "h": 6,
-        "w": 12,
+        "h": 7,
+        "w": 24,
         "x": 0,
         "y": 7
       },
@@ -296,7 +296,7 @@
           "unit": "ms",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -321,30 +321,30 @@
         {
           "refId": "A",
           "legendFormat": "P50",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+          "expr": "k6_http_req_duration_p50{testid=~\"$testid\"}"
         },
         {
           "refId": "B",
           "legendFormat": "P95",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+          "expr": "k6_http_req_duration_p95{testid=~\"$testid\"}"
         },
         {
           "refId": "C",
           "legendFormat": "P99",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[1m]))) * 1000"
+          "expr": "k6_http_req_duration_p99{testid=~\"$testid\"}"
         }
       ]
     },
     {
       "id": 7,
-      "title": "End-to-End Throughput",
-      "description": "Same TPS stack as test-cycle.sh summary: API -> Raft -> Outbox -> Projection.",
+      "title": "HTTP Request Rate",
+      "description": "Successful + failed requests per second from k6.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
-        "x": 12,
-        "y": 7
+        "x": 0,
+        "y": 14
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -365,10 +365,10 @@
               }
             ]
           },
-          "unit": "ops",
+          "unit": "reqps",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -392,36 +392,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "API posting",
-          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))"
-        },
-        {
-          "refId": "B",
-          "legendFormat": "Raft applied",
-          "expr": "sum(rate(ledger_raft_last_applied_index{node_id=~\"$node\"}[1m]))"
-        },
-        {
-          "refId": "C",
-          "legendFormat": "Outbox published",
-          "expr": "sum(rate(ledger_outbox_published[1m]))"
-        },
-        {
-          "refId": "D",
-          "legendFormat": "Projection events",
-          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])"
+          "legendFormat": "req/s",
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\"}[1m]))"
         }
       ]
     },
     {
       "id": 8,
-      "title": "Kafka Consumer Lag",
-      "description": "Kafka consumer group lag and offset per topic/partition (kafka-exporter). test-cycle waits for consumer assignment before k6.",
+      "title": "Virtual Users",
+      "description": "Active VUs during the test run.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
-        "x": 0,
-        "y": 13
+        "x": 12,
+        "y": 14
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -445,7 +430,7 @@
           "unit": "short",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -469,31 +454,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}} lag",
-          "expr": "sum by (consumergroup, topic, partition) (kafka_consumergroup_lag{job=\"kafka\"})"
-        },
-        {
-          "refId": "B",
-          "legendFormat": "total lag",
-          "expr": "sum(kafka_consumergroup_lag{job=\"kafka\"})"
-        },
-        {
-          "refId": "C",
-          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}} offset",
-          "expr": "kafka_consumergroup_current_offset{job=\"kafka\"}"
+          "legendFormat": "VUs",
+          "expr": "max(k6_vus{testid=~\"$testid\"})"
         }
       ]
     },
     {
       "id": 9,
-      "title": "Projection Pipeline",
-      "description": "Metrics polled by test-cycle.sh wait_projection_catchup.",
+      "title": "HTTP Failed Rate",
+      "description": "Fraction of failed HTTP requests (k6 check + status).",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
-        "x": 12,
-        "y": 13
+        "x": 0,
+        "y": 20
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -514,11 +489,12 @@
               }
             ]
           },
-          "unit": "short",
+          "unit": "percentunit",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12
+          },
+          "max": 1
         },
         "overrides": []
       },
@@ -541,36 +517,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "journal buffer depth",
-          "expr": "ledger_projection_journal_buffer_depth{job=\"projection\"}"
-        },
-        {
-          "refId": "B",
-          "legendFormat": "outbox pending (max)",
-          "expr": "max(ledger_outbox_pending)"
-        },
-        {
-          "refId": "C",
-          "legendFormat": "seconds since last event",
-          "expr": "ledger_projection_seconds_since_last_event_seconds{job=\"projection\"}"
-        },
-        {
-          "refId": "D",
-          "legendFormat": "events/s",
-          "expr": "rate(ledger_projection_events_processed{job=\"projection\"}[1m])"
+          "legendFormat": "failed rate",
+          "expr": "avg(k6_http_req_failed_rate{testid=~\"$testid\"})"
         }
       ]
     },
     {
       "id": 10,
-      "title": "Posting Rejections by Error",
-      "description": "Spikes during k6 often indicate NOT_LEADER, QUEUE_FULL, or INSUFFICIENT_BALANCE.",
+      "title": "Checks Pass Rate",
+      "description": "k6 check() success rate during the run.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
-        "x": 0,
-        "y": 19
+        "x": 12,
+        "y": 20
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -591,11 +552,12 @@
               }
             ]
           },
-          "unit": "ops",
+          "unit": "percentunit",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
-          }
+            "fillOpacity": 12
+          },
+          "max": 1
         },
         "overrides": []
       },
@@ -618,145 +580,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{errorCode}}",
-          "expr": "sum(rate(ledger_posting_rejected_count_total[1m])) by (errorCode)"
+          "legendFormat": "checks rate",
+          "expr": "avg(k6_checks_rate{testid=~\"$testid\"})"
         }
       ]
     },
     {
       "id": 11,
-      "title": "Account Queue Depth (Top 5)",
-      "description": "Hotspot backpressure during stress. Max before rejection: 1000.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 19
-      },
-      "pluginVersion": "12.0.1+security-01",
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "yellow"
-              },
-              {
-                "color": "red"
-              }
-            ]
-          },
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "legendFormat": "{{accountId}}",
-          "expr": "topk(5, ledger_account_queue_depth)"
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "title": "JVM GC Events (per minute)",
-      "description": "GC activity on ledger nodes + projection during k6.",
+      "title": "HTTP Waiting Time (P95) \u2014 TTFB",
+      "description": "Time waiting for first byte (server + network). Dominates posting latency from client view.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 25
-      },
-      "pluginVersion": "12.0.1+security-01",
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "yellow"
-              },
-              {
-                "color": "red"
-              }
-            ]
-          },
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "legendFormat": "{{instance}} {{action}}",
-          "expr": "sum by (instance, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
-        }
-      ]
-    },
-    {
-      "id": 13,
-      "title": "JVM GC Pause Max (ms)",
-      "description": "ZGC on ledger nodes target < 1ms; G1 on projection target < 50ms.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 25
+        "y": 26
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -780,7 +618,7 @@
           "unit": "ms",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -804,21 +642,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{instance}}",
-          "expr": "max by (instance) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
+          "legendFormat": "waiting P95",
+          "expr": "k6_http_req_waiting_p95{testid=~\"$testid\"}"
         }
       ]
     },
     {
-      "id": 14,
-      "title": "MySQL Performance",
-      "description": "Server QPS/connections plus projection write rates.",
+      "id": 12,
+      "title": "HTTP Receiving Time (P95)",
+      "description": "Time to read response body after TTFB.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
         "w": 12,
-        "x": 0,
-        "y": 31
+        "x": 12,
+        "y": 26
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -839,10 +677,10 @@
               }
             ]
           },
-          "unit": "ops",
+          "unit": "ms",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -866,41 +704,21 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "MySQL QPS",
-          "expr": "rate(mysql_global_status_questions{job=\"mysql\"}[1m])"
-        },
-        {
-          "refId": "B",
-          "legendFormat": "connections",
-          "expr": "mysql_global_status_threads_connected{job=\"mysql\"}"
-        },
-        {
-          "refId": "C",
-          "legendFormat": "slow queries/s",
-          "expr": "rate(mysql_global_status_slow_queries{job=\"mysql\"}[1m])"
-        },
-        {
-          "refId": "D",
-          "legendFormat": "flush rows/s",
-          "expr": "rate(ledger_projection_journal_flush_rows{job=\"projection\"}[1m])"
-        },
-        {
-          "refId": "E",
-          "legendFormat": "balance writes/s",
-          "expr": "rate(ledger_projection_balance_writes{job=\"projection\"}[1m])"
+          "legendFormat": "receiving P95",
+          "expr": "k6_http_req_receiving_p95{testid=~\"$testid\"}"
         }
       ]
     },
     {
-      "id": 15,
-      "title": "Raft Last Applied Index",
-      "description": "Follower lag vs leader during k6. Alert if > 100 behind.",
+      "id": 13,
+      "title": "Dropped Iterations",
+      "description": "k6 could not start iterations (VUs saturated). Should stay at 0.",
       "type": "timeseries",
       "gridPos": {
-        "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 31
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 32
       },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
@@ -924,7 +742,7 @@
           "unit": "short",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -948,18 +766,23 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{node_id}}",
-          "expr": "ledger_raft_last_applied_index{node_id=~\"$node\"}"
+          "legendFormat": "dropped/s",
+          "expr": "sum(rate(k6_dropped_iterations_total{testid=~\"$testid\"}[1m]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "dropped total",
+          "expr": "sum(k6_dropped_iterations_total{testid=~\"$testid\"})"
         }
       ]
     },
     {
-      "id": 16,
-      "title": "L1 Reconciliation",
-      "description": "Unbalanced journals from L1 reconciliation (test-cycle post-check).",
+      "id": 14,
+      "title": "Iteration Duration (P95)",
+      "description": "Full iteration wall time including sleeps between requests.",
       "type": "timeseries",
       "gridPos": {
-        "h": 5,
+        "h": 6,
         "w": 24,
         "x": 0,
         "y": 37
@@ -983,10 +806,10 @@
               }
             ]
           },
-          "unit": "short",
+          "unit": "ms",
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 12
           }
         },
         "overrides": []
@@ -1010,8 +833,8 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "unbalanced total",
-          "expr": "ledger_reconciliation_l1_unbalanced_total"
+          "legendFormat": "iteration P95",
+          "expr": "k6_iteration_duration_p95{testid=~\"$testid\"}"
         }
       ]
     }
@@ -1022,41 +845,24 @@
   "tags": [
     "k6",
     "test-cycle",
-    "ledger",
-    "stress"
+    "e2e",
+    "client"
   ],
   "templating": {
     "list": [
       {
         "current": {
           "text": "All",
-          "value": [
-            "$__all"
-          ]
-        },
-        "datasource": "Prometheus",
-        "definition": "label_values(ledger_raft_is_leader, node_id)",
-        "includeAll": true,
-        "multi": true,
-        "name": "node",
-        "query": "label_values(ledger_raft_is_leader, node_id)",
-        "refresh": 1,
-        "sort": 1,
-        "type": "query"
-      },
-      {
-        "current": {
-          "text": "All",
           "value": "$__all"
         },
         "datasource": "Prometheus",
-        "definition": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
+        "definition": "label_values(k6_vus, testid)",
         "includeAll": true,
-        "multi": true,
-        "name": "businessEventType",
-        "query": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
-        "refresh": 1,
-        "sort": 1,
+        "multi": false,
+        "name": "testid",
+        "query": "label_values(k6_vus, testid)",
+        "refresh": 2,
+        "sort": 2,
         "type": "query"
       }
     ]
@@ -1069,5 +875,5 @@
   "timezone": "browser",
   "title": "k6 Test Cycle (test-cycle.sh)",
   "uid": "k6-test-cycle",
-  "version": 1
+  "version": 3
 }
