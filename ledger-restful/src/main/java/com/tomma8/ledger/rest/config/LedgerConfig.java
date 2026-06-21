@@ -344,6 +344,10 @@ public class LedgerConfig {
                 .description("Raft last applied index (monotonic, per node)")
                 .tag("node_id", nodeId)
                 .register(meterRegistry);
+        Gauge.builder("ledger.sm.journal.sequence", ledgerStateMachine::getJournalSequence)
+                .description("State machine journal sequence (smJournalSeq)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
 
         String[] peerArr = peers.split(",");
         StringBuilder raftPeers = new StringBuilder();
@@ -392,6 +396,10 @@ public class LedgerConfig {
                 .register(meterRegistry);
         Gauge.builder("ledger.raft.last_applied_index", mgr::getLastAppliedIndex)
                 .description("Raft last applied index (monotonic, per node)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
+        Gauge.builder("ledger.sm.journal.sequence", ledgerStateMachine::getJournalSequence)
+                .description("State machine journal sequence (smJournalSeq)")
                 .tag("node_id", nodeId)
                 .register(meterRegistry);
 

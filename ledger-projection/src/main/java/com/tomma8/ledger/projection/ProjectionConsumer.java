@@ -96,7 +96,7 @@ public class ProjectionConsumer {
             String accountId = null, accountType = null, displayName = "",
                     ownerId = null, status = null, createdAtRaw = null;
             if (p.nextToken() != JsonToken.START_OBJECT) {
-                ack.acknowledge();
+                safeAck(ack);
                 return;
             }
             while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -113,12 +113,12 @@ public class ProjectionConsumer {
                 }
             }
             if (accountId == null || accountType == null || status == null) {
-                ack.acknowledge();
+                safeAck(ack);
                 return;
             }
             writer.writeAccount(accountId, accountType, displayName, ownerId, status,
                     toLocalDateTime(createdAtRaw));
-            ack.acknowledge();
+            safeAck(ack);
         } catch (Exception e) {
             log.error("Failed to project account event — not acking, will redeliver", e);
         }
@@ -141,7 +141,7 @@ public class ProjectionConsumer {
             containerFactory = "batchFactory")
     public void onBalanceChange(List<String> messages, Acknowledgment ack) {
         if (messages == null || messages.isEmpty()) {
-            ack.acknowledge();
+            safeAck(ack);
             return;
         }
         try {
@@ -155,10 +155,29 @@ public class ProjectionConsumer {
                 }
             }
             writer.writeBalanceBatch(parsed);
-            ack.acknowledge();
+            safeAck(ack);
         } catch (Exception e) {
+            // Persisting the batch failed — DO NOT ack so Kafka redelivers.
+            // The downstream writer is idempotent (INSERT IGNORE +
+            // accountSeq-guarded upsert), so redelivery is safe.
             log.error("Balance batch projection failed (size={}) — not acking, will redeliver",
                     messages.size(), e);
+        }
+    }
+
+    /**
+     * Acknowledge without throwing. After a rebalance the old generation's
+     * commitSync throws CommitFailedException which Spring treats as a batch
+     * failure — even when the DB write succeeded. With async commits this is
+     * mostly a no-op, but the safety net below keeps the listener robust.
+     */
+    private static void safeAck(Acknowledgment ack) {
+        if (ack == null) return;
+        try {
+            ack.acknowledge();
+        } catch (Exception e) {
+            // Expected on rebalance; the new generation will re-fetch from the
+            // last committed offset, and the writer is idempotent.
         }
     }
 

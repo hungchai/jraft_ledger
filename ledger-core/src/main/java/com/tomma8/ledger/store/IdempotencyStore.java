@@ -59,6 +59,10 @@ public class IdempotencyStore {
         store.put(requestId, new IdempotencyEntry(requestId, journalId, clock.millis()));
     }
 
+    public void put(String requestId, String journalId, long createdAtMillis) {
+        store.put(requestId, new IdempotencyEntry(requestId, journalId, createdAtMillis));
+    }
+
     public boolean contains(String requestId) {
         return get(requestId) != null;
     }

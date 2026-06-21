@@ -3,6 +3,8 @@ package com.tomma8.ledger.utils;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Twitter Snowflake-style distributed ID generator.
@@ -17,6 +19,8 @@ import java.time.ZonedDateTime;
  */
 public class SnowflakeIdGenerator {
 
+    private static final Logger log = LoggerFactory.getLogger(SnowflakeIdGenerator.class);
+
     // Custom epoch: 2026-01-01T00:00:00Z
     private static final long EPOCH_MILLIS = ZonedDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC)
             .toInstant().toEpochMilli();
@@ -24,9 +28,13 @@ public class SnowflakeIdGenerator {
     private static final long WORKER_ID_BITS = 10L;
     private static final long SEQUENCE_BITS = 12L;
 
-    /** Tolerated backwards clock drift (ms). Small NTP adjustments wait it out;
-     *  larger drifts throw to prevent silent ID collisions. */
-    private static final long MAX_BACKWARDS_DRIFT_MS = 5L;
+    /** Tolerated backwards clock drift (ms). Small NTP corrections (≤ 2 s) wait it
+     *  out to keep IDs strictly monotonic — never throw on NTP slew. Larger drifts
+     *  are handled the same way (spin until clock catches up) because throwing
+     *  here causes downstream callers (e.g. ProjectionWriter batches) to abandon
+     *  the entire batch and roll back Kafka offsets, which is worse than a brief
+     *  blocking wait. */
+    private static final long MAX_BACKWARDS_DRIFT_MS = 2_000L;
 
     private static final long MAX_WORKER_ID = ~(-1L << WORKER_ID_BITS);
     private static final long MAX_SEQUENCE = ~(-1L << SEQUENCE_BITS);
@@ -50,13 +58,15 @@ public class SnowflakeIdGenerator {
 
         if (timestamp < lastTimestamp) {
             long drift = lastTimestamp - timestamp;
-            if (drift <= MAX_BACKWARDS_DRIFT_MS) {
-                // Small NTP correction — wait it out to preserve monotonicity
-                timestamp = waitNextMillis(lastTimestamp);
-            } else {
-                throw new IllegalStateException(
-                        "Clock moved backwards. Refusing to generate ID for " + drift + " ms");
+            // Always spin-wait instead of throwing. Caller (ProjectionWriter /
+            // Outbox publisher) treats nextId() throws as fatal batch failure →
+            // rolls back Kafka offsets, amplifies lag. Blocking a few ms here
+            // is far cheaper than the cascading redelivery storm.
+            if (drift > MAX_BACKWARDS_DRIFT_MS) {
+                log.warn("Snowflake clock moved backwards by {} ms — waiting until {}",
+                        drift, lastTimestamp);
             }
+            timestamp = waitNextMillis(lastTimestamp);
         }
 
         if (timestamp == lastTimestamp) {

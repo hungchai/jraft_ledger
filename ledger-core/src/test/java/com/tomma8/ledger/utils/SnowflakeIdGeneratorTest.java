@@ -27,12 +27,14 @@ class SnowflakeIdGeneratorTest {
     }
 
     @Test
-    void nextId_throwsOnLargeBackwardsClockDrift() {
+    void nextId_waitsOnLargeBackwardsClockDrift() {
+        // Up to MAX_BACKWARDS_DRIFT_MS (2 s) we spin-wait instead of throwing.
+        // Previously this threw IllegalStateException, which caused
+        // ProjectionWriter batches to fail and roll back Kafka offsets.
         SnowflakeIdGenerator gen = new BackwardsClockGenerator(1, 10);
-        gen.nextId(); // lastTimestamp = T
-        assertThatThrownBy(gen::nextId)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Clock moved backwards");
+        long id1 = gen.nextId(); // lastTimestamp = T
+        long id2 = gen.nextId(); // clock jumps back 10 ms — must wait, not throw
+        assertThat(id2).isGreaterThan(id1);
     }
 
     @Test
