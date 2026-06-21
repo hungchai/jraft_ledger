@@ -100,7 +100,8 @@ public class RaftNodeManager implements ConsensusEngine {
         long tSubmit = System.nanoTime();
         CompletableFuture<CommandResult> future = new CompletableFuture<>();
         pendingCommands.put(command.requestId(), future);
-        byte[] data = CommandSerializer.serialize(command);
+        // Stamp apply time once here on the leader so it replicates in the log entry.
+        byte[] data = CommandSerializer.serialize(command, System.currentTimeMillis());
 
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {
@@ -155,7 +156,8 @@ public class RaftNodeManager implements ConsensusEngine {
         }
 
         BatchRaftCommand batch = BatchRaftCommand.of(commands);
-        byte[] data = CommandSerializer.serialize(batch);
+        // One leader-stamped apply time for the whole batch (all sub-commands commit together).
+        byte[] data = CommandSerializer.serialize(batch, System.currentTimeMillis());
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {
                 RuntimeException ex = new RuntimeException("Raft batch apply failed: " + status);

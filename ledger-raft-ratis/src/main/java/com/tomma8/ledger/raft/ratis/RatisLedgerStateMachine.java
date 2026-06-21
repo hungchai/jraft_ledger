@@ -112,18 +112,20 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
 
         CommandResult result;
         try {
-            RaftCommand cmd = CommandSerializer.deserialize(bytes, bytes.length);
+            long applyTimeMillis = CommandSerializer.readApplyTimeMillis(bytes, bytes.length);
+            int bodyLen = bytes.length - CommandSerializer.APPLY_TIME_HEADER;
+            RaftCommand cmd = CommandSerializer.deserialize(bytes, CommandSerializer.APPLY_TIME_HEADER, bodyLen);
             if (cmd instanceof BatchRaftCommand batch) {
                 var results = new java.util.ArrayList<CommandResult>(batch.commands().size());
                 for (int i = 0; i < batch.commands().size(); i++) {
-                    results.add(executeCommand(batch.commands().get(i), RaftApplyContext.batchEntry(index, i)));
+                    results.add(executeCommand(batch.commands().get(i), RaftApplyContext.batchEntry(index, i, applyTimeMillis)));
                 }
                 com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(batch.commands().size());
                 byte[] out = mapper.writeValueAsBytes(BatchApplyResult.of(results));
                 updateLastAppliedTermIndex(term, index);
                 return CompletableFuture.completedFuture(Message.valueOf(ByteString.copyFrom(out)));
             }
-            result = executeCommand(cmd, index);
+            result = executeCommand(cmd, RaftApplyContext.single(index, applyTimeMillis));
         } catch (Exception e) {
             log.error("[RATIS_APPLY_FAIL] index={} len={}", index, bytes.length, e);
             result = CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR);
@@ -156,7 +158,7 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
             return ledger.applyReversal(r, ctx);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledger.applyAccountCreate(a, ctx.raftIndex());
+            return ledger.applyAccountCreate(a, ctx);
         }
         if (cmd instanceof AccountFreezeCommand f) {
             return f.freeze() ? ledger.applyFreeze(f, ctx.raftIndex())
