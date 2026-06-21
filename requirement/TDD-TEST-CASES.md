@@ -1,10 +1,12 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.16
-**日期**: 2026-06-15
+**版本**: v0.17
+**日期**: 2026-06-21
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.17 變更摘要**：(1) 修正 Raft apply 決定性缺陷 — apply 路徑內的 `Instant.now()` 與 `FastIdGenerator.nextId()` 在每個節點各自產生不同值，導致 Journal/JournalLine/BalanceEntry 的時間戳與 BalanceChangeEvent eventId 跨節點分歧。改為由 leader 於提交時戳記時間（隨 log entry 複製），eventId 改由 `journalId`/`journalLineId` 決定性衍生。新增 Module 23（TC-DET-01~03）。(2) 修改 Module 22 — SnowflakeIdGenerator 時鐘回退不再拋錯，改為 monotonic-advance（pin 到 lastTimestamp，序列耗盡則邏輯時鐘 +1ms），更新 TC-SNOW-02~04。
+>
 > **v0.15 變更摘要**：新增 Module 19.5（Projection Deadlock Safety），新增 TC-PROJ-11~12。涵蓋 journal_line 批次寫入前按 (accountAccountId, journalLineId) 排序以避免 InnoDB gap-lock 死鎖，以及死鎖發生時 bounded retry。
 >
 > **v0.16 變更摘要**：新增 TC-F011-13~17（JournalEventEnvelope 1-record-per-journal）。驗證 applyPosting 走 `onPosting(envelope)` 路徑、EmitGate 關閉時零發送、CF_OUTBOX 一筆 journal 一筆 envelope 條目、AsyncOutboxPublisher 走 envelope 路徑。對應 v0.3 F-011 §8 envelope 模型。
@@ -1406,8 +1408,10 @@ Phase 9 — Config Abstraction【v0.10 新增】
 Phase 10 — Micrometer Metrics & Observability【v0.11 新增】
   TC-F016-01~10（Metrics expose + tag correctness + alert firing + histogram bucket + projection gauges）
 
-Phase 11 — SnowflakeIdGenerator Clock Drift Tolerance【v0.13 新增】
-  TC-SNOW-01~04（monotonic ID + sequence rollover + ≤5ms backward wait + >5ms backward reject）
+Phase 11 — SnowflakeIdGenerator Clock Drift Tolerance【v0.13 新增，v0.17 改為 monotonic-advance】
+  TC-SNOW-01~04（monotonic ID + sequence rollover→邏輯時鐘進位 + 任意 backward drift 皆 monotonic-advance，不拋錯）
+Phase 12 — Raft Apply 決定性【v0.17 新增】
+  TC-DET-01~03（leader-stamped apply time 複製 + deterministic event-id + CommandSerializer apply-time header）
 
 ---
 
@@ -1420,20 +1424,42 @@ Phase 11 — SnowflakeIdGenerator Clock Drift Tolerance【v0.13 新增】
   - Then：`id1 < id2 < id3`
 
 ### 22.2 Sequence Rollover Within Same Millisecond
-- **TC-SNOW-02**：同一毫秒內序列號耗盡後自動進位到下一毫秒
+- **TC-SNOW-02**：同一毫秒內序列號耗盡後邏輯時鐘進位（不 busy-wait）
   - Given：`workerId=1`，固定毫秒戳 `T`
-  - When：連續產生 5000 個 ID（超過 4096 序列上限）
-  - Then：所有 ID 嚴格遞增，無重複，無死鎖
+  - When：連續產生超過 4096 個 ID（超過 12-bit 序列上限）
+  - Then：序列耗盡時 `lastTimestamp` 自動 +1ms，所有 ID 嚴格遞增，無重複，無死鎖（固定時鐘下也不卡死）
 
-### 22.3 Small Backwards Clock Drift Tolerance（≤5 ms）
-- **TC-SNOW-03**：NTP 微調導致時鐘回退 ≤5ms 時等待而非拋錯
+### 22.3 Small Backwards Clock Drift（≤5 ms）— Monotonic Advance
+- **TC-SNOW-03**：NTP 微調導致時鐘回退時保持單調遞增，不拋錯
   - Given：`lastTimestamp = T`，模擬時鐘回退 3ms
   - When：呼叫 `nextId()`
-  - Then：Busy-wait 直到時鐘回到 T，成功產生 `id > lastId`，不拋例外
+  - Then：pin 到 `lastTimestamp` 並遞增序列，成功產生 `id > lastId`，不拋例外
 
-### 22.4 Large Backwards Clock Drift Rejection（>5 ms）
-- **TC-SNOW-04**：時鐘回退超過 5ms 仍應拒絕產生 ID
-  - Given：`lastTimestamp = T`，模擬時鐘回退 10ms
-  - When：呼叫 `nextId()`
-  - Then：拋出 `IllegalStateException`，訊息包含 "Clock moved backwards"
+### 22.4 Large Backwards Clock Drift（>5 ms）— Monotonic Advance（不再拒絕）
+- **TC-SNOW-04**：時鐘大幅回退（如 NTP step、VM 暫停）仍保持單調遞增，不拋錯
+  - Given：`lastTimestamp = T`，模擬時鐘回退 250ms
+  - When：連續呼叫 `nextId()`
+  - Then：pin 到 `lastTimestamp` 並遞增序列，`id2 > id1`、`id3 > id2`，**不**拋 `IllegalStateException`
+  - 理由：拋錯會使 ID 產生（journal surrogate PK）在時鐘調整時失敗；monotonic-advance 保證可用性與唯一性
+
+## Module 23：Raft Apply 決定性（Leader-Stamped Time + Deterministic Event-ID）【v0.17 新增】
+
+跨節點分歧根因：apply() 在每個節點獨立執行，若內部呼叫 `Instant.now()` 或隨機 `FastIdGenerator.nextId()`，各 replica 會算出不同的時間戳/eventId 並寫入 Journal、JournalLine、BalanceEntry、BalanceChangeEvent，造成長跑後資料不同步。
+
+### 23.1 Leader-Stamped Apply Time Replicated
+- **TC-DET-01**：apply 時間戳由 leader 提交時決定並隨 log entry 複製
+  - Given：3-node cluster，提交一筆 posting
+  - When：各節點 apply 同一 log entry
+  - Then：三節點上同一 `journalId` 的 `Journal.createdAt`、`JournalLine.createdAt`、`BalanceEntry.lastUpdatedAt` **完全相同**
+
+### 23.2 Deterministic Event-ID
+- **TC-DET-02**：`BalanceChangeEvent.eventId` 由 `journalLineId` 決定性衍生（`"EVT-" + journalLineId`），不使用時間/隨機
+  - Given：同一筆 posting 在不同節點 apply
+  - Then：對應 journalLine 的 eventId 跨節點相同；AccountCreatedEvent eventId = `"EVT-ACC-" + accountId`
+
+### 23.3 CommandSerializer Apply-Time Header
+- **TC-DET-03**：序列化於 JSON body 前置 8-byte big-endian apply-time header；反序列化還原命令並可取出 apply time
+  - Given：`serialize(command, applyTimeMillis)`
+  - When：`deserialize(bytes)` 與 `extractApplyTimeMillis(bytes)`
+  - Then：命令還原正確，且取回的 apply time == 原 `applyTimeMillis`
 ```

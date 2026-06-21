@@ -16,7 +16,6 @@ import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 import com.tomma8.ledger.store.IdempotencyStore;
-import com.tomma8.ledger.util.FastIdGenerator;
 import com.tomma8.ledger.util.LedgerMappers;
 
 import java.math.BigDecimal;
@@ -283,28 +282,32 @@ public class LedgerStateMachine {
     // ── Posting ────────────────────────────────────────────────
 
     public CommandResult applyPosting(PostingCommand cmd) {
-        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", 0);
+        return applyPosting(cmd, 0L, Instant.now());
     }
     public CommandResult applyPosting(PostingCommand cmd, long raftIndex) {
+        return applyPosting(cmd, raftIndex, Instant.now());
+    }
+    public CommandResult applyPosting(PostingCommand cmd, long raftIndex, Instant applyTime) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", raftIndex, applyTime);
     }
 
     public CommandResult applyAdjustment(AdjustmentCommand cmd) {
-        return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", 0);
+        return applyAdjustment(cmd, 0L, Instant.now());
     }
     public CommandResult applyAdjustment(AdjustmentCommand cmd, long raftIndex) {
+        return applyAdjustment(cmd, raftIndex, Instant.now());
+    }
+    public CommandResult applyAdjustment(AdjustmentCommand cmd, long raftIndex, Instant applyTime) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", raftIndex, applyTime);
     }
 
     private CommandResult applyJournalCommand(String requestId, String businessEventType,
                                               String businessEventRef, LocalDate valueDate,
                                               List<PostingCommand.Leg> legs,
                                               JournalType journalType, String commandLabel,
-                                              long raftIndex) {
+                                              long raftIndex, Instant applyTime) {
         long t0 = System.nanoTime();
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
@@ -343,7 +346,7 @@ public class LedgerStateMachine {
                     var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_NOT_FOUND,
                             Map.of("accountId", accountId));
                     idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                     return result;
                 }
                 accountCache.put(accountId, account.get());
@@ -351,7 +354,7 @@ public class LedgerStateMachine {
                     var result = CommandResult.rejected(LedgerErrorCode.ACCOUNT_FROZEN,
                             Map.of("accountId", accountId));
                     idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                     return result;
                 }
             }
@@ -369,14 +372,14 @@ public class LedgerStateMachine {
                                 var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CLIENT,
                                         Map.of("accountId", line.accountId()));
                                 idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                                 return result;
                             }
                             if (type == AccountType.CONTROL) {
                                 var result = CommandResult.rejected(LedgerErrorCode.SEED_NOT_ALLOWED_FOR_CONTROL,
                                         Map.of("accountId", line.accountId()));
                                 idempotencyStore.put(requestId,
-                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                                        IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                                 return result;
                             }
                         }
@@ -389,7 +392,7 @@ public class LedgerStateMachine {
                     var result = CommandResult.rejected(LedgerErrorCode.INVALID_LEG_AMOUNT,
                             Map.of("legId", leg.legId(), "amount", leg.amount().toPlainString()));
                     idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                     return result;
                 }
             }
@@ -436,7 +439,7 @@ public class LedgerStateMachine {
                         var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", debit.toPlainString(), "creditTotal", credit.toPlainString()));
                         idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                         return result;
                     }
                 }
@@ -446,7 +449,7 @@ public class LedgerStateMachine {
                         var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_UNBALANCED,
                                 Map.of("currency", cc, "debitTotal", "0", "creditTotal", credit.toPlainString()));
                         idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                         return result;
                     }
                 }
@@ -475,7 +478,7 @@ public class LedgerStateMachine {
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
                     idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                     return result;
                 }
 
@@ -495,7 +498,7 @@ public class LedgerStateMachine {
                                         "required", lwl.amount().toPlainString(),
                                         "available", current.amount().toPlainString()));
                         idempotencyStore.put(requestId,
-                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                                IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                         return result;
                     }
                 }
@@ -504,7 +507,7 @@ public class LedgerStateMachine {
                             Map.of("accountId", line.accountId(), "balanceType", line.balanceType(),
                                     "currency", lwl.currency(), "position", line.position()));
                     idempotencyStore.put(requestId,
-                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), Instant.now()));
+                            IdempotencyEntry.rejected(requestId, result.errorCodes(), result.errorDetails(), applyTime));
                     return result;
                 }
                 reusableAfterBalances.put(key, after);
@@ -522,7 +525,8 @@ public class LedgerStateMachine {
             String journalId = raftIndex > 0
                     ? String.format("JNL-%016d", raftIndex)
                     : String.format("JNL-%04d", seq);
-            Instant now = Instant.now();
+            // Leader-stamped, replicated time — identical on every node (was Instant.now()).
+            Instant now = applyTime;
 
             for (var lwl : reusableLines) {
                 var line = lwl.line();
@@ -580,7 +584,7 @@ public class LedgerStateMachine {
                             : lwl.amount();
                     JournalLine jl = reusableJournalLines.get(i);
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + jl.journalLineId(),
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,
@@ -642,10 +646,13 @@ public class LedgerStateMachine {
 
     // ── Account Management ─────────────────────────────────────
 
-    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
-        return applyAccountCreate(cmd);
-    }
     public CommandResult applyAccountCreate(AccountCreateCommand cmd) {
+        return applyAccountCreate(cmd, 0L, Instant.now());
+    }
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
+        return applyAccountCreate(cmd, raftIndex, Instant.now());
+    }
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex, Instant applyTime) {
         var existing = accountMetaStore.get(cmd.accountId());
         if (existing.isPresent()) {
             Account acc = existing.get();
@@ -666,7 +673,7 @@ public class LedgerStateMachine {
         Account account = new Account(
                 cmd.accountId(), cmd.accountType(), cmd.displayName(),
                 cmd.ownerId(), AccountStatus.ACTIVE,
-                Set.copyOf(allowedBalanceTypes), Instant.now());
+                Set.copyOf(allowedBalanceTypes), applyTime);
 
         accountMetaStore.put(cmd.accountId(), account);
         persistAccountMeta(cmd.accountId(), account);
@@ -681,17 +688,17 @@ public class LedgerStateMachine {
         // Publish account creation event (gated: only on leader after catch-up)
         if (emitGate.isEnabled() && eventListener != null) {
             eventListener.onAccountCreated(new AccountCreatedEvent(
-                    FastIdGenerator.nextId(),
+                    "EVT-ACC-" + cmd.accountId(),
                     AccountCreatedEvent.EVENT_TYPE,
                     AccountCreatedEvent.EVENT_VERSION,
-                    Instant.now(),
+                    applyTime,
                     cmd.accountId(),
                     cmd.accountType().name(),
                     cmd.displayName(),
                     cmd.ownerId(),
                     AccountStatus.ACTIVE.name(),
                     Set.copyOf(allowedBalanceTypes),
-                    Instant.now()));
+                    applyTime));
         }
 
         return CommandResult.completed(null);
@@ -747,12 +754,15 @@ public class LedgerStateMachine {
     // ── Reversal (F-008 Section 4.2) ──────────────────────────────
 
     public CommandResult applyReversal(ReversalCommand cmd) {
-        return applyReversalInternal(cmd, 0);
+        return applyReversalInternal(cmd, 0, Instant.now());
     }
     public CommandResult applyReversal(ReversalCommand cmd, long raftIndex) {
-        return applyReversalInternal(cmd, raftIndex);
+        return applyReversalInternal(cmd, raftIndex, Instant.now());
     }
-    private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
+    public CommandResult applyReversal(ReversalCommand cmd, long raftIndex, Instant applyTime) {
+        return applyReversalInternal(cmd, raftIndex, applyTime);
+    }
+    private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex, Instant applyTime) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
         var existing = idempotencyStore.get(cmd.requestId());
         if (existing.isPresent()) {
@@ -768,7 +778,7 @@ public class LedgerStateMachine {
             var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                     Map.of("journalId", cmd.originalJournalId()));
             idempotencyStore.put(cmd.requestId(),
-                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
+                    IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), applyTime));
             return result;
         }
 
@@ -795,21 +805,21 @@ public class LedgerStateMachine {
                 var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_NOT_FOUND,
                         Map.of("journalId", cmd.originalJournalId()));
                 idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), applyTime));
                 return result;
             }
             if (orig.status() == JournalStatus.REVERSED) {
                 var result = CommandResult.rejected(LedgerErrorCode.JOURNAL_ALREADY_REVERSED,
                         Map.of("journalId", cmd.originalJournalId()));
                 idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), applyTime));
                 return result;
             }
             if (orig.journalType() == JournalType.REVERSAL) {
                 var result = CommandResult.rejected(LedgerErrorCode.CANNOT_REVERSE_REVERSAL,
                         Map.of("journalId", cmd.originalJournalId()));
                 idempotencyStore.put(cmd.requestId(),
-                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), Instant.now()));
+                        IdempotencyEntry.rejected(cmd.requestId(), result.errorCodes(), result.errorDetails(), applyTime));
                 return result;
             }
 
@@ -820,7 +830,8 @@ public class LedgerStateMachine {
             String reversalJournalId = raftIndex > 0
                     ? String.format("JNL-%016d", raftIndex)
                     : String.format("JNL-%04d", seq);
-            Instant now = Instant.now();
+            // Leader-stamped, replicated time — identical on every node (was Instant.now()).
+            Instant now = applyTime;
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
             List<BalanceChangeEvent> reversalEvents = new ArrayList<>();
@@ -859,7 +870,7 @@ public class LedgerStateMachine {
                             ? jl.amount().negate()
                             : jl.amount();
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + journalLineId,
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,

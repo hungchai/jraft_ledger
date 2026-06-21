@@ -24,10 +24,6 @@ public class SnowflakeIdGenerator {
     private static final long WORKER_ID_BITS = 10L;
     private static final long SEQUENCE_BITS = 12L;
 
-    /** Tolerated backwards clock drift (ms). Small NTP adjustments wait it out;
-     *  larger drifts throw to prevent silent ID collisions. */
-    private static final long MAX_BACKWARDS_DRIFT_MS = 5L;
-
     private static final long MAX_WORKER_ID = ~(-1L << WORKER_ID_BITS);
     private static final long MAX_SEQUENCE = ~(-1L << SEQUENCE_BITS);
 
@@ -48,22 +44,20 @@ public class SnowflakeIdGenerator {
     public synchronized long nextId() {
         long timestamp = currentTimeMillis();
 
+        // Clock moved backwards (NTP step, VM pause, container clock resync).
+        // Never throw or block: pin to lastTimestamp and keep issuing monotonic
+        // IDs from the sequence space. Real time catches up on its own; IDs stay
+        // strictly increasing and unique throughout.
         if (timestamp < lastTimestamp) {
-            long drift = lastTimestamp - timestamp;
-            if (drift <= MAX_BACKWARDS_DRIFT_MS) {
-                // Small NTP correction — wait it out to preserve monotonicity
-                timestamp = waitNextMillis(lastTimestamp);
-            } else {
-                throw new IllegalStateException(
-                        "Clock moved backwards. Refusing to generate ID for " + drift + " ms");
-            }
+            timestamp = lastTimestamp;
         }
 
         if (timestamp == lastTimestamp) {
             sequence = (sequence + 1) & MAX_SEQUENCE;
             if (sequence == 0) {
-                // Sequence overflow, wait until next millisecond
-                timestamp = waitNextMillis(timestamp);
+                // Sequence exhausted this millisecond — advance the logical clock
+                // by 1ms rather than spin-waiting for the wall clock.
+                timestamp = lastTimestamp + 1;
             }
         } else {
             sequence = 0L;
@@ -73,14 +67,6 @@ public class SnowflakeIdGenerator {
         return ((timestamp - EPOCH_MILLIS) << TIMESTAMP_SHIFT)
                 | (workerId << WORKER_ID_SHIFT)
                 | sequence;
-    }
-
-    private long waitNextMillis(long lastTs) {
-        long ts = currentTimeMillis();
-        while (ts <= lastTs) {
-            ts = currentTimeMillis();
-        }
-        return ts;
     }
 
     protected long currentTimeMillis() {

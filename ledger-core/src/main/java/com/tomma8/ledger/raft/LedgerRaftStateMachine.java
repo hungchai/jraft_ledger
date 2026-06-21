@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -170,6 +171,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 long tStart = System.nanoTime();
                 try {
                     RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                    long applyTimeMillis = CommandSerializer.extractApplyTimeMillis(bytes, len);
                     long tDeserEnd = System.nanoTime();
                     com.tomma8.ledger.metrics.LedgerMetrics.recordApplyDeserialize(tDeserEnd - tStart);
 
@@ -179,7 +181,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                                 len, (tDeserEnd - tStart) / 1000);
                     }
 
-                    CommandResult result = executeCommand(cmd, index);
+                    CommandResult result = executeCommand(cmd, index, applyTimeMillis);
                     long tExecEnd = System.nanoTime();
                     com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
 
@@ -225,18 +227,19 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
-    private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
+    private CommandResult executeCommand(RaftCommand cmd, long raftIndex, long applyTimeMillis) {
+        Instant applyTime = Instant.ofEpochMilli(applyTimeMillis);
         if (cmd instanceof AdjustmentCommand a) {
-            return ledgerStateMachine.applyAdjustment(a, raftIndex);
+            return ledgerStateMachine.applyAdjustment(a, raftIndex, applyTime);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledgerStateMachine.applyPosting(p, raftIndex);
+            return ledgerStateMachine.applyPosting(p, raftIndex, applyTime);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledgerStateMachine.applyReversal(r, raftIndex);
+            return ledgerStateMachine.applyReversal(r, raftIndex, applyTime);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledgerStateMachine.applyAccountCreate(a, raftIndex);
+            return ledgerStateMachine.applyAccountCreate(a, raftIndex, applyTime);
         }
         if (cmd instanceof AccountFreezeCommand f) {
             return f.freeze() ? ledgerStateMachine.applyFreeze(f, raftIndex)

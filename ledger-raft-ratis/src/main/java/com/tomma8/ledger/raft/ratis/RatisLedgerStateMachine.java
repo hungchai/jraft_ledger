@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -110,7 +111,8 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
         CommandResult result;
         try {
             RaftCommand cmd = CommandSerializer.deserialize(bytes, bytes.length);
-            result = executeCommand(cmd, index);
+            long applyTimeMillis = CommandSerializer.extractApplyTimeMillis(bytes, bytes.length);
+            result = executeCommand(cmd, index, applyTimeMillis);
         } catch (Exception e) {
             log.error("[RATIS_APPLY_FAIL] index={} len={}", index, bytes.length, e);
             result = CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR);
@@ -128,18 +130,19 @@ public class RatisLedgerStateMachine extends BaseStateMachine {
     }
 
     /** Mirror of LedgerRaftStateMachine.executeCommand — same command → apply mapping. */
-    private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
+    private CommandResult executeCommand(RaftCommand cmd, long raftIndex, long applyTimeMillis) {
+        Instant applyTime = Instant.ofEpochMilli(applyTimeMillis);
         if (cmd instanceof AdjustmentCommand a) {
-            return ledger.applyAdjustment(a, raftIndex);
+            return ledger.applyAdjustment(a, raftIndex, applyTime);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledger.applyPosting(p, raftIndex);
+            return ledger.applyPosting(p, raftIndex, applyTime);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledger.applyReversal(r, raftIndex);
+            return ledger.applyReversal(r, raftIndex, applyTime);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledger.applyAccountCreate(a, raftIndex);
+            return ledger.applyAccountCreate(a, raftIndex, applyTime);
         }
         if (cmd instanceof AccountFreezeCommand f) {
             return f.freeze() ? ledger.applyFreeze(f, raftIndex)

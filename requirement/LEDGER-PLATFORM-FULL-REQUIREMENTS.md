@@ -1,8 +1,8 @@
 # Next-Gen Internal Ledger Platform
 ## 技術需求規格全文件
 
-**版本**: v0.16  
-**日期**: 2026-06-08  
+**版本**: v0.17  
+**日期**: 2026-06-21  
 **狀態**: Draft for Review  
 **系統**: Next-Gen Internal Ledger Platform  
 **定位**: iBank 核心帳務底座，支持多法人、多產品、多幣種、多賬本的雙分錄帳務處理
@@ -25,6 +25,7 @@
 | 版本 | 日期 | 修訂內容 | 修訂人 |
 |---|---|---|---|
 | v0.1 | 2026-05-16 | 初稿 | Ledger Platform Team |
+| v0.17 | 2026-06-21 | ADR-001 State Machine 決定性修復：apply() 路徑內 `Instant.now()` 與隨機 `FastIdGenerator.nextId()` 在每節點獨立執行造成跨節點分歧（Journal/JournalLine/BalanceEntry 時間戳 + BalanceChangeEvent eventId）。改為 leader 提交時戳記 apply time，經 `CommandSerializer` 8-byte header 隨 log entry 複製（jraft + Ratis 雙引擎）；eventId 改由 `journalLineId` 決定性衍生（`"EVT-"+journalLineId`、`"EVT-ACC-"+accountId`）。SnowflakeIdGenerator 時鐘回退由「>5ms 拋錯」改為 monotonic-advance（永不拋錯/不 busy-wait）。對應 TDD Module 22 更新 + Module 23（TC-DET-01~03） | Ledger Platform Team |
 | v0.2 | 2026-05-22 | ADR-001 2.2 節：新增 sofa-common-tools 版本相容性說明（解決 Spring Boot 3.4.4 + SOFAJRaft 1.3.15 的 logback 衝突） | Ledger Platform Team |
 | v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
 | v0.4 | 2026-05-23 | 新增 Core Concepts 章節：定義 Account、BalanceType、Position 三大核心概念與關聯功能 | Ledger Platform Team |

@@ -97,7 +97,9 @@ public class RaftNodeManager implements ConsensusEngine {
         long tSubmit = System.nanoTime();
         CompletableFuture<CommandResult> future = new CompletableFuture<>();
         pendingCommands.put(command.requestId(), future);
-        byte[] data = CommandSerializer.serialize(command);
+        // Stamp the apply timestamp once, here on the leader, so it replicates
+        // inside the log entry and every node applies with the same time.
+        byte[] data = CommandSerializer.serialize(command, System.currentTimeMillis());
 
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {

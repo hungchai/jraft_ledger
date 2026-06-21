@@ -132,7 +132,9 @@ public class RatisNodeManager implements ConsensusEngine {
 
     @Override
     public CommandResult submit(RaftCommand command) {
-        byte[] data = CommandSerializer.serialize(command);
+        // Stamp the apply timestamp once, here on the leader, so it replicates
+        // inside the log entry and every node applies with the same time.
+        byte[] data = CommandSerializer.serialize(command, System.currentTimeMillis());
         try {
             RaftClientReply reply = client.io().send(Message.valueOf(ByteString.copyFrom(data)));
             if (!reply.isSuccess()) {

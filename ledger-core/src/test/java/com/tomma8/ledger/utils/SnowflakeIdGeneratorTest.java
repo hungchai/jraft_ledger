@@ -27,12 +27,16 @@ class SnowflakeIdGeneratorTest {
     }
 
     @Test
-    void nextId_throwsOnLargeBackwardsClockDrift() {
-        SnowflakeIdGenerator gen = new BackwardsClockGenerator(1, 10);
-        gen.nextId(); // lastTimestamp = T
-        assertThatThrownBy(gen::nextId)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Clock moved backwards");
+    void nextId_staysMonotonicOnLargeBackwardsClockDrift() {
+        // Large backward jump (e.g. NTP step, VM pause) must NOT throw — the
+        // generator pins to lastTimestamp and keeps issuing monotonic IDs.
+        SnowflakeIdGenerator gen = new BackwardsClockGenerator(1, 250);
+        long id1 = gen.nextId(); // lastTimestamp = T
+        // Next call sees clock at T-250 ms — must still advance, not throw.
+        long id2 = gen.nextId();
+        assertThat(id2).isGreaterThan(id1);
+        long id3 = gen.nextId();
+        assertThat(id3).isGreaterThan(id2);
     }
 
     @Test
