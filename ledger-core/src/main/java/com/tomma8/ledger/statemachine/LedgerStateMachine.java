@@ -16,7 +16,6 @@ import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 import com.tomma8.ledger.store.IdempotencyStore;
-import com.tomma8.ledger.util.FastIdGenerator;
 import com.tomma8.ledger.util.LedgerMappers;
 
 import java.math.BigDecimal;
@@ -129,6 +128,8 @@ public class LedgerStateMachine {
                 batch.put(rocksDB.getHandle("balance"),
                         keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
+            // idempotencyCreatedAtMillis = leader-stamped apply time (ctx.applyTimeMillis),
+            // so the idempotency entry is identical across nodes.
             IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId, idempotencyCreatedAtMillis);
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
@@ -154,13 +155,6 @@ public class LedgerStateMachine {
         } finally {
             com.tomma8.ledger.metrics.LedgerMetrics.recordApplyPersist(System.nanoTime() - t0);
         }
-    }
-
-    private static final long DETERMINISTIC_EPOCH_MILLIS = 1704067200000L; // 2024-01-01T00:00:00Z
-
-    private Instant deterministicNowFromRaftIndex(long raftLogicalIndex) {
-        if (raftLogicalIndex <= 0) return clock.instant();
-        return Instant.ofEpochMilli(DETERMINISTIC_EPOCH_MILLIS + raftLogicalIndex);
     }
 
     private void persistAccountMeta(String accountId, Account account) {
@@ -697,7 +691,8 @@ public class LedgerStateMachine {
                     : journalSequence.incrementAndGet();
             long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
             String journalId = ctx.journalId(seq);
-            Instant now = deterministicNowFromRaftIndex(ctx.logicalIndex());
+            // Leader-stamped, replicated real wall-clock — identical on every node (was Instant.now()).
+            Instant now = ctx.applyTime();
 
             for (var lwl : reusableLines) {
                 var line = lwl.line();
@@ -752,7 +747,7 @@ public class LedgerStateMachine {
                             : lwl.amount();
                     JournalLine jl = reusableJournalLines.get(i);
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + jl.journalLineId(),
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,
@@ -786,6 +781,8 @@ public class LedgerStateMachine {
             // 8/9. Commit state atomically:
             // - With RocksDB: persist first, then mirror to in-memory.
             // - Without RocksDB: in-memory is authoritative.
+            // now == ctx.applyTime() (leader-stamped, replicated), so the idempotency
+            // createdAt is identical across nodes.
             if (rocksDB != null) {
                 persistApply(journal, balanceUpdates, requestId, journalId, now.toEpochMilli(), eventsToPublish);
             } else {
@@ -821,14 +818,13 @@ public class LedgerStateMachine {
 
     // ── Account Management ─────────────────────────────────────
 
-    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
-        return applyAccountCreateInternal(cmd, raftIndex);
-    }
     public CommandResult applyAccountCreate(AccountCreateCommand cmd) {
-        return applyAccountCreateInternal(cmd, 0);
+        return applyAccountCreate(cmd, RaftApplyContext.standalone());
     }
-
-    private CommandResult applyAccountCreateInternal(AccountCreateCommand cmd, long raftIndex) {
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
+        return applyAccountCreate(cmd, RaftApplyContext.single(raftIndex));
+    }
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, RaftApplyContext ctx) {
         var existing = accountMetaStore.get(cmd.accountId());
         if (existing.isPresent()) {
             Account acc = existing.get();
@@ -845,7 +841,8 @@ public class LedgerStateMachine {
         for (var init : cmd.balanceInitializations()) {
             allowedBalanceTypes.add(init.balanceType());
         }
-        Instant now = deterministicNowFromRaftIndex(raftIndex);
+        // Leader-stamped, replicated real wall-clock — identical on every node.
+        Instant now = ctx.applyTime();
 
         Account account = new Account(
                 cmd.accountId(), cmd.accountType(), cmd.displayName(),
@@ -865,7 +862,7 @@ public class LedgerStateMachine {
         // Publish account creation event (gated: only on leader after catch-up)
         if (emitGate.isEnabled() && eventListener != null) {
             eventListener.onAccountCreated(new AccountCreatedEvent(
-                    FastIdGenerator.nextId(),
+                    "EVT-ACC-" + cmd.accountId(),
                     AccountCreatedEvent.EVENT_TYPE,
                     AccountCreatedEvent.EVENT_VERSION,
                     now,
@@ -991,7 +988,8 @@ public class LedgerStateMachine {
                     : journalSequence.incrementAndGet();
             long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
             String reversalJournalId = ctx.journalId(seq);
-            Instant now = deterministicNowFromRaftIndex(ctx.logicalIndex());
+            // Leader-stamped, replicated real wall-clock — identical on every node (was Instant.now()).
+            Instant now = ctx.applyTime();
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
             List<BalanceChangeEvent> reversalEvents = new ArrayList<>();
@@ -1030,7 +1028,7 @@ public class LedgerStateMachine {
                             ? jl.amount().negate()
                             : jl.amount();
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + journalLineId,
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,

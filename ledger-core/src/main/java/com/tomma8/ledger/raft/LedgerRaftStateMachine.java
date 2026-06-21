@@ -171,20 +171,23 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
                 long tStart = System.nanoTime();
                 try {
-                    RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                    long applyTimeMillis = CommandSerializer.readApplyTimeMillis(bytes, len);
+                    int bodyLen = len - CommandSerializer.APPLY_TIME_HEADER;
+                    RaftCommand cmd = CommandSerializer.deserialize(bytes, CommandSerializer.APPLY_TIME_HEADER, bodyLen);
                     long tDeserEnd = System.nanoTime();
                     com.tomma8.ledger.metrics.LedgerMetrics.recordApplyDeserialize(tDeserEnd - tStart);
 
                     if (cmd instanceof BatchRaftCommand batch) {
-                        applyBatch(batch, index, done, tStart);
+                        applyBatch(batch, index, applyTimeMillis, done, tStart);
                     } else {
-                        applySingle(cmd, index, done, tStart, tDeserEnd);
+                        applySingle(cmd, index, applyTimeMillis, done, tStart, tDeserEnd);
                     }
                 } catch (Exception e) {
                     log.error("[APPLY_FAIL] index={} len={}", index, len, e);
                     if (pendingCommands != null) {
                         try {
-                            RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                            int bodyLen = len - CommandSerializer.APPLY_TIME_HEADER;
+                            RaftCommand cmd = CommandSerializer.deserialize(bytes, CommandSerializer.APPLY_TIME_HEADER, bodyLen);
                             var future = pendingCommands.remove(cmd.requestId());
                             if (future != null) {
                                 future.complete(CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR));
@@ -204,14 +207,14 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
-    private void applySingle(RaftCommand cmd, long index, Closure done, long tStart, long tDeserEnd) {
+    private void applySingle(RaftCommand cmd, long index, long applyTimeMillis, Closure done, long tStart, long tDeserEnd) {
         if (log.isDebugEnabled()) {
             log.debug("[APPLY] index={} cmd={} reqId={} deser={}us",
                     index, cmd.getClass().getSimpleName(), cmd.requestId(),
                     (tDeserEnd - tStart) / 1000);
         }
 
-        CommandResult result = executeCommand(cmd, RaftApplyContext.single(index));
+        CommandResult result = executeCommand(cmd, RaftApplyContext.single(index, applyTimeMillis));
         long tExecEnd = System.nanoTime();
         com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
 
@@ -225,13 +228,13 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
-    private void applyBatch(BatchRaftCommand batch, long index, Closure done, long tStart) {
+    private void applyBatch(BatchRaftCommand batch, long index, long applyTimeMillis, Closure done, long tStart) {
         var commands = batch.commands();
         com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
         boolean allOk = true;
         for (int i = 0; i < commands.size(); i++) {
             RaftCommand sub = commands.get(i);
-            RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i);
+            RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i, applyTimeMillis);
             CommandResult result = executeCommand(sub, ctx);
             if (pendingCommands != null) {
                 var future = pendingCommands.remove(sub.requestId());
@@ -263,7 +266,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             return ledgerStateMachine.applyReversal(r, ctx);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledgerStateMachine.applyAccountCreate(a, ctx.raftIndex());
+            return ledgerStateMachine.applyAccountCreate(a, ctx);
         }
         if (cmd instanceof AccountFreezeCommand f) {
             return f.freeze() ? ledgerStateMachine.applyFreeze(f, ctx.raftIndex())

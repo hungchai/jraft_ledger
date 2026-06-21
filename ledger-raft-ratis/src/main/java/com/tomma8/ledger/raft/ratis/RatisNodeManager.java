@@ -134,7 +134,8 @@ public class RatisNodeManager implements ConsensusEngine {
 
     @Override
     public CommandResult submit(RaftCommand command) {
-        byte[] data = CommandSerializer.serialize(command);
+        // Stamp apply time once here on the leader so it replicates in the log entry.
+        byte[] data = CommandSerializer.serialize(command, System.currentTimeMillis());
         try {
             RaftClientReply reply = client.io().send(Message.valueOf(ByteString.copyFrom(data)));
             if (!reply.isSuccess()) {
@@ -155,7 +156,7 @@ public class RatisNodeManager implements ConsensusEngine {
         if (commands.size() == 1) {
             return List.of(submit(commands.get(0)));
         }
-        byte[] data = CommandSerializer.serialize(BatchRaftCommand.of(commands));
+        byte[] data = CommandSerializer.serialize(BatchRaftCommand.of(commands), System.currentTimeMillis());
         try {
             RaftClientReply reply = client.io().send(Message.valueOf(ByteString.copyFrom(data)));
             if (!reply.isSuccess()) {
