@@ -283,28 +283,57 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
     @Override
     public void onSnapshotSave(SnapshotWriter writer, Closure done) {
+        // CRITICAL: this runs on the single FSM apply thread (the JRaft Disruptor that
+        // also drives onApply). Any heavy work done synchronously here blocks apply for
+        // its whole duration — the snapshot stall observed in the 240m soak (every 600s,
+        // apply frozen for the full O(journal-count) journal stream → p99 10s, TPS→0,
+        // client .get() timeouts). So we do only a tiny, bounded state capture inline and
+        // offload all the heavy I/O to a background thread, returning the FSM thread to
+        // applying immediately. done.run() (called from the background thread) signals
+        // completion back to JRaft — its documented async-snapshot contract.
+
+        // 1. Capture the mutable in-memory state inline (bounded by account count → sub-ms).
+        //    This is the only part that must be consistent w.r.t. apply; taken on the FSM
+        //    thread it is naturally exclusive with onApply (same thread).
+        final byte[] smData;
         snapshotLock.writeLock().lock();
         try {
-            byte[] data = ledgerStateMachine.snapshotBytes();
-            String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
-            java.nio.file.Files.write(java.nio.file.Paths.get(filePath), data);
-            writer.addFile("state_machine_snapshot");
-            // Journals streamed to a separate file (not in the blob — would OOM at
-            // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
-            // journal CF without the leader materializing all journals in heap.
-            String journalsPath = writer.getPath() + File.separator + "journals.dat";
-            try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
-                ledgerStateMachine.streamJournalsTo(os);
-            }
-            writer.addFile("journals.dat");
-            ledgerStateMachine.takeSnapshot(); // local sm_snapshot blob (small, no journals)
-            done.run(Status.OK());
+            smData = ledgerStateMachine.snapshotBytes();
         } catch (Exception e) {
-            log.error("Snapshot save failed", e);
-            done.run(new Status(RaftError.EIO, e.getMessage()));
-        } finally {
             snapshotLock.writeLock().unlock();
+            log.error("Snapshot save failed (state capture)", e);
+            done.run(new Status(RaftError.EIO, e.getMessage()));
+            return;
         }
+        snapshotLock.writeLock().unlock();
+
+        // 2. Offload the heavy save to a background thread so apply keeps flowing.
+        //    The journal CF is append-only and the RocksDB iterator pins a consistent
+        //    superversion at creation, so streaming concurrently with apply is safe: it
+        //    captures journals up to >= the snapshot's lastIncludedIndex (extra trailing
+        //    journals are harmless — restore replays the Raft log anyway).
+        com.alipay.sofa.jraft.util.Utils.runInThread(() -> {
+            try {
+                String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
+                java.nio.file.Files.write(java.nio.file.Paths.get(filePath), smData);
+                writer.addFile("state_machine_snapshot");
+                // Journals streamed to a separate file (not in the blob — would OOM at
+                // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
+                // journal CF without the leader materializing all journals in heap.
+                String journalsPath = writer.getPath() + File.separator + "journals.dat";
+                try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
+                    ledgerStateMachine.streamJournalsTo(os);
+                }
+                writer.addFile("journals.dat");
+                // Reuse the captured blob for the local sm_snapshot CF instead of re-reading
+                // the (off-thread, lock-free) mutable state, which would risk a torn snapshot.
+                ledgerStateMachine.persistSnapshotBlob(smData);
+                done.run(Status.OK());
+            } catch (Exception e) {
+                log.error("Snapshot save failed", e);
+                done.run(new Status(RaftError.EIO, e.getMessage()));
+            }
+        });
     }
 
     @Override
