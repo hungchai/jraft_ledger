@@ -1,9 +1,11 @@
 # TDD Test Cases — Next-Gen Internal Ledger Platform
 
-**版本**: v0.17
-**日期**: 2026-06-21
+**版本**: v0.18
+**日期**: 2026-06-22
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
+
+> **v0.18 變更摘要**：修復 snapshot-save 凍結 apply 缺陷。根因：`onSnapshotSave` 在**單一 FSM apply 執行緒**上同步串流全量 journal CF（O(journal 數)），每 600s snapshot 凍結 apply 數秒；240m soak 實測 p99→10s、TPS→0、~500 客戶端 `.get()` 逾時，對齊 600s cadence。修法：FSM 執行緒僅做亞毫秒記憶體態捕捉，重活（journal 串流＋檔案寫入＋blob 落地）以 `Utils.runInThread` 卸載至背景執行緒，FSM 立即返回續 apply，背景完成呼叫 `done.run()`。（註：先前只縮小 write lock 範圍的版本經 2.5M-journal verify soak 證實無效 —— 瓶頸是 FSM 執行緒被佔，非鎖。）新增 TC-RAFT-30/31，對應 ADR-001 §6.1 v0.6。
 
 > **v0.17 變更摘要**：(1) 修正 Raft apply 決定性缺陷 — apply 路徑內的 `Instant.now()` 與隨機 `FastIdGenerator.nextId()` 在每節點各自產生不同值，導致 Journal/JournalLine/BalanceEntry 時間戳、idempotency createdAt 與 BalanceChangeEvent eventId 跨節點分歧。改為由 leader 於提交時戳記**真實** apply time（real wall-clock），經 `RaftApplyContext` 隨 log entry 複製（`CommandSerializer` 8-byte header；jraft + Ratis + batch 路徑）；eventId 改由 `journalLineId` 決定性衍生（`"EVT-"+journalLineId`、`"EVT-ACC-"+accountId`）。注意：本修復取代先前 `deterministicNowFromRaftIndex`（合成時戳 2024-epoch+index，非真實時間）以保 createdAt 可審計。新增 Module 23（TC-DET-01~03）。(2) 同步 Module 22 文件至現行碼：SnowflakeIdGenerator 時鐘回退已（於 v3-fix）改為 spin-wait（`waitNextMillis`，永不拋錯；drift > 2s 僅記 WARN），TC-SNOW-03/04 對應。
 >
@@ -1001,6 +1003,22 @@ TC-RAFT-02  cluster_survivesFollowerRestart
             Given: 3-node cluster with elected leader
             When:  follower 關閉後重啟
             Then:  follower 重新加入 cluster，無錯誤
+
+TC-RAFT-30  onSnapshotSave_producesRestorableState
+            Given: LedgerRaftStateMachine wrapping a RocksDB-backed SM with 20 postings
+            When:  onSnapshotSave(writer) → restore state_machine_snapshot + journals.dat
+                   into a fresh SM/RocksDB
+            Then:  journalSequence、CLIENT balance、20 journals 全部還原一致
+            (impl: LedgerRaftSnapshotTest — passing, no docker)
+
+TC-RAFT-31  onSnapshotSave_offloadsHeavyWorkOffCallingThread
+            Given: SM whose streamJournalsTo blocks (simulates large O(n) stream)
+            When:  呼叫 onSnapshotSave（模擬 FSM apply 執行緒）
+            Then:  onSnapshotSave 在重串流尚未完成時即返回（done 未觸發、stream 已於背景執行緒啟動）
+                   → FSM 執行緒不被阻塞，apply 可續行；同步版（舊碼）會卡住呼叫端令此斷言失敗
+            Why:   240m soak 每 600s snapshot 期間 apply 凍結 ~10s（p99→10s、TPS→0、~500 .get() 逾時）。
+                   修正：重活以 Utils.runInThread 卸載至背景執行緒，done.run() 於完成後回呼 JRaft。
+            (impl: LedgerRaftSnapshotTest — passing, no docker)
 ```
 
 ### 15.1 Apache Ratis Engine（ADR-003 — pluggable ConsensusEngine）

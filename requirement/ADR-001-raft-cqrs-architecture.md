@@ -389,6 +389,17 @@ Leader 宕機 → Raft 自動選舉新 Leader
 - 每筆 journal_line 以 WAL 形式寫入，確保宕機可 replay
 - 定期做 State Machine Snapshot，防止 Raft Log 無限增長
 
+#### Snapshot 非阻塞 apply [v0.6 更新]
+
+**根因**：`onSnapshotSave` 由 JRaft 在**單一 FSM apply 執行緒**（與 `onApply` 同一條 Disruptor 執行緒）上呼叫。任何在其中**同步**完成的重活，會在整個執行期間阻塞 apply。舊版在此同步串流全量 journal CF（O(journal 數)），每 600s snapshot 凍結 apply 數秒（隨狀態增大惡化）。240m soak 實測 p99→10s、TPS→0、~500 客戶端 `.get()` 逾時，全部對齊 600s cadence。
+
+> ⚠️ 修正歷程：第一版嘗試只縮小 snapshot write lock 範圍 —— **無效**。重狀態（2.5M journal）verify soak 顯示 stall 仍在（p99 10s、TPS→0 約 75s）。因為瓶頸不是鎖，是 FSM 執行緒本身被佔住。
+
+**修法**：`onSnapshotSave` 僅在 FSM 執行緒上做極小的記憶體狀態捕捉（`snapshotBytes()`，O(帳戶數)，亞毫秒），其餘重活（寫 snapshot 檔 + 串流 journal CF + 落地 sm_snapshot blob）以 `Utils.runInThread` **卸載到背景執行緒**，FSM 執行緒立即返回繼續 apply；背景完成後呼叫 `done.run()` 通知 JRaft（JRaft async-snapshot 契約）。
+
+- **一致性**：記憶體態於 FSM 執行緒捕捉（與 apply 天然互斥），對應 snapshot lastIncludedIndex；journal CF append-only，RocksDB iterator 建立時固定一致 superversion，背景串流與 apply 並發安全 —— 串到的 journal ⊇ lastIncludedIndex，尾段多出由 Raft log replay 兜底。
+- 守護測試：TC-RAFT-30（save→restore 正確性）/ TC-RAFT-31（onSnapshotSave 於重串流完成前即返回 → FSM 執行緒不被阻塞）。
+
 ### 6.2 MySQL（View Layer）
 
 - 由 Learner 異步寫入
