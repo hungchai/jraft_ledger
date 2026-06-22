@@ -45,6 +45,16 @@ public class KafkaEventPublisher implements LedgerEventListener {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4");
+        // Fail-fast when Kafka is unreachable so the node runs WITHOUT Kafka and auto-uses it when it
+        // returns — no static toggle needed. The constructor never connects (lazy), so startup is fine
+        // broker-up or broker-down. The risk is send(): with the 60s default max.block.ms, every send
+        // during an outage blocks the outbox-drain thread up to a minute fetching metadata. We bound it
+        // so a down broker makes send() fail fast → AsyncOutboxPublisher counts the failure, leaves the
+        // envelope in CF_OUTBOX (durable), and retries next poll; once the broker is back, sends succeed
+        // and the backlog drains. delivery.timeout.ms must be >= request.timeout.ms + linger.ms.
+        props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 2000);          // cap send()/metadata wait (def 60s)
+        props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 3000);    // per-request broker wait (def 30s)
+        props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 5000);   // total time before a send is failed
         this.producer = new KafkaProducer<>(props);
     }
 
