@@ -80,6 +80,11 @@ public class AsyncOutboxPublisher implements AutoCloseable {
 
     private void scanAndPublish() {
         if (!running) return;
+        // No Kafka publisher (broker host unresolvable at startup → degraded no-Kafka mode). The
+        // publisher + its gauges still exist; there is simply nothing to drain. In this mode the state
+        // machine also sets no event listener, so no outbox entries are staged — the Raft journal is the
+        // source of truth and the projection is not produced while Kafka is absent.
+        if (kafkaPublisher == null) return;
         if (!emitGate.isEnabled()) return;
         long start = System.currentTimeMillis();
         try {
@@ -104,6 +109,11 @@ public class AsyncOutboxPublisher implements AutoCloseable {
                     log.warn("Failed to publish outbox envelope {} ({} events)",
                             env.journalId(), env.events().size(), e);
                     fail++;
+                    // Fail-fast scan: a sync send() failure means the broker is unreachable, so the
+                    // remaining envelopes in this batch will fail too. Stop now and retry next poll
+                    // instead of paying max.block.ms per envelope. Order is preserved (unsent
+                    // envelopes stay in CF_OUTBOX) and the backlog drains once the broker is back.
+                    break;
                 }
             }
             publishedCount.addAndGet(ok);

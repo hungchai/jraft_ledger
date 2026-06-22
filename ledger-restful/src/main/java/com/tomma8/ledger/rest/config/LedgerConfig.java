@@ -142,16 +142,31 @@ public class LedgerConfig {
     @Bean(destroyMethod = "close")
     @Profile("!test")
     public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs) {
+        // Kafka is optional and detected at runtime — no static flag. The KafkaProducer constructor
+        // resolves bootstrap.servers DNS eagerly and THROWS if the host is unresolvable (broker truly
+        // absent, e.g. run without the kafka container). Catch that and degrade to no-Kafka mode: the
+        // node still serves all writes + live balance reads — the Raft-replicated journal is the source
+        // of truth. In this mode no event listener is set, so the Kafka projection is simply not
+        // produced while the broker is absent (no outbox staging; backfill the projection separately if
+        // ever needed). If instead the host RESOLVES but the broker is down, construction succeeds and
+        // the fail-fast producer timeouts handle it via retry — outbox stages and drains on recovery
+        // (see KafkaEventPublisher). Returning null is wired through as @Autowired(required=false) below.
         String brokers = cs.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
-        KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
-        publisher.setOutboxStore(outboxStore);
-        return publisher;
+        try {
+            KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+            publisher.setOutboxStore(outboxStore);
+            return publisher;
+        } catch (Exception e) {
+            log.warn("Kafka unavailable ({}={}) — running without Kafka; outbox persists durably in RocksDB for later drain. Cause: {}",
+                    "KAFKA_BOOTSTRAP_SERVERS", brokers, e.toString());
+            return null;
+        }
     }
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
     public AsyncOutboxPublisher asyncOutboxPublisher(OutboxStore outboxStore,
-                                                      KafkaEventPublisher kafkaPublisher,
+                                                      @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
                                                       LedgerStateMachine ledgerStateMachine,
                                                       MeterRegistry meterRegistry,
                                                       ConfigService cs) {
