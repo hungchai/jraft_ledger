@@ -205,6 +205,17 @@ public class LedgerStateMachine {
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
     }
 
+    /** Persist a precomputed snapshot blob (the bytes returned by {@link #snapshotBytes()})
+     *  to the local {@code sm_snapshot} CF. Lets a caller capture the blob once under a lock
+     *  and write it outside the lock, without re-reading the mutable in-memory state — used by
+     *  {@code LedgerRaftStateMachine.onSnapshotSave} to keep the apply-blocking critical section
+     *  to the in-memory serialization only (journals stream lock-free). When RocksDB is present
+     *  the blob carries no journals, so it is byte-identical to what {@link #takeSnapshot()} writes. */
+    public void persistSnapshotBlob(byte[] bytes) throws Exception {
+        if (rocksDB == null) return;
+        rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
+    }
+
     public void restoreFromSnapshot() throws Exception {
         if (rocksDB == null) return;
         byte[] raw = rocksDB.get("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8));
