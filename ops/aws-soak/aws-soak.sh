@@ -90,8 +90,13 @@ runid_file() { echo "$STATE_ROOT/current"; }
 current_run() { cat "$(runid_file)" 2>/dev/null || die "No active run. Run 'up' first."; }
 run_dir() { echo "$STATE_ROOT/$1"; }
 kv_get() { grep -E "^$2=" "$(run_dir "$1")/run.env" 2>/dev/null | cut -d= -f2-; }
-SSHK() { echo "-i $(run_dir "$1")/key.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=10"; }
-rssh() { local run=$1 ip=$2; shift 2; ssh $(SSHK "$run") "$SSH_USER@$ip" "$@"; }
+# UserKnownHostsFile=/dev/null + StrictHostKeyChecking=no: public IPs get reused across runs, so a
+# stale known_hosts entry would otherwise fail host-key verification on a later run.
+SSHK() { echo "-i $(run_dir "$1")/key.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o ServerAliveInterval=10"; }
+# The `-n` matters: rssh runs inside `while read ... < hosts` loops. Without it, ssh reads its stdin
+# from the loop's hosts file and swallows the remaining lines → only the first host is processed
+# (the bug that left only node-1 launched / node-2 shipped). -n ties ssh stdin to /dev/null.
+rssh() { local run=$1 ip=$2; shift 2; ssh -n $(SSHK "$run") "$SSH_USER@$ip" "$@"; }
 
 # ────────────────────────────── up ──────────────────────────────
 cmd_up() {
