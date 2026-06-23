@@ -141,24 +141,34 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs) {
-        // Kafka is optional and detected at runtime — no static flag. The KafkaProducer constructor
-        // resolves bootstrap.servers DNS eagerly and THROWS if the host is unresolvable (broker truly
-        // absent, e.g. run without the kafka container). Catch that and degrade to no-Kafka mode: the
-        // node still serves all writes + live balance reads — the Raft-replicated journal is the source
-        // of truth. In this mode no event listener is set, so the Kafka projection is simply not
-        // produced while the broker is absent (no outbox staging; backfill the projection separately if
-        // ever needed). If instead the host RESOLVES but the broker is down, construction succeeds and
-        // the fail-fast producer timeouts handle it via retry — outbox stages and drains on recovery
-        // (see KafkaEventPublisher). Returning null is wired through as @Autowired(required=false) below.
+    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs, Environment env) {
+        // Kafka is detected at runtime. The KafkaProducer constructor resolves bootstrap.servers DNS
+        // eagerly and THROWS if the host is unresolvable (broker truly absent, e.g. run without the
+        // kafka container).
+        //
+        // ledger.kafka.required controls what happens then:
+        //   false (default; dev/local) → degrade to no-Kafka mode. Node still serves all writes + live
+        //          balance reads (Raft journal is source of truth); no event listener is set, so the
+        //          Kafka projection is simply not produced while the broker is absent. (Host resolves
+        //          but broker down → construction succeeds, fail-fast producer timeouts retry + drain.)
+        //   true  (production) → FAIL STARTUP. Prod must not silently run without the projection, which
+        //          would lose the CQRS read-model for the no-Kafka window; better to crash loudly so the
+        //          deploy is fixed. Set in application-prod.yml.
+        boolean required = env.getProperty("ledger.kafka.required", Boolean.class, false);
         String brokers = cs.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
         try {
             KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
             publisher.setOutboxStore(outboxStore);
             return publisher;
         } catch (Exception e) {
-            log.warn("Kafka unavailable ({}={}) — running without Kafka; outbox persists durably in RocksDB for later drain. Cause: {}",
-                    "KAFKA_BOOTSTRAP_SERVERS", brokers, e.toString());
+            if (required) {
+                throw new IllegalStateException(
+                        "Kafka is required (ledger.kafka.required=true) but unavailable (KAFKA_BOOTSTRAP_SERVERS="
+                                + brokers + "). Failing startup. Cause: " + e, e);
+            }
+            log.warn("Kafka unavailable (KAFKA_BOOTSTRAP_SERVERS={}) — running without Kafka (ledger.kafka.required=false). "
+                    + "Writes + live reads work via Raft; projection not produced while absent. Cause: {}",
+                    brokers, e.toString());
             return null;
         }
     }

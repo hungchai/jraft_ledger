@@ -1,0 +1,8 @@
+# Production profile (activate with SPRING_PROFILES_ACTIVE=prod).
+# Overrides only what must differ in prod; everything else inherits from application.yml.
+ledger:
+  kafka:
+    # Production REQUIRES Kafka: if the broker is unreachable at startup the node fails to start
+    # instead of silently degrading to no-Kafka mode (which would drop the CQRS projection for the
+    # outage window). Dev/local leave this false (graceful degrade). See LedgerConfig.kafkaEventPublisher.
+    required: ${LEDGER_KAFKA_REQUIRED:true}
