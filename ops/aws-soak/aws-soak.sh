@@ -103,16 +103,13 @@ cmd_up() {
   preflight
   local RUN="soak-$(date +%Y%m%d-%H%M%S)"
   local RD; RD="$(run_dir "$RUN")"; mkdir -p "$RD"; echo "$RUN" > "$(runid_file)"
-  # Ingress CIDR for ssh/obs/http. Default = detected public IP /32. Override with --ssh-cidr (or
-  # SSH_CIDR env) when your raw-TCP egress differs from your HTTPS egress (NAT/proxy/corp net make
-  # checkip report a different address than your real ssh source — pass your real CIDR, or 0.0.0.0/0).
-  local IP CIDR
-  if [ -n "${SSH_CIDR:-}" ]; then
-    CIDR="$SSH_CIDR"
-  else
-    IP="$(my_ip)"; [ -n "$IP" ] || die "Could not detect your public IP. Pass --ssh-cidr <your-cidr> (e.g. 0.0.0.0/0)."
-    CIDR="$IP/32"
-  fi
+  # Ingress CIDR for ssh/grafana/prometheus/http. Defaults to 0.0.0.0/0 (allow all) so the harness
+  # "just works" regardless of where it runs — auto-detecting the runner's IP is unreliable when the
+  # raw-TCP egress differs from the HTTPS egress (NAT/proxy/corp net). This is a throwaway test rig
+  # (ephemeral, tagged, TTL-shutdown), so open access is an accepted tradeoff. Narrow it with
+  # --ssh-cidr <cidr> (or SSH_CIDR env) for a locked-down run.
+  local CIDR="${SSH_CIDR:-0.0.0.0/0}"
+  [ "$CIDR" = "0.0.0.0/0" ] && warn "SG opens ssh/grafana/prometheus/http to 0.0.0.0/0 (public). Use --ssh-cidr to restrict."
   local AMI; AMI="$(ubuntu2404_ami)"; [ "$AMI" != "None" ] || die "No Ubuntu 24.04 AMI found."
   local SUBNET; SUBNET="$(default_subnet)"; [ "$SUBNET" != "None" ] || die "No default subnet."
   local VPC; VPC="$(subnet_vpc "$SUBNET")"
@@ -453,8 +450,8 @@ aws-soak.sh — on-demand jraft_ledger multi-host soak on AWS
   sweep     delete ALL Project=$PROJECT_TAG resources in the region (instances + SGs + keys) — saves credits
 
   Flags: --nodes --node-type --mgmt-type --branch --ttl-hours --vus --duration --scenario --region
-         --ssh-cidr <cidr>   ingress CIDR for ssh/grafana/prometheus (default: detected IP/32).
-                             Use if your TCP egress != HTTPS egress, or pass 0.0.0.0/0.
+         --ssh-cidr <cidr>   ingress CIDR for ssh/grafana/prometheus/http (default: 0.0.0.0/0, public).
+                             Pass your office CIDR to lock it down.
 EOF
   ;;
 esac
