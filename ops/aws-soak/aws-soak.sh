@@ -30,7 +30,9 @@ set -euo pipefail
 REGION="${AWS_REGION:-ap-southeast-1}"
 PROJECT_TAG="jraft-soak"
 REPO_URL="${REPO_URL:-https://github.com/hungchai/jraft_ledger.git}"
-BRANCH="${BRANCH:-v3-fix}"
+# Self-contained branch: has the harness + the k6 NODES (multi-host leader discovery) patch.
+# Switch to v3-fix once PR #15 merges (then v3-fix carries the k6 patch too).
+BRANCH="${BRANCH:-feat/aws-soak-harness}"
 NODES=3
 NODE_TYPE="c7i-flex.large"
 MGMT_TYPE="c7i-flex.large"
@@ -312,9 +314,12 @@ cmd_test() {
   local testid="t-$(date +%H%M%S)"
   log "k6 load test: vus=$VUS duration=$DURATION scenario=$SCENARIO testid=$testid"
 
-  # ensure the cloned k6 script supports multi-host leader discovery (NODES env). Patch idempotently
-  # WITHOUT touching test-cycle.sh — only the k6 scenario, only on the remote mgmt copy.
-  rssh "$run" "$mgmt_pub" "cd ~/jraft_ledger && grep -q 'NODE_URLS' scripts/${SCENARIO}.js || sed -i 's#for (const port of LEADER_PORTS) {#const NODE_URLS = __ENV.NODES ? __ENV.NODES.split(\",\").map(s=>s.trim()).filter(Boolean) : LEADER_PORTS.map(p=>\"http://localhost:\"+p);\n  for (const url of [].concat(NODE_URLS)) { const port=0;#' scripts/${SCENARIO}.js || true"
+  # The k6 scenario must support multi-host leader discovery via the NODES env. That patch ships in
+  # this branch's scripts/${SCENARIO}.js (and lands in v3-fix once PR #15 merges), so the cloned repo
+  # already has it — no in-place patching here. Guard: fail fast with a clear message if a branch
+  # without NODES support was deployed (e.g. --branch pointed at an old ref).
+  rssh "$run" "$mgmt_pub" "grep -q 'NODE_URLS' ~/jraft_ledger/scripts/${SCENARIO}.js" \
+    || die "k6 scenario ${SCENARIO}.js on mgmt lacks NODES support — deploy a branch that has it (this harness branch, or v3-fix after PR #15)."
 
   # run detached on mgmt so long soaks survive this script exiting; push k6 metrics to mgmt Prometheus
   rssh "$run" "$mgmt_pub" "cd ~/jraft_ledger && cat > /tmp/run-k6.sh <<EOF
