@@ -55,7 +55,23 @@ public class RocksDBManager implements AutoCloseable {
         // Initialize the cached WriteOptions after the JNI library is loaded —
         // constructing a WriteOptions issues a JNI call (newWriteOptions) and
         // would otherwise UnsatisfiedLinkError in <clinit>.
-        writeOptionsInstance = new WriteOptions().setSync(true);
+        //
+        // sync=true fsyncs the state DB on EVERY command's WriteBatch. On a local SSD that's ~sub-ms,
+        // but on network storage (EBS gp3) it is ~2ms/command → a hard ~450 TPS ceiling with the CPU
+        // idle (the apply thread blocks on fsync, not compute). Measured on a 3-node AWS soak:
+        // TPS pinned ~320 regardless of Raft batch size, commit_latency = 7ms + 2.22ms×batch.
+        //
+        // sync=false removes that per-command fsync. Durability is NOT lost: the Raft log is the
+        // source of truth (fsynced by JRaft, replicated to a quorum) and the state DB is rebuilt by
+        // replaying the log from the last snapshot on restart — the standard Raft+state-machine
+        // durability model (off-chain-ledger already runs sync=false for this reason). The tradeoff:
+        // a node that crashes loses un-fsynced state-DB writes and must replay more log on recovery.
+        //
+        // Env-toggle: default keeps the conservative sync=true; set LEDGER_ROCKSDB_SYNC=false for the
+        // network-storage throughput win.
+        boolean rocksSync = !"false".equalsIgnoreCase(System.getenv("LEDGER_ROCKSDB_SYNC"));
+        writeOptionsInstance = new WriteOptions().setSync(rocksSync);
+        log.info("RocksDB WriteOptions sync={} (LEDGER_ROCKSDB_SYNC)", rocksSync);
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
 
