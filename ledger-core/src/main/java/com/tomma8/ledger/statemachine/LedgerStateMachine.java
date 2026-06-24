@@ -16,18 +16,23 @@ import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
 import com.tomma8.ledger.store.IdempotencyStore;
-import com.tomma8.ledger.util.FastIdGenerator;
 import com.tomma8.ledger.util.LedgerMappers;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import jakarta.annotation.PreDestroy;
 import org.rocksdb.WriteBatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +48,10 @@ public class LedgerStateMachine {
     private final AccountMetaStore accountMetaStore;
     private final BalanceTypeConfigStore balanceTypeConfigStore;
     private final IdempotencyStore idempotencyStore;
+    private final Clock clock;
+    // Periodically prunes expired idempotency entries. null when constructed via the
+    // test-friendly 3-arg constructor (no scheduler; tests rely on lazy-evict + clear()).
+    private final ScheduledExecutorService evictionScheduler;
     // In-memory journal map used ONLY in standalone/test mode (no RocksDB). In
     // production (RocksDB present) it is never written or read — journals are
     // served straight from the RocksDB `journal` CF (durable, with its own bounded
@@ -93,11 +102,16 @@ public class LedgerStateMachine {
     }
 
     private void persistApply(Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
-                              String requestId, String journalId, List<BalanceChangeEvent> outboxEvents) {
+                              String requestId, String journalId, long idempotencyCreatedAtMillis,
+                              List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
-        try {
-            WriteBatch batch = new WriteBatch();
+        // WriteBatch holds native memory (librocksdb WriteBatch handler). Must close
+        // deterministically — leaking it under sustained write causes native-heap
+        // growth and eventually corrupted handle reads (the SIGBUS pattern in
+        // hs_err_pid_*.log: GetColumnFamilyIdAndTimestampSize dereferences a freed
+        // ColumnFamilyHandle because the native heap backed it was overwritten).
+        try (WriteBatch batch = new WriteBatch()) {
             byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
             batch.put(rocksDB.getHandle("journal"),
                     journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
@@ -114,7 +128,9 @@ public class LedgerStateMachine {
                 batch.put(rocksDB.getHandle("balance"),
                         keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
             }
-            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId);
+            // idempotencyCreatedAtMillis = leader-stamped apply time (ctx.applyTimeMillis),
+            // so the idempotency entry is identical across nodes.
+            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId, idempotencyCreatedAtMillis);
             byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
             batch.put(rocksDB.getHandle("idempotency"),
                     requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
@@ -135,6 +151,7 @@ public class LedgerStateMachine {
             rocksDB.write(batch);
         } catch (Exception e) {
             log.error("RocksDB write failed for journalId={}", journal.journalId(), e);
+            throw new IllegalStateException("RocksDB write failed for journalId=" + journal.journalId(), e);
         } finally {
             com.tomma8.ledger.metrics.LedgerMetrics.recordApplyPersist(System.nanoTime() - t0);
         }
@@ -185,6 +202,17 @@ public class LedgerStateMachine {
                 Map.of(), idempotencyStore,
                 raftLogIndex.get(), journalCount.get());
         byte[] bytes = objectMapper.writeValueAsBytes(data);
+        rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
+    }
+
+    /** Persist a precomputed snapshot blob (the bytes returned by {@link #snapshotBytes()})
+     *  to the local {@code sm_snapshot} CF. Lets a caller capture the blob once under a lock
+     *  and write it outside the lock, without re-reading the mutable in-memory state — used by
+     *  {@code LedgerRaftStateMachine.onSnapshotSave} to keep the apply-blocking critical section
+     *  to the in-memory serialization only (journals stream lock-free). When RocksDB is present
+     *  the blob carries no journals, so it is byte-identical to what {@link #takeSnapshot()} writes. */
+    public void persistSnapshotBlob(byte[] bytes) throws Exception {
+        if (rocksDB == null) return;
         rocksDB.put("sm_snapshot", "snapshot:latest".getBytes(StandardCharsets.UTF_8), bytes);
     }
 
@@ -344,15 +372,79 @@ public class LedgerStateMachine {
         }
     }
 
+    /**
+     * Backward-compatible 3-arg constructor used by unit tests.
+     * Uses default 30-day TTL and {@link Clock#systemUTC()}; no eviction scheduler is started
+     * (tests rely on lazy-eviction in {@link IdempotencyStore#get(String)} and explicit {@code clear()}).
+     */
     public LedgerStateMachine(BalanceStore balanceStore,
                               AccountMetaStore accountMetaStore,
                               BalanceTypeConfigStore balanceTypeConfigStore) {
+        this(balanceStore, accountMetaStore, balanceTypeConfigStore,
+                Duration.ofDays(30), Clock.systemUTC(), false);
+    }
+
+    /**
+     * Production constructor. {@code ttl} controls how long completed idempotency entries
+     * live in memory before being evicted (lazy on read + periodic background sweep).
+     *
+     * @param ttl     idempotency entry lifetime; pass {@code 30d} for prod, {@code 3m} for stress
+     * @param clock   injected for testability (systemUTC in prod)
+     * @param withScheduler when true, start a daemon scheduler that calls
+     *                      {@link IdempotencyStore#evictExpired()} every 60s. Pass false
+     *                      in tests to avoid stray background threads.
+     */
+    public LedgerStateMachine(BalanceStore balanceStore,
+                              AccountMetaStore accountMetaStore,
+                              BalanceTypeConfigStore balanceTypeConfigStore,
+                              Duration ttl,
+                              Clock clock,
+                              boolean withScheduler) {
         this.balanceStore = balanceStore;
         this.accountMetaStore = accountMetaStore;
         this.balanceTypeConfigStore = balanceTypeConfigStore;
-        this.idempotencyStore = new IdempotencyStore();
+        this.clock = clock != null ? clock : Clock.systemUTC();
+        this.idempotencyStore = new IdempotencyStore(ttl != null ? ttl : Duration.ofDays(30), this.clock);
         this.raftLogIndex = new AtomicLong(0);
         this.journalSequence = new AtomicLong(0);
+        if (withScheduler) {
+            ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "idempotency-evictor");
+                t.setDaemon(true);
+                return t;
+            });
+            sched.scheduleWithFixedDelay(this::runEvict, 60, 60, TimeUnit.SECONDS);
+            this.evictionScheduler = sched;
+            log.info("IdempotencyStore scheduled evictor started (interval=60s, ttl={})", ttl);
+        } else {
+            this.evictionScheduler = null;
+        }
+    }
+
+    private void runEvict() {
+        try {
+            int removed = idempotencyStore.evictExpired();
+            if (removed > 0) {
+                log.debug("IdempotencyStore evictExpired removed={} size={}", removed, idempotencyStore.size());
+            }
+        } catch (Exception e) {
+            log.warn("idempotency eviction tick failed", e);
+        }
+    }
+
+    @PreDestroy
+    public void shutdownEviction() {
+        if (evictionScheduler != null) {
+            evictionScheduler.shutdown();
+            try {
+                if (!evictionScheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                    evictionScheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                evictionScheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static int parseIntEnv(String k, int def) {
@@ -394,8 +486,12 @@ public class LedgerStateMachine {
                 cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", 0);
     }
     public CommandResult applyPosting(PostingCommand cmd, long raftIndex) {
+        return applyPosting(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    public CommandResult applyPosting(PostingCommand cmd, RaftApplyContext ctx) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.NORMAL, "POSTING", ctx);
     }
 
     public CommandResult applyAdjustment(AdjustmentCommand cmd) {
@@ -403,8 +499,12 @@ public class LedgerStateMachine {
                 cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", 0);
     }
     public CommandResult applyAdjustment(AdjustmentCommand cmd, long raftIndex) {
+        return applyAdjustment(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    public CommandResult applyAdjustment(AdjustmentCommand cmd, RaftApplyContext ctx) {
         return applyJournalCommand(cmd.requestId(), cmd.businessEventType(), cmd.businessEventRef(),
-                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", raftIndex);
+                cmd.valueDate(), cmd.legs(), JournalType.MANUAL_ADJUSTMENT, "ADJUSTMENT", ctx);
     }
 
     private CommandResult applyJournalCommand(String requestId, String businessEventType,
@@ -412,6 +512,15 @@ public class LedgerStateMachine {
                                               List<PostingCommand.Leg> legs,
                                               JournalType journalType, String commandLabel,
                                               long raftIndex) {
+        return applyJournalCommand(requestId, businessEventType, businessEventRef, valueDate,
+                legs, journalType, commandLabel, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult applyJournalCommand(String requestId, String businessEventType,
+                                              String businessEventRef, LocalDate valueDate,
+                                              List<PostingCommand.Leg> legs,
+                                              JournalType journalType, String commandLabel,
+                                              RaftApplyContext ctx) {
         long t0 = System.nanoTime();
         List<LineWithLeg> reusableLines = new ArrayList<>(64);
         Set<String> reusableAccountSet = new HashSet<>(16);
@@ -588,14 +697,13 @@ public class LedgerStateMachine {
             // index/seq/journalId must all derive from the Raft log index so they
             // are identical across nodes. Fall back to local counters only on the
             // non-Raft path (raftIndex == 0: standalone/tests).
-            long seq = raftIndex > 0
-                    ? raftIndex
+            long seq = ctx.useRaftIndex()
+                    ? ctx.logicalIndex()
                     : journalSequence.incrementAndGet();
-            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
-            String journalId = raftIndex > 0
-                    ? String.format("JNL-%016d", raftIndex)
-                    : String.format("JNL-%04d", seq);
-            Instant now = Instant.now();
+            long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
+            String journalId = ctx.journalId(seq);
+            // Leader-stamped, replicated real wall-clock — identical on every node (was Instant.now()).
+            Instant now = ctx.applyTime();
 
             for (var lwl : reusableLines) {
                 var line = lwl.line();
@@ -621,9 +729,6 @@ public class LedgerStateMachine {
                     List.copyOf(reusableJournalLines), false, now);
             long tJournalEnd = System.nanoTime();
 
-            if (rocksDB == null) journalStore.put(journalId, journal); // in-memory mode only
-            journalCount.incrementAndGet();
-
             // 7. Atomic balance update with accountSeq increment + collect events
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
             List<BalanceChangeEvent> eventsToPublish = new ArrayList<>(reusableLines.size());
@@ -644,7 +749,6 @@ public class LedgerStateMachine {
                 }
 
                 BalanceEntry updated = new BalanceEntry(after, index, nextSeq, journalId, now);
-                balanceStore.put(key, updated);
                 balanceUpdates.put(key, updated);
 
                 // Collect BalanceChangeEvent for atomic outbox + post-commit publish
@@ -654,7 +758,7 @@ public class LedgerStateMachine {
                             : lwl.amount();
                     JournalLine jl = reusableJournalLines.get(i);
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + jl.journalLineId(),
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,
@@ -685,11 +789,21 @@ public class LedgerStateMachine {
                 }
             }
 
-            // 8. Idempotency
-            idempotencyStore.put(requestId, journalId);
-
-            // 9. Atomic RocksDB persistence (journal + balance + idempotency + outbox in one WriteBatch)
-            persistApply(journal, balanceUpdates, requestId, journalId, eventsToPublish);
+            // 8/9. Commit state atomically:
+            // - With RocksDB: persist first, then mirror to in-memory.
+            // - Without RocksDB: in-memory is authoritative.
+            // now == ctx.applyTime() (leader-stamped, replicated), so the idempotency
+            // createdAt is identical across nodes.
+            if (rocksDB != null) {
+                persistApply(journal, balanceUpdates, requestId, journalId, now.toEpochMilli(), eventsToPublish);
+            } else {
+                journalStore.put(journalId, journal);
+            }
+            for (var entry : balanceUpdates.entrySet()) {
+                balanceStore.put(entry.getKey(), entry.getValue());
+            }
+            idempotencyStore.put(requestId, journalId, now.toEpochMilli());
+            journalCount.incrementAndGet();
 
             // 10. Publish to Kafka ONLY after outbox is committed to RocksDB
             // Bundled per-journal envelope: 1 Kafka record per posting/reversal
@@ -715,10 +829,13 @@ public class LedgerStateMachine {
 
     // ── Account Management ─────────────────────────────────────
 
-    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
-        return applyAccountCreate(cmd);
-    }
     public CommandResult applyAccountCreate(AccountCreateCommand cmd) {
+        return applyAccountCreate(cmd, RaftApplyContext.standalone());
+    }
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, long raftIndex) {
+        return applyAccountCreate(cmd, RaftApplyContext.single(raftIndex));
+    }
+    public CommandResult applyAccountCreate(AccountCreateCommand cmd, RaftApplyContext ctx) {
         var existing = accountMetaStore.get(cmd.accountId());
         if (existing.isPresent()) {
             Account acc = existing.get();
@@ -735,11 +852,13 @@ public class LedgerStateMachine {
         for (var init : cmd.balanceInitializations()) {
             allowedBalanceTypes.add(init.balanceType());
         }
+        // Leader-stamped, replicated real wall-clock — identical on every node.
+        Instant now = ctx.applyTime();
 
         Account account = new Account(
                 cmd.accountId(), cmd.accountType(), cmd.displayName(),
                 cmd.ownerId(), AccountStatus.ACTIVE,
-                Set.copyOf(allowedBalanceTypes), Instant.now());
+                Set.copyOf(allowedBalanceTypes), now);
 
         accountMetaStore.put(cmd.accountId(), account);
         persistAccountMeta(cmd.accountId(), account);
@@ -754,17 +873,17 @@ public class LedgerStateMachine {
         // Publish account creation event (gated: only on leader after catch-up)
         if (emitGate.isEnabled() && eventListener != null) {
             eventListener.onAccountCreated(new AccountCreatedEvent(
-                    FastIdGenerator.nextId(),
+                    "EVT-ACC-" + cmd.accountId(),
                     AccountCreatedEvent.EVENT_TYPE,
                     AccountCreatedEvent.EVENT_VERSION,
-                    Instant.now(),
+                    now,
                     cmd.accountId(),
                     cmd.accountType().name(),
                     cmd.displayName(),
                     cmd.ownerId(),
                     AccountStatus.ACTIVE.name(),
                     Set.copyOf(allowedBalanceTypes),
-                    Instant.now()));
+                    now));
         }
 
         return CommandResult.completed(null);
@@ -823,9 +942,18 @@ public class LedgerStateMachine {
         return applyReversalInternal(cmd, 0);
     }
     public CommandResult applyReversal(ReversalCommand cmd, long raftIndex) {
-        return applyReversalInternal(cmd, raftIndex);
+        return applyReversal(cmd, RaftApplyContext.single(raftIndex));
     }
+
+    public CommandResult applyReversal(ReversalCommand cmd, RaftApplyContext ctx) {
+        return applyReversalInternal(cmd, ctx);
+    }
+
     private CommandResult applyReversalInternal(ReversalCommand cmd, long raftIndex) {
+        return applyReversalInternal(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult applyReversalInternal(ReversalCommand cmd, RaftApplyContext ctx) {
         List<JournalLine> reusableMirroredLines = new ArrayList<>(64);
         var cachedJournalId = idempotencyStore.get(cmd.requestId());
         if (cachedJournalId != null) {
@@ -866,14 +994,13 @@ public class LedgerStateMachine {
                         Map.of("journalId", cmd.originalJournalId()));
             }
 
-            long seq = raftIndex > 0
-                    ? raftIndex
+            long seq = ctx.useRaftIndex()
+                    ? ctx.logicalIndex()
                     : journalSequence.incrementAndGet();
-            long index = raftIndex > 0 ? raftIndex : raftLogIndex.incrementAndGet();
-            String reversalJournalId = raftIndex > 0
-                    ? String.format("JNL-%016d", raftIndex)
-                    : String.format("JNL-%04d", seq);
-            Instant now = Instant.now();
+            long index = ctx.useRaftIndex() ? ctx.logicalIndex() : raftLogIndex.incrementAndGet();
+            String reversalJournalId = ctx.journalId(seq);
+            // Leader-stamped, replicated real wall-clock — identical on every node (was Instant.now()).
+            Instant now = ctx.applyTime();
 
             Map<AccountBalanceKey, BalanceEntry> balanceUpdates = new HashMap<>();
             List<BalanceChangeEvent> reversalEvents = new ArrayList<>();
@@ -912,7 +1039,7 @@ public class LedgerStateMachine {
                             ? jl.amount().negate()
                             : jl.amount();
                     BalanceChangeEvent event = new BalanceChangeEvent(
-                            FastIdGenerator.nextId(),
+                            "EVT-" + journalLineId,
                             BalanceChangeEvent.EVENT_TYPE,
                             BalanceChangeEvent.EVENT_VERSION,
                             now,
@@ -960,26 +1087,26 @@ public class LedgerStateMachine {
                     cmd.valueDate(), JournalStatus.CONFIRMED,
                     List.copyOf(reusableMirroredLines), crossPeriod, now);
 
-            if (rocksDB == null) journalStore.put(reversalJournalId, reversalJournal); // in-memory mode only
-            journalCount.incrementAndGet();
-
-            // Mark original as reversed. RocksDB write below is authoritative;
-            // heap map only matters in standalone/test mode (no RocksDB).
-            if (rocksDB == null) journalStore.put(cmd.originalJournalId(), orig.withStatus(JournalStatus.REVERSED));
-
-            idempotencyStore.put(cmd.requestId(), reversalJournalId);
-
-            // Atomic RocksDB persistence
-            persistApply(reversalJournal, balanceUpdates, cmd.requestId(), reversalJournalId, reversalEvents);
-            // Also persist updated original journal
+            Journal reversedOriginal = orig.withStatus(JournalStatus.REVERSED);
             if (rocksDB != null) {
+                // Atomic RocksDB persistence.
+                persistApply(reversalJournal, balanceUpdates, cmd.requestId(), reversalJournalId,
+                        now.toEpochMilli(), reversalEvents);
                 try {
                     rocksDB.put("journal", cmd.originalJournalId().getBytes(StandardCharsets.UTF_8),
-                            objectMapper.writeValueAsBytes(orig.withStatus(JournalStatus.REVERSED)));
+                            objectMapper.writeValueAsBytes(reversedOriginal));
                 } catch (Exception e) {
-                    log.error("Failed to persist original journal status update", e);
+                    throw new IllegalStateException("Failed to persist original journal status update " + cmd.originalJournalId(), e);
                 }
+            } else {
+                journalStore.put(reversalJournalId, reversalJournal); // in-memory mode only
+                journalStore.put(cmd.originalJournalId(), reversedOriginal);
             }
+            for (var entry : balanceUpdates.entrySet()) {
+                balanceStore.put(entry.getKey(), entry.getValue());
+            }
+            idempotencyStore.put(cmd.requestId(), reversalJournalId, now.toEpochMilli());
+            journalCount.incrementAndGet();
 
             return CommandResult.completed(reversalJournalId);
         });

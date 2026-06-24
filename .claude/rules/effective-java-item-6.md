@@ -1,0 +1,42 @@
+# Effective Java Item 6 — Avoid Unnecessary Object Creation
+
+Minimize GC pressure by strictly avoiding unnecessary allocations in Java hot paths.
+
+## 1. Never Create Duplicate Immutable Objects
+
+- **Strings**: NEVER `new String("str")`. Use literals `"str"`.
+- **Wrappers**: NEVER `new Integer(1)` or `new Boolean("true")`. Use `Integer.valueOf(1)`, `Boolean.parseBoolean("true")`, etc.
+
+## 2. Cache Expensive Objects
+
+- Cache objects that are expensive to initialize and immutable.
+- **Regex**: NEVER `Pattern.compile(...)` inside a method. Use `private static final Pattern`.
+- **Formatters**: Reuse thread-safe formatters (e.g. `DateTimeFormatter`).
+
+## 3. Prevent Unintentional Autoboxing
+
+- NEVER use boxed primitives (`Long`, `Integer`, `Double`) in math or loops.
+- Bad: `Long sum = 0L; for (long i = 0; i < N; i++) sum += i;`
+- Good: `long sum = 0L; for (long i = 0; i < N; i++) sum += i;`
+
+## 4. Map and Collection Optimizations
+
+- Prefer primitive collections (Eclipse Collections, fastutil `LongLongHashMap`) for high-frequency ledger ops.
+- Pre-size `ArrayList`, `HashMap` when size is known to avoid resize allocations.
+
+## 5. Object Pool Nuance
+
+- Do NOT pool lightweight objects (DTOs, Strings). Modern GCs (ZGC, G1) handle short-lived objects well.
+- ONLY pool genuinely heavy resources (DB connections, threads, large DirectByteBuffers).
+
+## Anti-Patterns
+
+Flag allocation violations and refactor to eliminate unnecessary object creation.
+
+## Review Checklist
+
+- [ ] No `new String(...)`, wrapper constructors, or dynamic `Pattern.compile` in methods
+- [ ] Loop counters and accumulators use primitives
+- [ ] Collections pre-sized when count is known
+- [ ] Primitive collections for high-frequency maps/sets
+- [ ] No custom pools for lightweight DTOs

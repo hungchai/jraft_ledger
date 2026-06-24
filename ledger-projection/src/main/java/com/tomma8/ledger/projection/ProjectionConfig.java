@@ -21,7 +21,12 @@ public class ProjectionConfig {
             ConsumerFactory<String, String> consumerFactory) {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(consumerFactory);
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        // MANUAL + async commit for the same rebalance-tolerance reason as
+        // batchFactory below. Account-created events are idempotent
+        // (upsert by accountId), so a duplicate delivery after rebalance
+        // is safe.
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        factory.getContainerProperties().setSyncCommits(false);
         return factory;
     }
 
@@ -36,7 +41,13 @@ public class ProjectionConfig {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(consumerFactory);
         factory.setBatchListener(true);
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        // MANUAL_IMMEDIATE = sync commit on ack. After rebalance, the old
+        // generation's commitSync throws CommitFailedException which Spring
+        // surfaces as a batch failure → projection logs "Balance batch
+        // projection failed — not acking" even though the DB write succeeded.
+        // Async commits (sync=false) avoid that whole class of false failures.
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        factory.getContainerProperties().setSyncCommits(false);
         return factory;
     }
 

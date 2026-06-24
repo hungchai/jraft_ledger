@@ -1,5 +1,6 @@
 package com.tomma8.ledger.metrics;
 
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 
@@ -30,6 +31,7 @@ public final class LedgerMetrics {
     private static volatile Timer raftWaitApplyTimer;
     private static volatile Timer raftWakeupTimer;
     private static volatile Timer raftTotalTimer;
+    private static volatile DistributionSummary raftBatchSizeSummary;
 
     private LedgerMetrics() {}
 
@@ -77,6 +79,10 @@ public final class LedgerMetrics {
                 .description("Raft submit total wall time (HTTP handler → response)")
                 .publishPercentileHistogram()
                 .register(reg);
+        raftBatchSizeSummary = DistributionSummary.builder("ledger.raft.batch.size")
+                .description("Number of commands per batched Raft log entry")
+                .publishPercentileHistogram()
+                .register(reg);
     }
 
     public static void recordApplyDeserialize(long nanos) {
@@ -105,6 +111,9 @@ public final class LedgerMetrics {
     }
     public static void recordRaftTotal(long nanos) {
         Timer t = raftTotalTimer; if (t != null) t.record(nanos, TimeUnit.NANOSECONDS);
+    }
+    public static void recordRaftBatchSize(int size) {
+        DistributionSummary s = raftBatchSizeSummary; if (s != null) s.record(size);
     }
 
     public static boolean isEnabled() {

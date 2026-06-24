@@ -19,6 +19,7 @@ import com.tomma8.ledger.service.*;
 import com.tomma8.ledger.rest.controller.ClusterController;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.queue.AccountQueueManager;
+import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
@@ -140,17 +141,42 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs) {
+    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs, Environment env) {
+        // Kafka is detected at runtime. The KafkaProducer constructor resolves bootstrap.servers DNS
+        // eagerly and THROWS if the host is unresolvable (broker truly absent, e.g. run without the
+        // kafka container).
+        //
+        // ledger.kafka.required controls what happens then:
+        //   false (default; dev/local) → degrade to no-Kafka mode. Node still serves all writes + live
+        //          balance reads (Raft journal is source of truth); no event listener is set, so the
+        //          Kafka projection is simply not produced while the broker is absent. (Host resolves
+        //          but broker down → construction succeeds, fail-fast producer timeouts retry + drain.)
+        //   true  (production) → FAIL STARTUP. Prod must not silently run without the projection, which
+        //          would lose the CQRS read-model for the no-Kafka window; better to crash loudly so the
+        //          deploy is fixed. Set in application-prod.yml.
+        boolean required = env.getProperty("ledger.kafka.required", Boolean.class, false);
         String brokers = cs.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
-        KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
-        publisher.setOutboxStore(outboxStore);
-        return publisher;
+        try {
+            KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+            publisher.setOutboxStore(outboxStore);
+            return publisher;
+        } catch (Exception e) {
+            if (required) {
+                throw new IllegalStateException(
+                        "Kafka is required (ledger.kafka.required=true) but unavailable (KAFKA_BOOTSTRAP_SERVERS="
+                                + brokers + "). Failing startup. Cause: " + e, e);
+            }
+            log.warn("Kafka unavailable (KAFKA_BOOTSTRAP_SERVERS={}) — running without Kafka (ledger.kafka.required=false). "
+                    + "Writes + live reads work via Raft; projection not produced while absent. Cause: {}",
+                    brokers, e.toString());
+            return null;
+        }
     }
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
     public AsyncOutboxPublisher asyncOutboxPublisher(OutboxStore outboxStore,
-                                                      KafkaEventPublisher kafkaPublisher,
+                                                      @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
                                                       LedgerStateMachine ledgerStateMachine,
                                                       MeterRegistry meterRegistry,
                                                       ConfigService cs) {
@@ -246,8 +272,14 @@ public class LedgerConfig {
             BalanceTypeConfigStore balanceTypeConfigStore,
             @org.springframework.beans.factory.annotation.Autowired(required = false) RocksDBManager rocksDBManager,
             @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher) {
-        LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, balanceTypeConfigStore);
+            @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
+            @org.springframework.beans.factory.annotation.Value("${ledger.idempotency.ttl:30d}") Duration idempotencyTtl) {
+        // Spring Boot 3.x binds the @Value string ("30d", "3m", "1h") to java.time.Duration
+        // via ApplicationConversionService. Production default 30d; pressure tests can run
+        // with --spring.config.additional-location or env LEDGER_IDEMPOTENCY_TTL=3m.
+        LedgerStateMachine sm = new LedgerStateMachine(
+                balanceStore, accountMetaStore, balanceTypeConfigStore,
+                idempotencyTtl, java.time.Clock.systemUTC(), true);
 
         // Wire Kafka event publisher
         if (kafkaPublisher != null) {
@@ -337,6 +369,10 @@ public class LedgerConfig {
                 .description("Raft last applied index (monotonic, per node)")
                 .tag("node_id", nodeId)
                 .register(meterRegistry);
+        Gauge.builder("ledger.sm.journal.sequence", ledgerStateMachine::getJournalSequence)
+                .description("State machine journal sequence (smJournalSeq)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
 
         String[] peerArr = peers.split(",");
         StringBuilder raftPeers = new StringBuilder();
@@ -387,18 +423,53 @@ public class LedgerConfig {
                 .description("Raft last applied index (monotonic, per node)")
                 .tag("node_id", nodeId)
                 .register(meterRegistry);
+        Gauge.builder("ledger.sm.journal.sequence", ledgerStateMachine::getJournalSequence)
+                .description("State machine journal sequence (smJournalSeq)")
+                .tag("node_id", nodeId)
+                .register(meterRegistry);
 
         log.info("Ratis node started: {} peers={} engine=ratis", nodeId, ratisPeers);
         return mgr;
     }
 
     @Bean(destroyMethod = "close")
+    public CommandQueueManager commandQueueManager(
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            MeterRegistry meterRegistry,
+            Environment env) {
+        if (raftNodeManager == null) {
+            log.info("CommandQueueManager not created — standalone mode");
+            return null;
+        }
+        boolean enabled = env.getProperty("ledger.command-queue.enabled", Boolean.class, true);
+        if (!enabled) {
+            log.info("CommandQueueManager disabled via ledger.command-queue.enabled=false");
+            return null;
+        }
+        int maxSize = env.getProperty("ledger.command-queue.max-size", Integer.class, 50_000);
+        int batchSize = env.getProperty("ledger.command-queue.batch-size", Integer.class, 16);
+        long batchWaitMs = env.getProperty("ledger.command-queue.batch-wait-ms", Long.class, 1L);
+        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs);
+        Gauge.builder("ledger.command.queue.depth", cqm::getQueueDepth)
+                .description("Depth of global command ingress queue")
+                .register(meterRegistry);
+        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={}",
+                maxSize, batchSize, batchWaitMs);
+        return cqm;
+    }
+
+    @Bean(destroyMethod = "close")
     public AccountQueueManager accountQueueManager(
             @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
                                                    MeterRegistry meterRegistry,
                                                    Environment env) {
         if (raftNodeManager == null) {
             log.info("AccountQueueManager not created — standalone mode");
+            return null;
+        }
+        if (commandQueueManager != null) {
+            log.info("AccountQueueManager skipped — CommandQueueManager is primary ingress");
             return null;
         }
         AccountQueueManager aqm = new AccountQueueManager(raftNodeManager::submit);

@@ -26,10 +26,22 @@ ledger:
     data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}
     server-port: ${RAFT_SERVER_PORT:28080}
   kafka:
+    # required=false (default; dev/local): if Kafka is unreachable at startup the node degrades to
+    # no-Kafka mode (writes + live reads still work; projection not produced). Production overrides this
+    # to true in application-prod.yml so a missing broker FAILS STARTUP instead of silently losing the
+    # CQRS projection. Override per-env via LEDGER_KAFKA_REQUIRED.
+    required: ${LEDGER_KAFKA_REQUIRED:false}
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     topics:
       balance-change: ledger.balance.change.v1
       posting-completion: ledger.posting.completion.v1
+  command-queue:
+    enabled: ${LEDGER_COMMAND_QUEUE_ENABLED:true}
+    max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
+    batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
+    batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
+  idempotency:
+    ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
 
 outbox:
   poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}

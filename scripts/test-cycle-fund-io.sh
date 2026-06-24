@@ -49,6 +49,7 @@ PROJ_RATE_IDLE_MAX=1.0    # events/s threshold; below = "no new work"
 PROJ_IDLE_READY_SEC=3     # seconds since last event before pipeline is "quiet"
 PROJ_IDLE_REQUIRED_POLLS=2  # need N consecutive idle polls before ready=true
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9090}"
+K6_PROMETHEUS_RW="${K6_PROMETHEUS_RW:-1}"
 PROJECTION_URL="${PROJECTION_URL:-http://localhost:8089}"
 PROJ_PRE_K6_POLL_SEC=2
 PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
@@ -56,7 +57,7 @@ PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
   echo "         [--proj-lag-max N] [--proj-wait-max-loops N] [--prometheus-url URL]"
-  echo "         [--num-clients N]"
+  echo "         [--no-k6-prometheus] [--num-clients N]"
   echo "  --vus N         Number of VUs (default: 50)"
   echo "  --duration M    Test duration (default: 30s)"
   echo "  --num-clients N  Number of client accounts to seed (default: 50)"
@@ -66,6 +67,7 @@ usage() {
   echo "  --proj-lag-max N   Max SM-MySQL journal lag for strict balance FAIL (default: 10)"
   echo "  --proj-wait-max-loops N  Poll iterations in each wait phase (default: 120 = 600s)"
   echo "  --prometheus-url URL  Prometheus query API (default: http://localhost:9090)"
+  echo "  --no-k6-prometheus    Skip k6 experimental-prometheus-rw (Grafana k6 dashboard stays empty)"
   exit 1
 }
 
@@ -80,6 +82,7 @@ while [ $# -gt 0 ]; do
     --proj-lag-max) PROJ_LAG_MAX="$2"; shift 2 ;;
     --proj-wait-max-loops) PROJ_WAIT_MAX_LOOPS="$2"; shift 2 ;;
     --prometheus-url) PROMETHEUS_URL="$2"; shift 2 ;;
+    --no-k6-prometheus) K6_PROMETHEUS_RW=0; shift ;;
     *) usage ;;
   esac
 done
@@ -467,7 +470,19 @@ if ! $RECON_ONLY; then
   echo "=== Step 3: k6 stress test ($VUS VUs, $DURATION) ==="
   echo "Leader: $BASE_URL"
 
+  K6_PROM_ARGS=()
+  if [ "$K6_PROMETHEUS_RW" != "0" ]; then
+    K6_TEST_ID="${K6_TEST_ID:-test-cycle-fund-io-$(date +%Y%m%d-%H%M%S)}"
+    export K6_PROMETHEUS_RW_SERVER_URL="${K6_PROMETHEUS_RW_SERVER_URL:-${PROMETHEUS_URL}/api/v1/write}"
+    export K6_PROMETHEUS_RW_TREND_STATS="min,max,avg,p(50),p(95),p(99)"
+    export K6_PROMETHEUS_RW_STALE_MARKERS=true
+    K6_PROM_ARGS=( -o experimental-prometheus-rw --tag "testid=${K6_TEST_ID}" )
+    echo "  k6 → Prometheus remote-write: ${K6_PROMETHEUS_RW_SERVER_URL} testid=${K6_TEST_ID}"
+    echo "  Grafana: http://localhost:3000/d/k6-test-cycle (filter testid=${K6_TEST_ID})"
+  fi
+
   K6_OUTPUT=$(k6 run --vus "$VUS" --duration "$DURATION" \
+    "${K6_PROM_ARGS[@]}" \
     -e BASE_URL="$BASE_URL" \
     "$K6_SCRIPT" 2>&1) || true
 

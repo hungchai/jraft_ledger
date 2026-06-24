@@ -4,6 +4,7 @@ import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.ReversalCommand;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.queue.AccountQueueManager;
+import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.service.ReversalService;
@@ -23,17 +24,20 @@ public class ReversalController {
 
     private final ReversalService reversalService;
     private final ConsensusEngine raftNodeManager;
+    private final CommandQueueManager commandQueueManager;
     private final AccountQueueManager accountQueueManager;
     private final NodeRole nodeRole;
     private final MeterRegistry meterRegistry;
 
     public ReversalController(ReversalService reversalService,
                                @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+                               @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
                                @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                                NodeRole nodeRole,
                                MeterRegistry meterRegistry) {
         this.reversalService = reversalService;
         this.raftNodeManager = raftNodeManager;
+        this.commandQueueManager = commandQueueManager;
         this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
@@ -61,7 +65,13 @@ public class ReversalController {
                     LocalDate.parse(body.get("valueDate")));
 
             CommandResult result;
-            if (accountQueueManager != null) {
+            if (commandQueueManager != null) {
+                try {
+                    result = commandQueueManager.submitAsync(cmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("CommandQueue submit failed for " + cmd.requestId(), e);
+                }
+            } else if (accountQueueManager != null) {
                 // Use originalJournalId as queue anchor — reversals for same journal always touch same accounts
                 try {
                     result = accountQueueManager.submitAsync(journalId, cmd).get(10, TimeUnit.SECONDS);

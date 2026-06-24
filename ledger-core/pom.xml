@@ -39,6 +39,12 @@
             <artifactId>spring-context</artifactId>
         </dependency>
 
+        <!-- Jakarta annotation API (for @PreDestroy on eviction scheduler) -->
+        <dependency>
+            <groupId>jakarta.annotation</groupId>
+            <artifactId>jakarta.annotation-api</artifactId>
+        </dependency>
+
         <!-- SLF4J -->
         <dependency>
             <groupId>org.slf4j</groupId>

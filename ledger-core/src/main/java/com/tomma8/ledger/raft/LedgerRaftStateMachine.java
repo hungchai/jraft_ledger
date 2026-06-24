@@ -16,8 +16,10 @@ import com.tomma8.ledger.domain.command.AccountCloseCommand;
 import com.tomma8.ledger.domain.command.AccountCreateCommand;
 import com.tomma8.ledger.domain.command.AccountFreezeCommand;
 import com.tomma8.ledger.domain.command.AdjustmentCommand;
+import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
+import com.tomma8.ledger.domain.command.RaftApplyContext;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.domain.command.ReversalCommand;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
@@ -169,43 +171,23 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
 
                 long tStart = System.nanoTime();
                 try {
-                    RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                    long applyTimeMillis = CommandSerializer.readApplyTimeMillis(bytes, len);
+                    int bodyLen = len - CommandSerializer.APPLY_TIME_HEADER;
+                    RaftCommand cmd = CommandSerializer.deserialize(bytes, CommandSerializer.APPLY_TIME_HEADER, bodyLen);
                     long tDeserEnd = System.nanoTime();
                     com.tomma8.ledger.metrics.LedgerMetrics.recordApplyDeserialize(tDeserEnd - tStart);
 
-                    if (log.isDebugEnabled()) {
-                        log.debug("[APPLY] index={} cmd={} reqId={} len={} deser={}us",
-                                index, cmd.getClass().getSimpleName(), cmd.requestId(),
-                                len, (tDeserEnd - tStart) / 1000);
-                    }
-
-                    CommandResult result = executeCommand(cmd, index);
-                    long tExecEnd = System.nanoTime();
-                    com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
-
-                    if (pendingCommands != null) {
-                        var future = pendingCommands.remove(cmd.requestId());
-                        if (future != null) future.complete(result);
-                    }
-                    if (done != null) {
-                        done.run(result.isCompleted() ? Status.OK()
-                                : new Status(RaftError.EBUSY, result.errorCodes().toString()));
-                    }
-
-                    long totalUs = (tExecEnd - tStart) / 1000;
-                    // APPLY_SLOW warn disabled: onApply is the Raft apply hot path
-                    // and the string formatting + log dispatch on the slow path itself
-                    // made contention worse during stress tests. Metrics are still
-                    // recorded above (recordApplyTotal); use Prometheus to inspect.
-                    if (false && totalUs > 5000) {
-                        log.warn("[APPLY_SLOW] cmd={} index={} total={}us",
-                                cmd.getClass().getSimpleName(), index, totalUs);
+                    if (cmd instanceof BatchRaftCommand batch) {
+                        applyBatch(batch, index, applyTimeMillis, done, tStart);
+                    } else {
+                        applySingle(cmd, index, applyTimeMillis, done, tStart, tDeserEnd);
                     }
                 } catch (Exception e) {
                     log.error("[APPLY_FAIL] index={} len={}", index, len, e);
                     if (pendingCommands != null) {
                         try {
-                            RaftCommand cmd = CommandSerializer.deserialize(bytes, len);
+                            int bodyLen = len - CommandSerializer.APPLY_TIME_HEADER;
+                            RaftCommand cmd = CommandSerializer.deserialize(bytes, CommandSerializer.APPLY_TIME_HEADER, bodyLen);
                             var future = pendingCommands.remove(cmd.requestId());
                             if (future != null) {
                                 future.complete(CommandResult.rejected(LedgerErrorCode.RAFT_APPLY_ERROR));
@@ -225,56 +207,133 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
         }
     }
 
+    private void applySingle(RaftCommand cmd, long index, long applyTimeMillis, Closure done, long tStart, long tDeserEnd) {
+        if (log.isDebugEnabled()) {
+            log.debug("[APPLY] index={} cmd={} reqId={} deser={}us",
+                    index, cmd.getClass().getSimpleName(), cmd.requestId(),
+                    (tDeserEnd - tStart) / 1000);
+        }
+
+        CommandResult result = executeCommand(cmd, RaftApplyContext.single(index, applyTimeMillis));
+        long tExecEnd = System.nanoTime();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
+
+        if (pendingCommands != null) {
+            var future = pendingCommands.remove(cmd.requestId());
+            if (future != null) future.complete(result);
+        }
+        if (done != null) {
+            done.run(result.isCompleted() ? Status.OK()
+                    : new Status(RaftError.EBUSY, result.errorCodes().toString()));
+        }
+    }
+
+    private void applyBatch(BatchRaftCommand batch, long index, long applyTimeMillis, Closure done, long tStart) {
+        var commands = batch.commands();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
+        boolean allOk = true;
+        for (int i = 0; i < commands.size(); i++) {
+            RaftCommand sub = commands.get(i);
+            RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i, applyTimeMillis);
+            CommandResult result = executeCommand(sub, ctx);
+            if (pendingCommands != null) {
+                var future = pendingCommands.remove(sub.requestId());
+                if (future != null) future.complete(result);
+            }
+            if (!result.isCompleted()) {
+                allOk = false;
+            }
+        }
+        long tExecEnd = System.nanoTime();
+        com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tExecEnd - tStart);
+        if (done != null) {
+            done.run(allOk ? Status.OK() : new Status(RaftError.EBUSY, "batch rejected"));
+        }
+    }
+
     private CommandResult executeCommand(RaftCommand cmd, long raftIndex) {
+        return executeCommand(cmd, RaftApplyContext.single(raftIndex));
+    }
+
+    private CommandResult executeCommand(RaftCommand cmd, RaftApplyContext ctx) {
         if (cmd instanceof AdjustmentCommand a) {
-            return ledgerStateMachine.applyAdjustment(a, raftIndex);
+            return ledgerStateMachine.applyAdjustment(a, ctx);
         }
         if (cmd instanceof PostingCommand p) {
-            return ledgerStateMachine.applyPosting(p, raftIndex);
+            return ledgerStateMachine.applyPosting(p, ctx);
         }
         if (cmd instanceof ReversalCommand r) {
-            return ledgerStateMachine.applyReversal(r, raftIndex);
+            return ledgerStateMachine.applyReversal(r, ctx);
         }
         if (cmd instanceof AccountCreateCommand a) {
-            return ledgerStateMachine.applyAccountCreate(a, raftIndex);
+            return ledgerStateMachine.applyAccountCreate(a, ctx);
         }
         if (cmd instanceof AccountFreezeCommand f) {
-            return f.freeze() ? ledgerStateMachine.applyFreeze(f, raftIndex)
-                    : ledgerStateMachine.applyUnfreeze(f, raftIndex);
+            return f.freeze() ? ledgerStateMachine.applyFreeze(f, ctx.raftIndex())
+                    : ledgerStateMachine.applyUnfreeze(f, ctx.raftIndex());
         }
         if (cmd instanceof AccountCloseCommand c) {
-            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId(), raftIndex);
+            return ledgerStateMachine.applyCloseAccount(c.accountId(), c.requestId(), ctx.raftIndex());
         }
         if (cmd instanceof AccountAddBalanceTypeCommand a) {
-            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), raftIndex);
+            return ledgerStateMachine.applyAddBalanceType(a.accountId(), a.balanceType(), a.currency(), a.requestId(), ctx.raftIndex());
         }
         throw new IllegalArgumentException("Unknown command: " + cmd.getClass().getName());
     }
 
     @Override
     public void onSnapshotSave(SnapshotWriter writer, Closure done) {
+        // CRITICAL: this runs on the single FSM apply thread (the JRaft Disruptor that
+        // also drives onApply). Any heavy work done synchronously here blocks apply for
+        // its whole duration — the snapshot stall observed in the 240m soak (every 600s,
+        // apply frozen for the full O(journal-count) journal stream → p99 10s, TPS→0,
+        // client .get() timeouts). So we do only a tiny, bounded state capture inline and
+        // offload all the heavy I/O to a background thread, returning the FSM thread to
+        // applying immediately. done.run() (called from the background thread) signals
+        // completion back to JRaft — its documented async-snapshot contract.
+
+        // 1. Capture the mutable in-memory state inline (bounded by account count → sub-ms).
+        //    This is the only part that must be consistent w.r.t. apply; taken on the FSM
+        //    thread it is naturally exclusive with onApply (same thread).
+        final byte[] smData;
         snapshotLock.writeLock().lock();
         try {
-            byte[] data = ledgerStateMachine.snapshotBytes();
-            String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
-            java.nio.file.Files.write(java.nio.file.Paths.get(filePath), data);
-            writer.addFile("state_machine_snapshot");
-            // Journals streamed to a separate file (not in the blob — would OOM at
-            // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
-            // journal CF without the leader materializing all journals in heap.
-            String journalsPath = writer.getPath() + File.separator + "journals.dat";
-            try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
-                ledgerStateMachine.streamJournalsTo(os);
-            }
-            writer.addFile("journals.dat");
-            ledgerStateMachine.takeSnapshot(); // local sm_snapshot blob (small, no journals)
-            done.run(Status.OK());
+            smData = ledgerStateMachine.snapshotBytes();
         } catch (Exception e) {
-            log.error("Snapshot save failed", e);
-            done.run(new Status(RaftError.EIO, e.getMessage()));
-        } finally {
             snapshotLock.writeLock().unlock();
+            log.error("Snapshot save failed (state capture)", e);
+            done.run(new Status(RaftError.EIO, e.getMessage()));
+            return;
         }
+        snapshotLock.writeLock().unlock();
+
+        // 2. Offload the heavy save to a background thread so apply keeps flowing.
+        //    The journal CF is append-only and the RocksDB iterator pins a consistent
+        //    superversion at creation, so streaming concurrently with apply is safe: it
+        //    captures journals up to >= the snapshot's lastIncludedIndex (extra trailing
+        //    journals are harmless — restore replays the Raft log anyway).
+        com.alipay.sofa.jraft.util.Utils.runInThread(() -> {
+            try {
+                String filePath = writer.getPath() + File.separator + "state_machine_snapshot";
+                java.nio.file.Files.write(java.nio.file.Paths.get(filePath), smData);
+                writer.addFile("state_machine_snapshot");
+                // Journals streamed to a separate file (not in the blob — would OOM at
+                // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
+                // journal CF without the leader materializing all journals in heap.
+                String journalsPath = writer.getPath() + File.separator + "journals.dat";
+                try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
+                    ledgerStateMachine.streamJournalsTo(os);
+                }
+                writer.addFile("journals.dat");
+                // Reuse the captured blob for the local sm_snapshot CF instead of re-reading
+                // the (off-thread, lock-free) mutable state, which would risk a torn snapshot.
+                ledgerStateMachine.persistSnapshotBlob(smData);
+                done.run(Status.OK());
+            } catch (Exception e) {
+                log.error("Snapshot save failed", e);
+                done.run(new Status(RaftError.EIO, e.getMessage()));
+            }
+        });
     }
 
     @Override
@@ -292,7 +351,20 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                         ledgerStateMachine.ingestJournalsFrom(is);
                     }
                 }
-                log.info("Snapshot loaded from leader transfer");
+                // Critical: align the FSM-side lastAppliedIndex with the snapshot's
+                // lastIncludedIndex. Without this, leader sees the follower's
+                // lastAppliedIndex=0 forever and tries to send diff log entries
+                // (instead of triggering another InstallSnapshot), keeping the
+                // follower permanently out-of-sync until its local RaftDB is wiped.
+                com.alipay.sofa.jraft.entity.RaftOutter.SnapshotMeta meta = reader.load();
+                if (meta != null) {
+                    long snapIdx = meta.getLastIncludedIndex();
+                    lastAppliedIndex.set(snapIdx);
+                    log.info("Snapshot loaded from leader transfer — lastAppliedIndex aligned to {} (term={})",
+                            snapIdx, meta.getLastIncludedTerm());
+                } else {
+                    log.info("Snapshot loaded from leader transfer (no meta — lastAppliedIndex unchanged)");
+                }
             } else {
                 // No fallback to local RocksDB — stale local snapshot caused
                 // balance divergence across nodes (non-deterministic replay).

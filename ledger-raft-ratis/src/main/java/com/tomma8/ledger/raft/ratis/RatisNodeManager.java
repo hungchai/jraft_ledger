@@ -2,6 +2,8 @@ package com.tomma8.ledger.raft.ratis;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tomma8.ledger.domain.command.BatchApplyResult;
+import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.raft.CommandSerializer;
@@ -132,7 +134,8 @@ public class RatisNodeManager implements ConsensusEngine {
 
     @Override
     public CommandResult submit(RaftCommand command) {
-        byte[] data = CommandSerializer.serialize(command);
+        // Stamp apply time once here on the leader so it replicates in the log entry.
+        byte[] data = CommandSerializer.serialize(command, System.currentTimeMillis());
         try {
             RaftClientReply reply = client.io().send(Message.valueOf(ByteString.copyFrom(data)));
             if (!reply.isSuccess()) {
@@ -142,6 +145,28 @@ public class RatisNodeManager implements ConsensusEngine {
             return RESULT_READER.readValue(content.toByteArray(), CommandResult.class);
         } catch (Exception e) {
             throw new RuntimeException("Ratis command failed: " + command.requestId(), e);
+        }
+    }
+
+    @Override
+    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+        if (commands == null || commands.isEmpty()) {
+            throw new IllegalArgumentException("commands must not be empty");
+        }
+        if (commands.size() == 1) {
+            return List.of(submit(commands.get(0)));
+        }
+        byte[] data = CommandSerializer.serialize(BatchRaftCommand.of(commands), System.currentTimeMillis());
+        try {
+            RaftClientReply reply = client.io().send(Message.valueOf(ByteString.copyFrom(data)));
+            if (!reply.isSuccess()) {
+                throw new RuntimeException("Ratis batch submit failed: " + reply.getException());
+            }
+            ByteString content = reply.getMessage().getContent();
+            BatchApplyResult batchResult = RESULT_READER.readValue(content.toByteArray(), BatchApplyResult.class);
+            return batchResult.results();
+        } catch (Exception e) {
+            throw new RuntimeException("Ratis batch command failed", e);
         }
     }
 

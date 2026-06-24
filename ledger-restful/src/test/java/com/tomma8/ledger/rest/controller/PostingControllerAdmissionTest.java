@@ -63,7 +63,7 @@ class PostingControllerAdmissionTest {
     @DisplayName("TC-NFR-ADM-01 saturated (0 permits) → 503 QUEUE_FULL, load shed")
     void saturated_shedsWith503() {
         PostingController c = new PostingController(
-                completingService(), null, null, leader(), new SimpleMeterRegistry(), cfg(0, 10));
+                completingService(), null, null, null, leader(), new SimpleMeterRegistry(), cfg(0, 10));
 
         ResponseEntity<?> resp = c.post(validBody());
 
@@ -79,7 +79,7 @@ class PostingControllerAdmissionTest {
     @DisplayName("TC-NFR-ADM-02 permits available → posting passes (200 COMPLETED) + permit released")
     void available_passesAndReleases() {
         PostingController c = new PostingController(
-                completingService(), null, null, leader(), new SimpleMeterRegistry(), cfg(2, 50));
+                completingService(), null, null, null, leader(), new SimpleMeterRegistry(), cfg(2, 50));
 
         // Two sequential calls must both succeed — proves the permit is released each time.
         for (int i = 0; i < 2; i++) {
