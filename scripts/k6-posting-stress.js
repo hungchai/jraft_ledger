@@ -48,9 +48,15 @@ let leaderUrl = __ENV.BASE_URL || null;
 let leaderUrlTimestamp = 0;
 const LEADER_TTL_MS = 3_000;  // 3s: fast refresh during Raft churn
 
+// Multi-host driver support: set NODES to a comma-separated list of node base URLs
+// (e.g. http://10.0.0.1:8080,http://10.0.0.2:8080,...) when running k6 from a separate
+// host. Defaults to localhost:LEADER_PORTS for the single-host docker setup.
+const NODE_URLS = __ENV.NODES
+  ? __ENV.NODES.split(',').map((s) => s.trim()).filter(Boolean)
+  : LEADER_PORTS.map((p) => `http://localhost:${p}`);
+
 function findLeader() {
-  for (const port of LEADER_PORTS) {
-    const url = `http://localhost:${port}`;
+  for (const url of NODE_URLS) {
     try {
       const res = http.get(`${url}/health`, { timeout: '2s' });
       if (res.status === 200) {
@@ -62,8 +68,8 @@ function findLeader() {
       }
     } catch (e) { /* try next */ }
   }
-  console.log('No leader found, falling back to http://localhost:8081');
-  return 'http://localhost:8081';
+  console.log(`No leader found, falling back to ${NODE_URLS[0]}`);
+  return NODE_URLS[0];
 }
 
 function getLeaderUrl() {
