@@ -59,6 +59,9 @@ ledger:
     batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
     # cap on commands submitted-to-Raft-but-not-yet-applied (pipelined-dispatch backpressure)
     max-inflight: ${LEDGER_COMMAND_QUEUE_MAX_INFLIGHT:1024}
+    # pipelined dispatch (worker doesn't block per batch). Default false: helps throughput only at
+    # saturation; below it the single FSM apply thread becomes the queue and latency regresses.
+    pipelined: ${LEDGER_COMMAND_QUEUE_PIPELINED:false}
   posting:
     max-inflight: ${LEDGER_MAX_INFLIGHT_POSTINGS:256}
     inflight-acquire-ms: ${LEDGER_INFLIGHT_ACQUIRE_MS:100}
