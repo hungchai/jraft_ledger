@@ -153,15 +153,20 @@ public class RaftNodeManager implements ConsensusEngine {
         }
     }
 
+    /**
+     * Pipelined submit: enqueue the batch to the Raft log via {@code node.apply} and return
+     * per-command futures WITHOUT blocking on commit. The command-queue worker can then drain
+     * and submit the next batch immediately, so many batches sit in the Raft pipeline at once
+     * (vs the old one-batch-at-a-time stall). Futures complete on the state-machine apply
+     * thread (via {@code pendingCommands}). Per-account order is preserved because the Raft
+     * log order equals the order of these {@code node.apply} calls, and a single FIFO caller
+     * feeds them in order.
+     */
     @Override
-    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+    public List<CompletableFuture<CommandResult>> submitBatchAsync(List<RaftCommand> commands) {
         if (commands == null || commands.isEmpty()) {
             throw new IllegalArgumentException("commands must not be empty");
         }
-        if (commands.size() == 1) {
-            return List.of(submit(commands.get(0)));
-        }
-
         long tSubmit = System.nanoTime();
         List<CompletableFuture<CommandResult>> futures = new ArrayList<>(commands.size());
         for (RaftCommand command : commands) {
@@ -170,43 +175,51 @@ public class RaftNodeManager implements ConsensusEngine {
             futures.add(future);
         }
 
-        BatchRaftCommand batch = BatchRaftCommand.of(commands);
-        // One leader-stamped apply time for the whole batch (all sub-commands commit together).
-        byte[] data = CommandSerializer.serialize(batch, System.currentTimeMillis());
+        // size 1 → raw command (applySingle); size >1 → BatchRaftCommand (applyBatch). One
+        // leader-stamped apply time per entry (all sub-commands commit together).
+        byte[] data = (commands.size() == 1)
+                ? CommandSerializer.serialize(commands.get(0), System.currentTimeMillis())
+                : CommandSerializer.serialize(BatchRaftCommand.of(commands), System.currentTimeMillis());
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {
-                RuntimeException ex = new RuntimeException("Raft batch apply failed: " + status);
+                RuntimeException ex = new RuntimeException("Raft apply failed: " + status);
                 for (RaftCommand command : commands) {
-                    CompletableFuture<CommandResult> future = pendingCommands.remove(command.requestId());
-                    if (future != null) future.completeExceptionally(ex);
+                    CompletableFuture<CommandResult> f = pendingCommands.remove(command.requestId());
+                    if (f != null) f.completeExceptionally(ex);
                 }
             }
         });
 
-        this.node.apply(task);
+        this.node.apply(task);   // non-blocking enqueue to the Raft disruptor — does NOT wait for commit
         long tApplied = System.nanoTime();
         com.tomma8.ledger.metrics.LedgerMetrics.recordRaftEnqueue(tApplied - tSubmit);
         com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
 
+        // record commit latency when the whole batch is applied — fires on the apply thread,
+        // off the worker's hot path (no blocking).
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .whenComplete((v, e) -> {
+                    long done = System.nanoTime();
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(done - tApplied);
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(done - tSubmit);
+                });
+        return futures;
+    }
+
+    @Override
+    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+        List<CompletableFuture<CommandResult>> futures = submitBatchAsync(commands);
         try {
-            long tWaitStart = System.nanoTime();
-            List<CommandResult> results = new ArrayList<>(commands.size());
-            for (int i = 0; i < futures.size(); i++) {
-                results.add(futures.get(i).get(10, TimeUnit.SECONDS));
+            List<CommandResult> results = new ArrayList<>(futures.size());
+            for (CompletableFuture<CommandResult> f : futures) {
+                results.add(f.get(10, TimeUnit.SECONDS));
             }
-            long tWaitEnd = System.nanoTime();
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(tWaitEnd - tWaitStart);
-            long tReturn = System.nanoTime();
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(tReturn - tWaitEnd);
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(tReturn - tSubmit);
             return results;
         } catch (Exception e) {
-            long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(elapsedMs * 1_000_000L);
             for (RaftCommand command : commands) {
                 pendingCommands.remove(command.requestId());
             }
-            throw new RuntimeException("Raft batch timeout after " + elapsedMs + "ms", e);
+            throw new RuntimeException("Raft batch timeout", e);
         }
     }
 

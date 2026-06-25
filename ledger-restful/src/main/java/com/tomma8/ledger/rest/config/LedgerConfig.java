@@ -454,12 +454,13 @@ public class LedgerConfig {
         int maxSize = env.getProperty("ledger.command-queue.max-size", Integer.class, 50_000);
         int batchSize = env.getProperty("ledger.command-queue.batch-size", Integer.class, 16);
         long batchWaitMs = env.getProperty("ledger.command-queue.batch-wait-ms", Long.class, 1L);
-        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs);
+        int maxInFlight = env.getProperty("ledger.command-queue.max-inflight", Integer.class, 1024);
+        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs, maxInFlight);
         Gauge.builder("ledger.command.queue.depth", cqm::getQueueDepth)
                 .description("Depth of global command ingress queue")
                 .register(meterRegistry);
-        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={}",
-                maxSize, batchSize, batchWaitMs);
+        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={} maxInFlight={}",
+                maxSize, batchSize, batchWaitMs, maxInFlight);
         return cqm;
     }
 

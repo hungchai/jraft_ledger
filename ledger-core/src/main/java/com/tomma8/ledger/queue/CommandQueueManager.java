@@ -21,23 +21,44 @@ public class CommandQueueManager implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(CommandQueueManager.class);
 
+    /** Default cap on commands enqueued-to-Raft-but-not-yet-applied (pipelining backpressure). */
+    static final int DEFAULT_MAX_INFLIGHT = 1024;
+
     private final BlockingQueue<QueuedCommand> queue;
     private final ConsensusEngine consensusEngine;
     private final int batchSize;
     private final long batchWaitMs;
     private final ExecutorService worker;
+    // Bounds in-flight (submitted-to-Raft, not-yet-completed) commands. With async pipelined
+    // dispatch the worker no longer blocks per batch, so without this it could flood node.apply
+    // faster than commit and overrun the Raft disruptor / grow pendingCommands unbounded. The
+    // controller's admission semaphore also bounds this in practice, but this is defense-in-depth
+    // so the queue stays safe even if that upstream guard changes.
+    private final Semaphore inflight;
     private volatile boolean running = true;
 
     public CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs) {
-        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, true);
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, DEFAULT_MAX_INFLIGHT, true);
+    }
+
+    public CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
+                               int maxInFlight) {
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, maxInFlight, true);
     }
 
     CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
                         boolean startWorker) {
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, DEFAULT_MAX_INFLIGHT, startWorker);
+    }
+
+    CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
+                        int maxInFlight, boolean startWorker) {
         this.consensusEngine = consensusEngine;
         this.queue = new LinkedBlockingQueue<>(maxQueueSize);
         this.batchSize = Math.max(1, batchSize);
         this.batchWaitMs = Math.max(0, batchWaitMs);
+        // never smaller than a single batch, else a full batch could never acquire and would deadlock
+        this.inflight = new Semaphore(Math.max(this.batchSize, maxInFlight));
         this.worker = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "command-queue-worker");
             t.setDaemon(true);
@@ -84,6 +105,9 @@ public class CommandQueueManager implements AutoCloseable {
                 if (batch.isEmpty()) {
                     continue;
                 }
+                // backpressure: blocks the worker ONLY when the in-flight cap is reached (not per
+                // batch) — this is what keeps pipelined dispatch bounded.
+                inflight.acquire(batch.size());
                 dispatchBatch(batch);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -118,14 +142,31 @@ public class CommandQueueManager implements AutoCloseable {
     private void dispatchBatch(List<QueuedCommand> batch) {
         List<RaftCommand> commands = batch.stream().map(QueuedCommand::command).toList();
         try {
-            List<CommandResult> results = consensusEngine.submitBatch(commands);
+            // Pipelined: enqueue to Raft and get per-command futures WITHOUT blocking. The worker
+            // returns to drain the next batch immediately, keeping the Raft pipeline full instead
+            // of one batch at a time. Each Raft future is chained to the caller's resultFuture and
+            // completes asynchronously on the state-machine apply thread.
+            List<CompletableFuture<CommandResult>> raftFutures = consensusEngine.submitBatchAsync(commands);
             for (int i = 0; i < batch.size(); i++) {
-                CompletableFuture<CommandResult> future = batch.get(i).resultFuture();
-                if (future != null) {
-                    future.complete(results.get(i));
-                }
+                CompletableFuture<CommandResult> caller = batch.get(i).resultFuture();
+                // release one in-flight permit per command as it completes (success OR failure),
+                // unconditionally — even null-caller commands must release or the permit leaks.
+                raftFutures.get(i).whenComplete((result, ex) -> {
+                    inflight.release(1);
+                    if (caller == null) {
+                        return;
+                    }
+                    if (ex != null) {
+                        caller.completeExceptionally(ex);
+                    } else {
+                        caller.complete(result);
+                    }
+                });
             }
         } catch (Exception e) {
+            // submitBatchAsync only throws on enqueue failure (e.g. node.apply rejected): no futures
+            // were returned, so release all permits acquired for this batch and fail it.
+            inflight.release(batch.size());
             for (QueuedCommand task : batch) {
                 if (task.resultFuture() != null) {
                     task.resultFuture().completeExceptionally(e);
