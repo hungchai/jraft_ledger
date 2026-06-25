@@ -5,6 +5,8 @@
 **方法**: Test-Driven Development（Red → Green → Refactor）
 **框架**: JUnit 5 + Mockito + AssertJ + Testcontainers（MySQL）+ RocksDB embedded
 
+> **v0.13 變更摘要**：(1) F-015 Config Abstraction 強化 — 所有配置皆可由 `application.yml` 設定；`SpringConfigService` 27 個 legacy env → property 對照表；Controller 改注入 `ConfigService`。補齊既有 TC-F015-02/03 對 `${ENV:default}` 形式與 env override 的覆蓋。(2) Module 20 追加 TC-F015-06~07 雙層 fsync 切換測試：Raft log fsync 切換生效（`LEDGER_RAFT_LOG_FSYNC` → `RaftOptions.setSync`）、RocksDB fsync 切換生效（`LEDGER_ROCKSDB_FSYNC` → `WriteOptions.setSync`）。
+
 > **v0.18 變更摘要**：修復 snapshot-save 凍結 apply 缺陷。根因：`onSnapshotSave` 在**單一 FSM apply 執行緒**上同步串流全量 journal CF（O(journal 數)），每 600s snapshot 凍結 apply 數秒；240m soak 實測 p99→10s、TPS→0、~500 客戶端 `.get()` 逾時，對齊 600s cadence。修法：FSM 執行緒僅做亞毫秒記憶體態捕捉，重活（journal 串流＋檔案寫入＋blob 落地）以 `Utils.runInThread` 卸載至背景執行緒，FSM 立即返回續 apply，背景完成呼叫 `done.run()`。（註：先前只縮小 write lock 範圍的版本經 2.5M-journal verify soak 證實無效 —— 瓶頸是 FSM 執行緒被佔，非鎖。）新增 TC-RAFT-30/31，對應 ADR-001 §6.1 v0.6。
 
 > **v0.17 變更摘要**：(1) 修正 Raft apply 決定性缺陷 — apply 路徑內的 `Instant.now()` 與隨機 `FastIdGenerator.nextId()` 在每節點各自產生不同值，導致 Journal/JournalLine/BalanceEntry 時間戳、idempotency createdAt 與 BalanceChangeEvent eventId 跨節點分歧。改為由 leader 於提交時戳記**真實** apply time（real wall-clock），經 `RaftApplyContext` 隨 log entry 複製（`CommandSerializer` 8-byte header；jraft + Ratis + batch 路徑）；eventId 改由 `journalLineId` 決定性衍生（`"EVT-"+journalLineId`、`"EVT-ACC-"+accountId`）。注意：本修復取代先前 `deterministicNowFromRaftIndex`（合成時戳 2024-epoch+index，非真實時間）以保 createdAt 可審計。新增 Module 23（TC-DET-01~03）。(2) 同步 Module 22 文件至現行碼：SnowflakeIdGenerator 時鐘回退已（於 v3-fix）改為 spin-wait（`waitNextMillis`，永不拋錯；drift > 2s 僅記 WARN），TC-SNOW-03/04 對應。
@@ -1357,6 +1359,10 @@ TC-PROJ-12  journalLineBatch_deadlockRetriesBeforeFailing
 | TC-F015-03 | SpringConfigService fallback 到 @Value 預設值 | application.yml 不含 `kafka.bootstrap.servers` | get("kafka.bootstrap.servers", "fallback") | 返回 "fallback" |
 | TC-F015-04 | LedgerConfig 所有 System.getenv().getOrDefault() 已替換 | LedgerConfig.java | 全文 grep "System.getenv()" | 0 結果 |
 | TC-F015-05 | LedgerConfig 注入 ConfigService | LedgerConfig 類 | @Autowired(required=false) ConfigService | Spring 容器成功啟動，ConfigService 不為 null |
+| TC-F015-06 | Raft log fsync 切換生效 | yml `ledger.raft.log-fsync=true`（default）→ 改為 `false` | new RaftNodeManager(... , raftLogSync=false)；讀取 `nodeOptions.getRaftOptions().isSync()` | 回傳 `false`；log 出 `Raft log fsync (NodeOptions.setSync) = false` |
+| TC-F015-07 | RocksDB fsync 切換生效 | yml `ledger.rocksdb.fsync=true`（default）→ 改為 `false` | new RocksDBManager(path, 256, 32, false)；反射讀取 cached `WriteOptions.sync()` | 回傳 `false`；log 出 `RocksDB WriteOptions.setSync = false` |
+| TC-F015-08 | 27 個 legacy env 變數皆可被 yml 屬性覆寫 | yml 設 `ledger.rocksdb.path=/custom/data`；env 設 `LEDGER_ROCKSDB_PATH=/env/data`（Spring `Environment` yml 優先於 env） | `configService.get("LEDGER_ROCKSDB_PATH", null)` | 兩種寫法皆返回非 null，yml 設定值優先 |
+| TC-F015-09 | 非對照表 key（未在 27 個清單內）走 fallback `System.getenv` | env 設 `MY_CUSTOM_VAR=hello` | `configService.get("MY_CUSTOM_VAR", "default")` | 回傳 `"hello"`，證明 fallback 鏈未斷 |
 
 ---
 
@@ -1434,8 +1440,10 @@ Phase 8 — Projection MySQL View Layer v2【v0.6 新增】
   TC-PROJ-09~10（surrogate FK chain — consistency + no-FK tolerance）
   TC-PROJ-11~12（deadlock-safe batch ordering + bounded retry）
 
-Phase 9 — Config Abstraction【v0.10 新增】
+Phase 9 — Config Abstraction【v0.10 新增；v0.13 補強】
   TC-F015-01~05（ConfigService + SpringConfigService + LedgerConfig refactor）
+  TC-F015-06~07（雙層 fsync 切換：Raft log + RocksDB WriteOptions）
+  TC-F015-08~09（yml 屬性全覆寫 + 非對照表 env fallback）
 
 Phase 10 — Micrometer Metrics & Observability【v0.11 新增】
   TC-F016-01~10（Metrics expose + tag correctness + alert firing + histogram bucket + projection gauges）

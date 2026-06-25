@@ -54,9 +54,13 @@ public class ProjectionWriter {
     public ProjectionWriter(SqlSessionFactory sqlSessionFactory,
                             MeterRegistry meterRegistry,
                             @Value("${ledger.projection.journal.flush-interval-ms:50}") int journalFlushIntervalMs,
-                            @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer) {
+                            @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer,
+                            @Value("${ledger.snowflake.worker-id:}") String snowflakeWorkerIdRaw) {
         this.sqlSessionFactory = sqlSessionFactory;
-        this.idGenerator = SnowflakeIdGenerator.forWorker(SnowflakeIdGenerator.deriveWorkerId());
+        long workerId = snowflakeWorkerIdRaw.isBlank()
+                ? SnowflakeIdGenerator.deriveWorkerId()
+                : Long.parseLong(snowflakeWorkerIdRaw.trim());
+        this.idGenerator = SnowflakeIdGenerator.forWorker(workerId);
 
         this.journalFlushBuffer = new JournalFlushBuffer(
                 sqlSessionFactory, meterRegistry, journalFlushIntervalMs, journalMaxBuffer,

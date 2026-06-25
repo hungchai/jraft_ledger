@@ -7,6 +7,7 @@ import com.alipay.sofa.jraft.conf.Configuration;
 import com.alipay.sofa.jraft.entity.PeerId;
 import com.alipay.sofa.jraft.entity.Task;
 import com.alipay.sofa.jraft.option.NodeOptions;
+import com.alipay.sofa.jraft.option.RaftOptions;
 import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
@@ -38,6 +39,12 @@ public class RaftNodeManager implements ConsensusEngine {
 
     public RaftNodeManager(String groupId, String serverIdStr, String peerList,
                             String dataPath, LedgerRaftStateMachine stateMachine) {
+        this(groupId, serverIdStr, peerList, dataPath, stateMachine, true);
+    }
+
+    public RaftNodeManager(String groupId, String serverIdStr, String peerList,
+                            String dataPath, LedgerRaftStateMachine stateMachine,
+                            boolean raftLogSync) {
         this.groupId = groupId;
         this.serverId = new PeerId();
         this.serverId.parse(serverIdStr);
@@ -47,6 +54,13 @@ public class RaftNodeManager implements ConsensusEngine {
         stateMachine.setPendingCommands(pendingCommands);
 
         this.nodeOptions = new NodeOptions();
+        // Raft log fsync — RaftOptions.sync controls whether LogStorage fsyncs the WAL
+        // on every append. Disable ONLY for ephemeral/dev runs; production clusters MUST
+        // keep this on (default true) so a leader crash before replication is detectable
+        // via the log.
+        RaftOptions raftOptions = new RaftOptions();
+        raftOptions.setSync(raftLogSync);
+        nodeOptions.setRaftOptions(raftOptions);
         nodeOptions.setElectionTimeoutMs(3000);
         nodeOptions.setInitialConf(conf);
         nodeOptions.setDisableCli(false);
@@ -55,6 +69,7 @@ public class RaftNodeManager implements ConsensusEngine {
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
         nodeOptions.setFsm(this.stateMachine);
+        log.info("Raft log fsync (NodeOptions.setSync) = {}", raftLogSync);
     }
 
     public boolean init() {

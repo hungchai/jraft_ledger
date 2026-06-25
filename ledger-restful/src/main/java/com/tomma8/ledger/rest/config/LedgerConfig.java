@@ -123,7 +123,10 @@ public class LedgerConfig {
         // Init ledger-core hot-path timers (idempotent).
         com.tomma8.ledger.metrics.LedgerMetrics.init(meterRegistry);
         String dbPath = cs.get("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
-        RocksDBManager mgr = new RocksDBManager(dbPath);
+        int cacheMb = cs.getInt("LEDGER_ROCKSDB_CACHE_MB", 256);
+        int writeBufferMb = cs.getInt("LEDGER_ROCKSDB_WRITE_BUFFER_MB", 32);
+        boolean fsync = cs.getBool("LEDGER_ROCKSDB_FSYNC", true);
+        RocksDBManager mgr = new RocksDBManager(dbPath, cacheMb, writeBufferMb, fsync);
         try {
             mgr.open();
             log.info("RocksDB opened at {}", dbPath);
@@ -327,9 +330,10 @@ public class LedgerConfig {
 
     @Bean
     public ClusterController clusterController(NodeRole nodeRole,
+            ConfigService cs,
             MeterRegistry meterRegistry,
             @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager) {
-        return new ClusterController(nodeRole, raftNodeManager);
+        return new ClusterController(nodeRole, raftNodeManager, cs);
     }
 
     @Bean(destroyMethod = "close")
@@ -344,6 +348,7 @@ public class LedgerConfig {
         String raftPath = cs.get("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
         int raftPort    = cs.getInt("RAFT_SERVER_PORT", 28080);
         String engineRaw = cs.get("CONSENSUS_ENGINE", "jraft");
+        boolean raftLogSync = cs.getBool("LEDGER_RAFT_LOG_FSYNC", true);
         String engine   = (engineRaw == null ? "jraft" : engineRaw).toLowerCase();
 
         if (nodeId == null || peers == null) {
@@ -386,7 +391,7 @@ public class LedgerConfig {
         new File(raftPath).mkdirs(); // ensure dir exists before SOFAJRaft init
         RaftNodeManager mgr = new RaftNodeManager(
                 groupId, serverId, raftPeers.toString(),
-                raftPath, fsm);
+                raftPath, fsm, raftLogSync);
         mgr.init();
         log.info("Raft node started: {} peers={}", serverId, raftPeers);
         return mgr;
