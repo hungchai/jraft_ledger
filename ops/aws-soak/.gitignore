@@ -1,0 +1,4 @@
+# Per-run state — contains private SSH keys (key.pem), instance ids, IPs. NEVER commit.
+.aws-soak/
+# Collected k6 summaries + prometheus snapshots — large, ephemeral.
+results/
