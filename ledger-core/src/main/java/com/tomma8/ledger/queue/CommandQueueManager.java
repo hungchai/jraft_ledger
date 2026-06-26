@@ -52,7 +52,7 @@ public class CommandQueueManager implements AutoCloseable {
      * Non-blocking enqueue. Returns false when the queue is full (caller should 429).
      */
     public boolean offer(RaftCommand command) {
-        boolean accepted = queue.offer(new QueuedCommand(command, null));
+        boolean accepted = queue.offer(new QueuedCommand(command, null, System.nanoTime()));
         if (!accepted) {
             log.warn("Command queue full — backpressure triggered for requestId={}", command.requestId());
         }
@@ -64,7 +64,7 @@ public class CommandQueueManager implements AutoCloseable {
      */
     public CompletableFuture<CommandResult> submitAsync(RaftCommand command) {
         CompletableFuture<CommandResult> future = new CompletableFuture<>();
-        QueuedCommand task = new QueuedCommand(command, future);
+        QueuedCommand task = new QueuedCommand(command, future, System.nanoTime());
         boolean accepted = queue.offer(task);
         if (!accepted) {
             future.completeExceptionally(new RejectedExecutionException(
@@ -116,13 +116,19 @@ public class CommandQueueManager implements AutoCloseable {
     }
 
     private void dispatchBatch(List<QueuedCommand> batch) {
+        // lifecycle: queue-wait phase = time each command sat in the ingress queue before the
+        // single worker picked it up (grows under load when the dispatcher lags).
+        long picked = System.nanoTime();
+        for (QueuedCommand q : batch) {
+            com.tomma8.ledger.metrics.LedgerMetrics.recordQueueWait(picked - q.enqueueNanos());
+        }
         List<RaftCommand> commands = batch.stream().map(QueuedCommand::command).toList();
         try {
             List<CommandResult> results = consensusEngine.submitBatch(commands);
             for (int i = 0; i < batch.size(); i++) {
-                CompletableFuture<CommandResult> future = batch.get(i).resultFuture();
-                if (future != null) {
-                    future.complete(results.get(i));
+                CompletableFuture<CommandResult> caller = batch.get(i).resultFuture();
+                if (caller != null) {
+                    caller.complete(results.get(i));
                 }
             }
         } catch (Exception e) {
@@ -140,5 +146,5 @@ public class CommandQueueManager implements AutoCloseable {
         worker.shutdownNow();
     }
 
-    private record QueuedCommand(RaftCommand command, CompletableFuture<CommandResult> resultFuture) {}
+    private record QueuedCommand(RaftCommand command, CompletableFuture<CommandResult> resultFuture, long enqueueNanos) {}
 }
