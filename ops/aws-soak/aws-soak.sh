@@ -338,6 +338,7 @@ deploy_cluster() {
         -e KAFKA_BOOTSTRAP_SERVERS=kafka.invalid:9092 -e LEDGER_KAFKA_REQUIRED=false \
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=0 \
+        -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
         -e JAVA_OPTS='$JOPTS' \
         -v /home/$SSH_USER/ledger-data:/var/lib/ledger -v /mnt/raft:/var/lib/ledger/raft \
         ledger-node:latest >/dev/null && echo '$name launched'
