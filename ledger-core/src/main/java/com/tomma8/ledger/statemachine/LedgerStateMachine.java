@@ -73,8 +73,47 @@ public class LedgerStateMachine {
     private boolean persistAfterApply;
     private final com.tomma8.ledger.event.EmitGate emitGate = new com.tomma8.ledger.event.EmitGate();
 
+    // Hotspot batch-coalescing: during a Raft batch, persistApply accumulates into this one
+    // WriteBatch instead of doing N separate rocksDB.write() calls. Only ever touched by the
+    // single FSM-apply thread (begin → N applies → commit), so no synchronization needed.
+    // Null = single-command mode (each persistApply owns its WriteBatch — unchanged behaviour).
+    private WriteBatch pendingBatch;
+
     public com.tomma8.ledger.event.EmitGate getEmitGate() {
         return emitGate;
+    }
+
+    /**
+     * Start accumulating the next applies into one shared WriteBatch (called by applyBatch on the
+     * FSM thread). No-op if RocksDB isn't wired (tests / standalone). The in-memory stores still
+     * update per command, so each command's running balance / before-after / accountSeq stay exact;
+     * only the persistence is coalesced. The hotspot balance row's intermediate values collapse to
+     * last-value-wins inside the single WriteBatch.
+     */
+    public void beginBatch() {
+        if (rocksDB == null) return;
+        pendingBatch = new WriteBatch();
+    }
+
+    /** Flush the accumulated batch in one rocksDB.write() and close it. No-op if no pending batch. */
+    public void commitBatch() {
+        if (pendingBatch == null) return;
+        try {
+            rocksDB.write(pendingBatch);
+        } catch (Exception e) {
+            log.error("RocksDB batch write failed", e);
+            throw new IllegalStateException("RocksDB batch write failed", e);
+        } finally {
+            pendingBatch.close();
+            pendingBatch = null;
+        }
+    }
+
+    /** Discard the accumulated batch without writing (error path). Frees native memory. */
+    public void abortBatch() {
+        if (pendingBatch == null) return;
+        pendingBatch.close();
+        pendingBatch = null;
     }
 
     public void setOutboxStore(com.tomma8.ledger.rocksdb.OutboxStore outboxStore) {
@@ -106,54 +145,72 @@ public class LedgerStateMachine {
                               List<BalanceChangeEvent> outboxEvents) {
         if (rocksDB == null) return;
         long t0 = System.nanoTime();
-        // WriteBatch holds native memory (librocksdb WriteBatch handler). Must close
-        // deterministically — leaking it under sustained write causes native-heap
-        // growth and eventually corrupted handle reads (the SIGBUS pattern in
-        // hs_err_pid_*.log: GetColumnFamilyIdAndTimestampSize dereferences a freed
-        // ColumnFamilyHandle because the native heap backed it was overwritten).
+        // Batch mode (inside applyBatch): accumulate puts into the shared WriteBatch and let
+        // commitBatch() do the single rocksDB.write(). Single mode: own a WriteBatch and write now.
+        // WriteBatch holds native memory (librocksdb handle) — must be closed deterministically;
+        // the shared one is closed by commitBatch/abortBatch, the local one by try-with-resources.
+        if (pendingBatch != null) {
+            try {
+                addApplyToBatch(pendingBatch, journal, balanceUpdates, requestId, journalId, idempotencyCreatedAtMillis, outboxEvents);
+            } catch (Exception e) {
+                log.error("RocksDB batch-accumulate failed for journalId={}", journal.journalId(), e);
+                throw new IllegalStateException("RocksDB batch-accumulate failed for journalId=" + journal.journalId(), e);
+            } finally {
+                com.tomma8.ledger.metrics.LedgerMetrics.recordApplyPersist(System.nanoTime() - t0);
+            }
+            return;
+        }
         try (WriteBatch batch = new WriteBatch()) {
-            byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
-            batch.put(rocksDB.getHandle("journal"),
-                    journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
-            for (var line : journal.lines()) {
-                byte[] lineBytes = objectMapper.writeValueAsBytes(line);
-                String lineKey = line.journalId() + "#" + line.journalLineId();
-                batch.put(rocksDB.getHandle("journal_line"),
-                        lineKey.getBytes(StandardCharsets.UTF_8), lineBytes);
-            }
-            for (var entry : balanceUpdates.entrySet()) {
-                AccountBalanceKey key = entry.getKey();
-                String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
-                byte[] balanceBytes = objectMapper.writeValueAsBytes(entry.getValue());
-                batch.put(rocksDB.getHandle("balance"),
-                        keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
-            }
-            // idempotencyCreatedAtMillis = leader-stamped apply time (ctx.applyTimeMillis),
-            // so the idempotency entry is identical across nodes.
-            IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId, idempotencyCreatedAtMillis);
-            byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
-            batch.put(rocksDB.getHandle("idempotency"),
-                    requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
-            // Write outbox envelope inside same WriteBatch for atomicity.
-            // One CF_OUTBOX entry per journal (not per line), keyed by journalId.
-            // Gated by emitGate: skip when this node won't publish (follower / init phase).
-            // Skipping avoids unbounded CF_OUTBOX growth on followers — the journal itself
-            // is the source of truth and is replicated via Raft.
-            if (emitGate.isEnabled() && !outboxEvents.isEmpty()) {
-                com.tomma8.ledger.domain.event.JournalEventEnvelope env =
-                        new com.tomma8.ledger.domain.event.JournalEventEnvelope(
-                                com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
-                                journal.journalId(), outboxEvents);
-                byte[] envValue = objectMapper.writeValueAsBytes(env);
-                String envKey = "outbox:journal:" + journal.journalId();
-                batch.put(rocksDB.getHandle("outbox"), envKey.getBytes(StandardCharsets.UTF_8), envValue);
-            }
+            addApplyToBatch(batch, journal, balanceUpdates, requestId, journalId, idempotencyCreatedAtMillis, outboxEvents);
             rocksDB.write(batch);
         } catch (Exception e) {
             log.error("RocksDB write failed for journalId={}", journal.journalId(), e);
             throw new IllegalStateException("RocksDB write failed for journalId=" + journal.journalId(), e);
         } finally {
             com.tomma8.ledger.metrics.LedgerMetrics.recordApplyPersist(System.nanoTime() - t0);
+        }
+    }
+
+    /** Add one command's journal + lines + balance rows + idempotency + outbox puts to a WriteBatch. */
+    private void addApplyToBatch(WriteBatch batch, Journal journal, Map<AccountBalanceKey, BalanceEntry> balanceUpdates,
+                                 String requestId, String journalId, long idempotencyCreatedAtMillis,
+                                 List<BalanceChangeEvent> outboxEvents) throws Exception {
+        byte[] journalBytes = objectMapper.writeValueAsBytes(journal);
+        batch.put(rocksDB.getHandle("journal"),
+                journal.journalId().getBytes(StandardCharsets.UTF_8), journalBytes);
+        for (var line : journal.lines()) {
+            byte[] lineBytes = objectMapper.writeValueAsBytes(line);
+            String lineKey = line.journalId() + "#" + line.journalLineId();
+            batch.put(rocksDB.getHandle("journal_line"),
+                    lineKey.getBytes(StandardCharsets.UTF_8), lineBytes);
+        }
+        for (var entry : balanceUpdates.entrySet()) {
+            AccountBalanceKey key = entry.getKey();
+            String keyStr = key.accountId() + "#" + key.balanceType() + "#" + key.position() + "#" + key.currency();
+            byte[] balanceBytes = objectMapper.writeValueAsBytes(entry.getValue());
+            // In batch mode the same hotspot balance key may be put by several commands; RocksDB
+            // WriteBatch is last-value-wins on the single write(), so the final balance row wins —
+            // the intermediate rows are redundant (their audit trail lives in journal_lines).
+            batch.put(rocksDB.getHandle("balance"),
+                    keyStr.getBytes(StandardCharsets.UTF_8), balanceBytes);
+        }
+        // idempotencyCreatedAtMillis = leader-stamped apply time (ctx.applyTimeMillis),
+        // so the idempotency entry is identical across nodes.
+        IdempotencyEntry idempotencyEntry = new IdempotencyEntry(requestId, journalId, idempotencyCreatedAtMillis);
+        byte[] idempotencyBytes = objectMapper.writeValueAsBytes(idempotencyEntry);
+        batch.put(rocksDB.getHandle("idempotency"),
+                requestId.getBytes(StandardCharsets.UTF_8), idempotencyBytes);
+        // Outbox envelope in the same batch for atomicity. One entry per journal, keyed by journalId
+        // (unique per command), so batching multiple commands does NOT collide these.
+        // Gated by emitGate: skip when this node won't publish (follower / init phase).
+        if (emitGate.isEnabled() && !outboxEvents.isEmpty()) {
+            com.tomma8.ledger.domain.event.JournalEventEnvelope env =
+                    new com.tomma8.ledger.domain.event.JournalEventEnvelope(
+                            com.tomma8.ledger.domain.event.JournalEventEnvelope.TYPE,
+                            journal.journalId(), outboxEvents);
+            byte[] envValue = objectMapper.writeValueAsBytes(env);
+            String envKey = "outbox:journal:" + journal.journalId();
+            batch.put(rocksDB.getHandle("outbox"), envKey.getBytes(StandardCharsets.UTF_8), envValue);
         }
     }
 
