@@ -231,16 +231,43 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     private void applyBatch(BatchRaftCommand batch, long index, long applyTimeMillis, Closure done, long tStart) {
         var commands = batch.commands();
         com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
+
+        // Hotspot batch-coalescing: persist all commands in this Raft entry with ONE rocksDB.write()
+        // instead of N. Each command still mutates the in-memory stores per-command (running balance,
+        // before/after, accountSeq stay exact); only persistence is coalesced. Futures complete AFTER
+        // the single durable write — same ack-after-persist ordering as the single-command path.
+        // Rejected commands return before persistApply, so they never enter the shared batch.
+        ledgerStateMachine.beginBatch();
+        CommandResult[] results = new CommandResult[commands.size()];
+        try {
+            for (int i = 0; i < commands.size(); i++) {
+                RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i, applyTimeMillis);
+                results[i] = executeCommand(commands.get(i), ctx);
+            }
+            ledgerStateMachine.commitBatch();   // single durable write for the whole batch
+        } catch (RuntimeException e) {
+            // A persist/commit failure is catastrophic (disk). Drop the accumulated batch; the Raft
+            // log (already fsync'd pre-apply) is the durable source — recovery replays it on restart.
+            ledgerStateMachine.abortBatch();
+            for (RaftCommand sub : commands) {
+                if (pendingCommands != null) {
+                    var f = pendingCommands.remove(sub.requestId());
+                    if (f != null) f.completeExceptionally(e);
+                }
+            }
+            long tEnd = System.nanoTime();
+            com.tomma8.ledger.metrics.LedgerMetrics.recordApplyTotal(tEnd - tStart);
+            if (done != null) done.run(new Status(RaftError.ESTATEMACHINE, "batch persist failed: " + e.getMessage()));
+            return;
+        }
+
         boolean allOk = true;
         for (int i = 0; i < commands.size(); i++) {
-            RaftCommand sub = commands.get(i);
-            RaftApplyContext ctx = RaftApplyContext.batchEntry(index, i, applyTimeMillis);
-            CommandResult result = executeCommand(sub, ctx);
             if (pendingCommands != null) {
-                var future = pendingCommands.remove(sub.requestId());
-                if (future != null) future.complete(result);
+                var future = pendingCommands.remove(commands.get(i).requestId());
+                if (future != null) future.complete(results[i]);
             }
-            if (!result.isCompleted()) {
+            if (!results[i].isCompleted()) {
                 allOk = false;
             }
         }
