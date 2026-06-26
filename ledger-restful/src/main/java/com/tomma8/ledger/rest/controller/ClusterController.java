@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.controller;
 
+import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.raft.NodeRole;
 import org.springframework.http.ResponseEntity;
@@ -18,11 +19,13 @@ public class ClusterController {
 
     private final NodeRole nodeRole;
     private final String nodeId;
+    private final ConfigService configService;
     private final ConsensusEngine raftNodeManager;
 
-    public ClusterController(NodeRole nodeRole, ConsensusEngine raftNodeManager) {
+    public ClusterController(NodeRole nodeRole, ConsensusEngine raftNodeManager, ConfigService configService) {
         this.nodeRole = nodeRole;
-        this.nodeId = System.getenv().getOrDefault("NODE_ID", "standalone");
+        this.configService = configService;
+        this.nodeId = configService.get("NODE_ID", "standalone");
         this.raftNodeManager = raftNodeManager;
     }
 
@@ -44,7 +47,7 @@ public class ClusterController {
 
     @GetMapping("/nodes")
     public ResponseEntity<?> nodes() {
-        String peers = System.getenv("PEER_NODES");
+        String peers = configService.get("PEER_NODES", null);
         List<String> peerList = peers != null
                 ? Arrays.asList(peers.split(","))
                 : List.of(nodeId + ":8080");
@@ -83,7 +86,7 @@ public class ClusterController {
         status.put("smBalanceCount", smBalanceCount);
         status.put("smConfigCount", smConfigCount);
 
-        String peersEnv = System.getenv("PEER_NODES");
+        String peersEnv = configService.get("PEER_NODES", null);
         List<String> peers = peersEnv != null
                 ? Arrays.asList(peersEnv.split(","))
                 : List.of(nodeId + ":28080");

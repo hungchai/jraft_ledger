@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.controller;
 
+import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.model.LedgerErrorCode;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import org.springframework.http.ResponseEntity;
@@ -8,7 +9,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/raft")
@@ -16,10 +16,17 @@ public class RaftLeaderController {
 
     private final ConsensusEngine raftNodeManager;
     private final String nodeId;
+    private final ConfigService configService;
+    private final int serverPort;
 
-    public RaftLeaderController(@org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager) {
+    public RaftLeaderController(
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            ConfigService configService,
+            @org.springframework.beans.factory.annotation.Value("${server.port:8080}") int serverPort) {
         this.raftNodeManager = raftNodeManager;
-        this.nodeId = System.getenv().getOrDefault("NODE_ID", "standalone");
+        this.configService = configService;
+        this.nodeId = configService.get("NODE_ID", "standalone");
+        this.serverPort = serverPort;
     }
 
     @GetMapping("/leader")
@@ -31,11 +38,10 @@ public class RaftLeaderController {
             body.put("leaderHint", raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown");
             return ResponseEntity.status(503).body(body);
         }
-        String advertiseUrl = System.getenv("LEDGER_ADVERTISE_URL");
+        String advertiseUrl = configService.get("LEDGER_ADVERTISE_URL", "");
         if (advertiseUrl == null || advertiseUrl.isBlank()) {
-            String host = System.getenv().getOrDefault("HOSTNAME", nodeId);
-            int port = Integer.parseInt(System.getenv().getOrDefault("SERVER_PORT", "8080"));
-            advertiseUrl = "http://" + host + ":" + port;
+            String host = configService.get("HOSTNAME", nodeId);
+            advertiseUrl = "http://" + host + ":" + serverPort;
         }
         var body = new HashMap<String, Object>();
         body.put("leader", advertiseUrl);

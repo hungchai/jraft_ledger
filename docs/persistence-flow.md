@@ -194,3 +194,40 @@
       │
       ▼
   New writes persist via takeSnapshot() after each apply
+
+
+═════════════════════════════════════════════════════════════════════════════
+                  DUAL-LAYER FSYNC POLICY (v0.13)
+═════════════════════════════════════════════════════════════════════════════
+
+寫路徑有兩個 fsync 邊界，持久性邊界如下：
+
+  ┌──────────────┐  fsync=true (必)   ┌─────────────────────────┐  fsync=true/false (可調)  ┌──────────────┐
+  │  Raft Log    │ ────────────────► │  Apply → WriteBatch      │ ─────────────────────────► │   RocksDB    │
+  │  LogStorage  │                   │  (LedgerStateMachine)    │                          │   (CFs)      │
+  │  WAL         │                   │                          │                          │              │
+  └──────────────┘                   └─────────────────────────┘                          └──────────────┘
+   ▲ commit safety floor              ▲ in-memory commit                  ▲ replay-able cache
+   不可關閉                            不可逆                              可關閉（見前提）
+
+• **Raft Log WAL fsync**（`ledger.raft.log-fsync`，預設 true）
+    - 對應 SOFAJRaft `LogStorage` 在每次 append 後 `fsync()`，由 `RaftNodeManager` 建構子 `raftLogSync` 參數注入，呼叫鏈 `RaftOptions.setSync()` → `nodeOptions.setRaftOptions()`。
+    - 這是 Raft safety 的 floor：leader 必須等到本地 WAL fsync 才回 ack follower，否則 leader crash 在 replication 之前會遺失「已被 leader 接受」的 entry，違反 Raft 的 Election Safety / Log Matching。
+    - **生產環境不可關閉。**
+
+• **RocksDB fsync**（`ledger.rocksdb.fsync`，預設 true）
+    - 對應 `RocksDBManager` 在 `open()` 內 cached `WriteOptions.setSync(fsync)`；apply 寫入所有 CF（Journal / JournalLine / Balance / Outbox / Idempotency / AccountMeta）共用同一 WriteOptions。
+    - 可關閉的前提：
+        1. Raft log fsync 必須保持 `true`（commit 路徑的權威記錄在 Raft WAL）
+        2. 節點 crash 後可透過 Raft log replay 重生 RocksDB（apply 是決定性的，由 leader 提交的真實 apply time + 衍生 ID 保證 replay 結果一致）
+        3. 接受「單節點 crash 在 Raft commit 後、RocksDB flush 前」遺失該節點尚未 flush 的 journal（其他節點仍服務；該節點重啟後 replay 追上）
+    - 關閉效益：每筆 WriteBatch 省一次 fsync（典型 SSD 1–10ms），吞吐顯著提升。
+    - docker-compose 三節點預設：RocksDB fsync=`false`、Raft log fsync=`true`（吞吐導向，3-replica quorum 保障）。
+    - 單節點 / 非 production / 對審計嚴格場景：保持 `true`。
+
+• **Prometheus 監控指標**（建議加）：`ledger_storage_fsync_enabled{r层="raft|rocksdb"}`（Gauge），變更時告警；`rocksdb_write_stall` / `rocksdb_compaction_pending` 在 fsync 關閉時需更密切觀察。
+
+• **總結**：
+    - Raft log fsync 為 commit safety floor → 必開
+    - RocksDB fsync 為可選層 → 在 Raft log 為權威時可關閉換 throughput
+    - 兩者**不可同時關閉**（否則 crash 將永久遺失 in-flight journal）

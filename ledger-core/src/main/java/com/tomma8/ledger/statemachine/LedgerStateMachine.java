@@ -447,11 +447,6 @@ public class LedgerStateMachine {
         }
     }
 
-    private static int parseIntEnv(String k, int def) {
-        try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
-        catch (Exception e) { return def; }
-    }
-
     /** Read a journal straight from RocksDB (the durable, authoritative on-node
      *  store). No heap cache — RocksDB's own bounded block cache serves hot blocks,
      *  so a second heap copy would only double-cache and risk unbounded growth.

@@ -15,6 +15,9 @@ public class RocksDBManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RocksDBManager.class);
 
     private final String dbPath;
+    private final int cacheMb;
+    private final int writeBufferMb;
+    private final boolean fsync;
     private final DBOptions dbOptions;
     private final Map<String, ColumnFamilyHandle> columnFamilyHandles = new HashMap<>();
     private RocksDB rocksDB;
@@ -23,15 +26,21 @@ public class RocksDBManager implements AutoCloseable {
     private final List<ColumnFamilyOptions> cfOptionsList = new ArrayList<>();
 
     public RocksDBManager(String dbPath) {
+        this(dbPath, 256, 32, true);
+    }
+
+    public RocksDBManager(String dbPath, int cacheMb, int writeBufferMb) {
+        this(dbPath, cacheMb, writeBufferMb, true);
+    }
+
+    public RocksDBManager(String dbPath, int cacheMb, int writeBufferMb, boolean fsync) {
         this.dbPath = dbPath;
+        this.cacheMb = cacheMb;
+        this.writeBufferMb = writeBufferMb;
+        this.fsync = fsync;
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true);
-    }
-
-    private static int parseIntEnv(String k, int def) {
-        try { String v = System.getenv(k); return v == null ? def : Integer.parseInt(v.trim()); }
-        catch (Exception e) { return def; }
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
@@ -55,7 +64,11 @@ public class RocksDBManager implements AutoCloseable {
         // Initialize the cached WriteOptions after the JNI library is loaded —
         // constructing a WriteOptions issues a JNI call (newWriteOptions) and
         // would otherwise UnsatisfiedLinkError in <clinit>.
-        writeOptionsInstance = new WriteOptions().setSync(true);
+        // fsync=false is safe for dev / read-after-write-replay scenarios where the
+        // authoritative log is the Raft WAL (LogStorage) — RocksDB becomes a
+        // deterministic-replay cache only. Production MUST keep this true.
+        writeOptionsInstance = new WriteOptions().setSync(fsync);
+        log.info("RocksDB WriteOptions.setSync = {}", fsync);
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
 
@@ -63,8 +76,8 @@ public class RocksDBManager implements AutoCloseable {
         // Without this the block cache + index/filter blocks grow with the DB and
         // eventually trip a cgroup/host RSS OOM-kill (exit 137) — separate from the
         // JVM heap. One shared block cache caps total block-cache RSS across all CFs.
-        long cacheBytes = (long) parseIntEnv("LEDGER_ROCKSDB_CACHE_MB", 256) * 1024 * 1024;
-        long writeBufBytes = (long) parseIntEnv("LEDGER_ROCKSDB_WRITE_BUFFER_MB", 32) * 1024 * 1024;
+        long cacheBytes = (long) cacheMb * 1024 * 1024;
+        long writeBufBytes = (long) writeBufferMb * 1024 * 1024;
         this.sharedCache = new LRUCache(cacheBytes);
         BlockBasedTableConfig tableConfig = new BlockBasedTableConfig()
                 .setBlockCache(sharedCache)

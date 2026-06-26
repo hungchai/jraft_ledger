@@ -35,6 +35,8 @@ ledger:
     journal:
       flush-interval-ms: 50
       max-buffer: 4000
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:}
 
 server:
   port: 8089

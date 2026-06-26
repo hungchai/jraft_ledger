@@ -19,12 +19,29 @@ mybatis:
     map-underscore-to-camel-case: true
 
 ledger:
+  node:
+    id: ${NODE_ID:}
+    hostname: ${HOSTNAME:}
+  advertise-url: ${LEDGER_ADVERTISE_URL:}
   rocksdb:
     path: ${LEDGER_ROCKSDB_PATH:/tmp/ledger/rocksdb}
+    cache-mb: ${LEDGER_ROCKSDB_CACHE_MB:256}
+    write-buffer-mb: ${LEDGER_ROCKSDB_WRITE_BUFFER_MB:32}
+    # fsync=true (default; production). Each RocksDB write flushes to disk.
+    # fsync=false is ONLY safe when the Raft log (LogStorage) is the durable record
+    # and RocksDB is treated as a deterministic-replay cache. Disabling is faster but
+    # a crash between Raft commit and RocksDB write loses the in-flight journal.
+    fsync: ${LEDGER_ROCKSDB_FSYNC:true}
   raft:
     group-id: ledger-group-1
     data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}
     server-port: ${RAFT_SERVER_PORT:28080}
+    peers: ${PEER_NODES:}
+    engine: ${CONSENSUS_ENGINE:jraft}
+    # fsync=true (default; production). SOFAJRaft LogStorage fsyncs the WAL on every
+    # append. Disable ONLY for ephemeral/dev runs; production clusters MUST keep this on
+    # so a leader crash before replication is detectable via the log.
+    log-fsync: ${LEDGER_RAFT_LOG_FSYNC:true}
   kafka:
     # required=false (default; dev/local): if Kafka is unreachable at startup the node degrades to
     # no-Kafka mode (writes + live reads still work; projection not produced). Production overrides this
@@ -40,8 +57,13 @@ ledger:
     max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
     batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
     batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
+  posting:
+    max-inflight: ${LEDGER_MAX_INFLIGHT_POSTINGS:256}
+    inflight-acquire-ms: ${LEDGER_INFLIGHT_ACQUIRE_MS:100}
   idempotency:
     ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:}
 
 outbox:
   poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}

@@ -401,6 +401,76 @@ nodeOptions.setSnapshotIntervalSecs(1800); // 30 min
 
 ---
 
+## 4. 效能調校（Performance Tuning）
+
+### 4.1 雙層 fsync 開關 [v0.13]
+
+Ledger 寫路徑有兩個 fsync 邊界，可獨立切換以調整吞吐與持久性：
+
+| 開關 | yml 鍵 | Env | 預設 | 影響層 |
+|------|--------|-----|------|--------|
+| Raft log fsync | `ledger.raft.log-fsync` | `LEDGER_RAFT_LOG_FSYNC` | `true` | SOFAJRaft `LogStorage` WAL：每筆 append fsync |
+| RocksDB fsync  | `ledger.rocksdb.fsync`  | `LEDGER_ROCKSDB_FSYNC`  | `true` | RocksDB `WriteOptions.setSync()`：每筆 batch fsync |
+
+#### 4.1.1 何時可關閉 RocksDB fsync
+
+**可關閉**（`ledger.rocksdb.fsync=false`）的前提，三者**全部**滿足：
+
+1. Raft log fsync 保持 `true`（commit 路徑的權威記錄在 Raft WAL）
+2. 集群 ≥ 3 節點（quorum 容忍單節點 crash）
+3. 接受單節點 crash 在 Raft commit 後、RocksDB flush 前遺失該節點尚未 flush 的 journal（其他節點仍服務；重啟後該節點 replay 追上）
+
+**不可關閉 Raft log fsync**：關閉會違反 Raft safety（leader crash 在 replication 之前 → 遺失「已被 leader 接受」的 entry）。
+
+#### 4.1.2 Trade-off
+
+| 模式 | 單節點寫入延遲 | 節點 crash 後 RPO | 適用場景 |
+|------|---------------|-------------------|----------|
+| 兩層皆開 | +1× fsync（~1–10ms SSD） | 0（雙層保護） | 單節點 / 嚴格審計 / 對延遲不敏感 |
+| 僅關 RocksDB fsync（推薦 3-node 集群） | −1× fsync | 單節點可能遺失 in-flight journal（集群整體 RPO=0） | 3-replica 高吞吐生產 |
+| 兩層皆關 | −2× fsync | 永久遺失 in-flight journal | **禁止** |
+
+#### 4.1.3 切換操作
+
+```bash
+# 1. 確認現值（讀 Prometheus / log）
+kubectl exec -it ledger-node-1 -- curl -s localhost:8080/actuator/configprops | jq '.ledger.rocksdb.fsync'
+
+# 2. 滾動修改（先 follower，後 leader；每次 1 節點）
+# 修改 application.yml 或 ConfigMap：
+#   ledger.rocksdb.fsync: false
+#   ledger.raft.log-fsync: true
+kubectl rollout restart deployment/ledger-node-2
+# 等待 Raft 同步追上、apply queue 清空、Prometheus 指標穩定，再換下一節點
+
+# 3. 切換完成後驗證 log 訊息：
+#   "Raft log fsync (NodeOptions.setSync) = true"
+#   "RocksDB WriteOptions.setSync = false"
+```
+
+#### 4.1.4 監控指標（必須配置）
+
+| 指標 | 類型 | 說明 | Alert 建議 |
+|------|------|------|-----------|
+| `ledger_storage_fsync_enabled{layer="raft"}` | Gauge | Raft log fsync 當前狀態（0/1） | `!= 1` 立即告警（P0） |
+| `ledger_storage_fsync_enabled{layer="rocksdb"}` | Gauge | RocksDB fsync 當前狀態（0/1） | 配置變更時告警 |
+| `rocksdb_write_stall` | Counter | RocksDB write stall 次數 | 任何增加（fsync 關閉後更易觸發） |
+| `rocksdb_compaction_pending` | Gauge | 待處理 compaction | >5 |
+| `ledger_posting_p99_ms` | Timer | Posting P99 延遲 | 切換後對照基線，應顯著下降 |
+
+> 變更 fsync 設定**必須**同步更新 Grafana Dashboard 註解與 runbook（本節為唯一來源）。
+
+#### 4.1.5 警告
+
+- **不要同時關閉兩個 fsync** — 將永久遺失 in-flight journal，破壞持久性。
+- **不要在 leader 上首個切換** — 應先在 follower 驗證，再切換 leader，避免叢集震盪期間出現 quorum 風險。
+- **切換前快照** — 確保 `ledger_raft_last_snapshot_timestamp_seconds` < 1800，否則 crash 後 replay 時間可能超過 SLO。
+- **單節點部署** — 必須保持 RocksDB fsync `true`，否則 crash 將永久遺失未 flush 的 journal。
+
+---
+
+---
+
 ## Appendix: Key Metrics Reference
 
 | Metric | Description | Alert Threshold |

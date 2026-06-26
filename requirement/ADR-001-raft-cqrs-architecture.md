@@ -389,6 +389,24 @@ Leader 宕機 → Raft 自動選舉新 Leader
 - 每筆 journal_line 以 WAL 形式寫入，確保宕機可 replay
 - 定期做 State Machine Snapshot，防止 Raft Log 無限增長
 
+#### 雙層 fsync 策略 [v0.13 新增]
+
+寫路徑有兩個 fsync 邊界，明確分層：
+
+| 層 | yml 鍵 | 預設 | 角色 | 為何 |
+|---|---|---|---|---|
+| Raft Log WAL | `ledger.raft.log-fsync` | `true` | Commit safety floor | Leader 必須 fsync 後才回 ack follower；關閉將違反 Raft safety |
+| RocksDB WriteBatch | `ledger.rocksdb.fsync` | `true` | Replay-able cache | 在 Raft log 為權威時可關閉換 throughput |
+
+**前提**（`ledger.rocksdb.fsync=false` 必須同時滿足）：
+1. Raft log fsync 保持 `true`
+2. 節點 crash 後可從 Raft log replay 重生 RocksDB（apply 為決定性，leader 真實 apply time + 衍生 ID）
+3. 接受單節點 crash 在 Raft commit 後、RocksDB flush 前遺失該節點尚未 flush 的 journal（其他節點仍服務；重啟後 replay 追上）
+
+**不可同時關閉**兩個 fsync —— 將永久遺失 in-flight journal，破壞持久性。
+
+詳細 trade-off、Prometheus 監控指標、操作建議見 `docs/OPERATIONS-RUNBOOK.md` 效能調校段；圖解見 `docs/persistence-flow.md` DUAL-LAYER FSYNC POLICY。
+
 #### Snapshot 非阻塞 apply [v0.6 更新]
 
 **根因**：`onSnapshotSave` 由 JRaft 在**單一 FSM apply 執行緒**（與 `onApply` 同一條 Disruptor 執行緒）上呼叫。任何在其中**同步**完成的重活，會在整個執行期間阻塞 apply。舊版在此同步串流全量 journal CF（O(journal 數)），每 600s snapshot 凍結 apply 數秒（隨狀態增大惡化）。240m soak 實測 p99→10s、TPS→0、~500 客戶端 `.get()` 逾時，全部對齊 600s cadence。

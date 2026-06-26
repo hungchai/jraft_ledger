@@ -25,6 +25,7 @@
 | 版本 | 日期 | 修訂內容 | 修訂人 |
 |---|---|---|---|
 | v0.1 | 2026-05-16 | 初稿 | Ledger Platform Team |
+| v0.13 | 2026-06-25 | F-015 Config Abstraction 強化（一）所有配置皆可由 `application.yml` 設定：`SpringConfigService` 新增 27 個 legacy env → property 對照表（`NODE_ID`→`ledger.node.id`、`PEER_NODES`→`ledger.raft.peers`、`LEDGER_ROCKSDB_PATH`→`ledger.rocksdb.path` 等），Spring `Environment` 同時接受 yml 屬性與 env 變數（標準 property resolution），兩種寫法皆可。`application.yml` 擴充包含 `ledger.node.{id,hostname}`、`ledger.advertise-url`、`ledger.rocksdb.{path,cache-mb,write-buffer-mb,fsync}`、`ledger.raft.{group-id,data-path,server-port,peers,engine,log-fsync}`、`ledger.kafka.{required,bootstrap-servers,topics.*}`、`ledger.command-queue.*`、`ledger.posting.*`、`ledger.idempotency.ttl`、`ledger.snowflake.worker-id`、`outbox.{poll-interval-secs,batch-size}`、`server.port`，所有 key 預設帶 `${ENV:default}` 形式；`ClusterController` 與 `RaftLeaderController` 改注入 `ConfigService` 不再直接 `System.getenv()`；`RocksDBManager` 建構子新增 `cacheMb` / `writeBufferMb` / `fsync` 參數由 `LedgerConfig` 注入。（二）雙層 fsync 開關：新增 `ledger.raft.log-fsync`（`LEDGER_RAFT_LOG_FSYNC`，預設 true，Raft log WAL 必 fsync 為 commit safety floor）與 `ledger.rocksdb.fsync`（`LEDGER_ROCKSDB_FSYNC`，預設 true）；`RaftNodeManager` 新增 `raftLogSync` 建構子參數（`RaftOptions.setSync()` → `nodeOptions.setRaftOptions()`，`NodeOptions` 本身無 `setSync`）；`RocksDBManager.WriteOptions.setSync(fsync)`；docker-compose 三節點預設 `LEDGER_ROCKSDB_FSYNC=false` + `LEDGER_RAFT_LOG_FSYNC=true`。`SpringConfigServiceTest` 5 個 unit test 通過；TDD Module 20 追加 TC-F015-06~07 fsync 切換案例 | Ledger Platform Team |
 | v0.17 | 2026-06-21 | ADR-001 State Machine 決定性修復：apply() 路徑內 `Instant.now()` 與隨機 `FastIdGenerator.nextId()` 在每節點獨立執行造成跨節點分歧（Journal/JournalLine/BalanceEntry 時間戳、idempotency createdAt、BalanceChangeEvent eventId）。改為 leader 提交時戳記**真實** apply time（real wall-clock），經 `RaftApplyContext` + `CommandSerializer` 8-byte header 隨 log entry 複製（jraft + Ratis + batch 路徑），取代先前合成時戳 `deterministicNowFromRaftIndex`（2024-epoch+index，非真實時間）以保 createdAt 可審計；eventId 改由 `journalLineId` 決定性衍生（`"EVT-"+journalLineId`、`"EVT-ACC-"+accountId`）。（SnowflakeIdGenerator 時鐘回退已於 v3-fix 改為 spin-wait／永不拋錯，非本次變更。）對應 TDD Module 22 同步 + Module 23（TC-DET-01~03） | Ledger Platform Team |
 | v0.2 | 2026-05-22 | ADR-001 2.2 節：新增 sofa-common-tools 版本相容性說明（解決 Spring Boot 3.4.4 + SOFAJRaft 1.3.15 的 logback 衝突） | Ledger Platform Team |
 | v0.3 | 2026-05-23 | F-002/F-005/F-008：新增 `position` 欄位（CURRENT/LOCKED/FROZEN）支持餘額位置追蹤；AccountBalanceKey 擴展為 (accountId, balanceType, position, currency)；新增驗證規則 V-13 | Ledger Platform Team |
@@ -4624,11 +4625,11 @@ long successCount = futures.stream()
 
 # F-015 Config Abstraction — 配置抽象層
 
-**文件版本**: v0.1  
+**文件版本**: v0.13  
 **功能**: F-015 Config Abstraction（配置抽象層）  
 **系統**: Next-Gen Internal Ledger Platform  
-**狀態**: Draft for Review  
-**日期**: 2026-05-31  
+**狀態**: Draft for Review
+**日期**: 2026-06-25
 **依賴**: F-008 State Machine、F-011 Kafka Outbox、ADR-001
 
 ---
@@ -4694,17 +4695,33 @@ public class SpringConfigService implements ConfigService {
 
 ## 3. 受影響的 Bean
 
-| Bean | 配置項 | 預設值 |
+| Bean | 配置項（yml / property） | 預設值 |
 |------|--------|--------|
 | `rocksDBManager` | `ledger.rocksdb.path` | `/tmp/ledger/rocksdb` |
-| `kafkaEventPublisher` | `kafka.bootstrap.servers` | `localhost:9092` |
-| `asyncOutboxPublisher` | `outbox.poll.interval.secs` | `10` |
-| `asyncOutboxPublisher` | `outbox.batch.size` | `100` |
-| `raftNodeManager` | `ledger.raft.data.path` | `/tmp/ledger/raft` |
-| `raftNodeManager` | `raft.server.port` | `28080` |
-| `nodeRole` | `NODE_ID`（直接讀取，無預設） | — |
+| `rocksDBManager` | `ledger.rocksdb.cache-mb` | `256` |
+| `rocksDBManager` | `ledger.rocksdb.write-buffer-mb` | `32` |
+| `rocksDBManager` | `ledger.rocksdb.fsync`（`LEDGER_ROCKSDB_FSYNC`，預設 true） | `true` |
+| `raftNodeManager` | `ledger.raft.data-path` | `/tmp/ledger/raft` |
+| `raftNodeManager` | `ledger.raft.server-port` | `28080` |
+| `raftNodeManager` | `ledger.raft.peers`（`PEER_NODES`，空字串表示 standalone） | — |
+| `raftNodeManager` | `ledger.raft.engine`（`CONSENSUS_ENGINE`：jraft / ratis） | `jraft` |
+| `raftNodeManager` | `ledger.raft.log-fsync`（`LEDGER_RAFT_LOG_FSYNC`，預設 true） | `true` |
+| `nodeRole` | `ledger.node.id`（`NODE_ID`，無預設；null/空 → standalone） | — |
+| `nodeRole` | `ledger.node.hostname`（`HOSTNAME`） | — |
+| `kafkaEventPublisher` | `ledger.kafka.bootstrap-servers` | `localhost:9092` |
+| `kafkaEventPublisher` | `ledger.kafka.required`（`LEDGER_KAFKA_REQUIRED`） | `false` |
+| `kafkaEventPublisher` | `ledger.kafka.topics.balance-change` | `ledger.balance.change.v1` |
+| `kafkaEventPublisher` | `ledger.kafka.topics.posting-completion` | `ledger.posting.completion.v1` |
+| `asyncOutboxPublisher` | `outbox.poll-interval-secs` | `10` |
+| `asyncOutboxPublisher` | `outbox.batch-size` | `100` |
+| `commandQueue` | `ledger.command-queue.enabled` / `max-size` / `batch-size` / `batch-wait-ms` | `true` / `50000` / `16` / `1` |
+| `postingService` | `ledger.posting.max-inflight` / `inflight-acquire-ms` | `256` / `100` |
+| `idempotencyStore` | `ledger.idempotency.ttl`（`LEDGER_IDEMPOTENCY_TTL`，Duration 字串如 `30d` / `3m`） | `30d` |
+| `snowflakeIdGenerator` | `ledger.snowflake.worker-id`（`SNOWFLAKE_WORKER_ID`） | — |
+| `ledgerServer` | `server.port`（`SERVER_PORT`） | `8080` |
+| `dataSource` | `spring.datasource.{url,username,password}` | jdbc:mysql://localhost:3306/ledger_view / ledger / ledger123 |
 
-> `NODE_ID` / `PEER_NODES` 為 Raft 啟動必要參數，維持直接 `System.getenv()` 讀取，null 表示 standalone 模式。
+> `SpringConfigService` 同時接受 yml 屬性與 legacy env 變數 — Spring `Environment.getProperty()` 對 env 變數做寬鬆匹配（`LEDGER_ROCKSDB_PATH` ↔ `ledger.rocksdb.path`），27 個對照表（見 §7）僅針對非標準命名（`NODE_ID` / `PEER_NODES` / `CONSENSUS_ENGINE` / `HOSTNAME` / `KAFKA_BOOTSTRAP_SERVERS` 等）做顯式映射。
 
 ---
 
@@ -4712,17 +4729,68 @@ public class SpringConfigService implements ConfigService {
 
 ```yaml
 ledger:
+  node:
+    id: ${NODE_ID:}
+    hostname: ${HOSTNAME:}
+  advertise-url: ${LEDGER_ADVERTISE_URL:}
   rocksdb:
-    path: /tmp/ledger/rocksdb
+    path: ${LEDGER_ROCKSDB_PATH:/tmp/ledger/rocksdb}
+    cache-mb: ${LEDGER_ROCKSDB_CACHE_MB:256}
+    write-buffer-mb: ${LEDGER_ROCKSDB_WRITE_BUFFER_MB:32}
+    fsync: ${LEDGER_ROCKSDB_FSYNC:true}        # 見 §4.1 雙層 fsync
   raft:
-    data-path: /tmp/ledger/raft
-    server-port: 28080
-kafka:
-  bootstrap-servers: localhost:9092
+    group-id: ledger-group-1
+    data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}
+    server-port: ${RAFT_SERVER_PORT:28080}
+    peers: ${PEER_NODES:}
+    engine: ${CONSENSUS_ENGINE:jraft}
+    log-fsync: ${LEDGER_RAFT_LOG_FSYNC:true}   # 見 §4.1 雙層 fsync
+  kafka:
+    required: ${LEDGER_KAFKA_REQUIRED:false}
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topics:
+      balance-change: ledger.balance.change.v1
+      posting-completion: ledger.posting.completion.v1
+  command-queue:
+    enabled: ${LEDGER_COMMAND_QUEUE_ENABLED:true}
+    max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
+    batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
+    batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
+  posting:
+    max-inflight: ${LEDGER_MAX_INFLIGHT_POSTINGS:256}
+    inflight-acquire-ms: ${LEDGER_INFLIGHT_ACQUIRE_MS:100}
+  idempotency:
+    ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:}
+
 outbox:
-  poll-interval-secs: 10
-  batch-size: 100
+  poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}
+  batch-size: ${OUTBOX_BATCH_SIZE:100}
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
+    username: ${SPRING_DATASOURCE_USERNAME:ledger}
+    password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
 ```
+
+> `ledger-projection` 模組額外讀取 `ledger.snowflake.worker-id` 用於投影端 ID 派生。
+
+### 4.1 雙層 fsync 開關
+
+| yml 鍵 | Env 變數 | 預設 | 影響層 |
+|--------|---------|------|--------|
+| `ledger.raft.log-fsync` | `LEDGER_RAFT_LOG_FSYNC` | `true` | SOFAJRaft `LogStorage` WAL：每筆 append fsync |
+| `ledger.rocksdb.fsync`  | `LEDGER_ROCKSDB_FSYNC`  | `true` | RocksDB `WriteOptions.setSync()`：每筆 batch fsync |
+
+- **Raft log fsync 為 commit safety floor**：leader 必須等到本地 LogStorage WAL fsync 才回 ack follower，否則 leader crash 在 replication 之前會遺失「已被 leader 接受」的 entry → 破壞 Raft safety。**生產環境不可關閉。**
+- **RocksDB fsync 為可選層**：commit 路徑為 Raft log → apply → RocksDB WriteBatch。若 Raft log 已 fsync，RocksDB 在 crash 後可從 Raft log replay 重生；此時關閉 RocksDB fsync（`false`）可換取顯著吞吐，但須接受單節點在「Raft commit 後、RocksDB flush 前」crash 會遺失該節點尚未 flush 的 journal（其他節點仍可服務，重啟後該節點 replay 追上）。
+- **docker-compose 三節點預設**：`LEDGER_ROCKSDB_FSYNC=false` + `LEDGER_RAFT_LOG_FSYNC=true`（吞吐導向，3-replica quorum 保障）。單節點或非 production 環境建議 RocksDB fsync 也保持 `true`。
+- 詳細 trade-off、警告與監控指標見 `docs/OPERATIONS-RUNBOOK.md` §X 效能調校；ADR-001 雙層 fsync 段落詳述持久性邊界。
 
 ---
 
@@ -4747,6 +4815,11 @@ Apollo 遷移時，只需：
 | CC-03 | `LedgerConfig` 所有 `System.getenv().getOrDefault()` 替換為 `ConfigService` 注入 | 重構驗證 |
 | CC-04 | Apollo 未引入時，`SpringConfigService` 透過 Spring 標準機制讀取 `application.yml` | 整合測試 |
 | CC-05 | `mvn clean compile` + `mvn test` 全量通過 | 全量測試 |
+| CC-06 | 所有 F-015 配置項皆可由 `application.yml` 設定（27 個 legacy env 全部有對應 yml 屬性） | 整合測試 |
+| CC-07 | `ClusterController` / `RaftLeaderController` 不再直接呼叫 `System.getenv()` | 靜態掃描 |
+| CC-08 | `RaftNodeManager` 接受 `raftLogSync` 參數並透過 `RaftOptions.setSync()` 生效 | 單元測試 |
+| CC-09 | `RocksDBManager` 接受 `fsync` 參數並反映於 `WriteOptions.setSync()` | 單元測試 |
+| CC-10 | docker-compose 三節點正確讀取 `LEDGER_ROCKSDB_FSYNC` / `LEDGER_RAFT_LOG_FSYNC` | 啟動驗證 |
 
 
 ---
