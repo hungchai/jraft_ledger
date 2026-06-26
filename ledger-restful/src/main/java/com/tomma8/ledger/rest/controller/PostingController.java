@@ -12,6 +12,8 @@ import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.service.PostingService;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @RestController
 @RequestMapping("/ledger/postings")
@@ -40,6 +43,12 @@ public class PostingController {
     private final Semaphore inflight;
     private final int acquireTimeoutMs;
 
+    // Per-request lifecycle trace: when traceSampleN>0, log the phase breakdown for 1-in-N
+    // requests (admission / parse / submit→complete wait / total). Off by default (0).
+    private static final Logger log = LoggerFactory.getLogger(PostingController.class);
+    private final int traceSampleN;
+    private final AtomicLong reqSeq = new AtomicLong();
+
     public PostingController(PostingService postingService,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
                               @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
@@ -55,6 +64,7 @@ public class PostingController {
         this.meterRegistry = meterRegistry;
         int maxInflight = cs.getInt("LEDGER_MAX_INFLIGHT_POSTINGS", 256);
         this.acquireTimeoutMs = cs.getInt("LEDGER_INFLIGHT_ACQUIRE_MS", 100);
+        this.traceSampleN = cs.getInt("LEDGER_POSTING_TRACE_SAMPLE", 0);
         this.inflight = new Semaphore(maxInflight, true);
         Gauge.builder("ledger.posting.inflight.available", inflight::availablePermits)
                 .description("Available posting admission-control permits (0 = saturated, shedding)")
@@ -64,6 +74,7 @@ public class PostingController {
     @PostMapping
     public ResponseEntity<?> post(@RequestBody Map<String, Object> body) {
         long start = System.nanoTime();
+        long tAdmit = start, tParsed = start;   // lifecycle phase markers (for sampled trace)
         String outcome = "COMPLETED";
         String businessEventType = (String) body.get("businessEventType");
         try {
@@ -95,6 +106,7 @@ public class PostingController {
                 busy.put("reason", "in-flight posting limit reached — retry");
                 return ResponseEntity.status(503).header("Retry-After", "1").body(busy);
             }
+            tAdmit = System.nanoTime();   // admission acquired
             try {
             String requestId = (String) body.get("requestId");
             String businessEventRef = (String) body.get("businessEventRef");
@@ -121,6 +133,7 @@ public class PostingController {
             }).toList();
 
             PostingCommand cmd = new PostingCommand(requestId, businessEventType, businessEventRef, valueDate, legs);
+            tParsed = System.nanoTime();   // request parsed → command built
 
             CommandResult result;
             if (commandQueueManager != null) {
@@ -146,6 +159,17 @@ public class PostingController {
                 result = raftNodeManager.submit(cmd);
             } else {
                 result = postingService.post(cmd);
+            }
+
+            // sampled per-request lifecycle trace: admission / parse / submit→complete wait / total.
+            // The wait phase decomposes via the command.queue.wait + raft.wait_apply + apply.total
+            // histograms (queue backlog vs consensus vs state-machine apply).
+            if (traceSampleN > 0 && reqSeq.incrementAndGet() % traceSampleN == 0) {
+                long done = System.nanoTime();
+                log.info("posting-lifecycle requestId={} outcome={} admission_us={} parse_us={} wait_us={} total_us={}",
+                        cmd.requestId(), result.isRejected() ? "REJECTED" : "COMPLETED",
+                        (tAdmit - start) / 1000, (tParsed - tAdmit) / 1000,
+                        (done - tParsed) / 1000, (done - start) / 1000);
             }
 
             if (result.isRejected()) {

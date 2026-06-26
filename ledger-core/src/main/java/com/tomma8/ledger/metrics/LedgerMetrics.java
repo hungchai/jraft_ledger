@@ -27,6 +27,7 @@ public final class LedgerMetrics {
     private static volatile Timer applyEventBuildTimer;
     private static volatile Timer applyTotalTimer;
     private static volatile Timer rocksWriteTimer;
+    private static volatile Timer queueWaitTimer;
     private static volatile Timer raftEnqueueTimer;
     private static volatile Timer raftWaitApplyTimer;
     private static volatile Timer raftWakeupTimer;
@@ -61,6 +62,10 @@ public final class LedgerMetrics {
                 .register(reg);
         rocksWriteTimer = Timer.builder("ledger.rocksdb.write")
                 .description("RocksDB WriteBatch write (includes fsync when sync=true)")
+                .publishPercentileHistogram()
+                .register(reg);
+        queueWaitTimer = Timer.builder("ledger.command.queue.wait")
+                .description("Lifecycle: time a command waits in the ingress queue (HTTP submit → worker drain). Grows under saturation when the single dispatcher can't keep up.")
                 .publishPercentileHistogram()
                 .register(reg);
         raftEnqueueTimer = Timer.builder("ledger.raft.enqueue")
@@ -99,6 +104,9 @@ public final class LedgerMetrics {
     }
     public static void recordRocksWrite(long nanos) {
         Timer t = rocksWriteTimer; if (t != null) t.record(nanos, TimeUnit.NANOSECONDS);
+    }
+    public static void recordQueueWait(long nanos) {
+        Timer t = queueWaitTimer; if (t != null) t.record(nanos, TimeUnit.NANOSECONDS);
     }
     public static void recordRaftEnqueue(long nanos) {
         Timer t = raftEnqueueTimer; if (t != null) t.record(nanos, TimeUnit.NANOSECONDS);
