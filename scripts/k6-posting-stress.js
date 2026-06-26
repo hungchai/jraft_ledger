@@ -358,5 +358,8 @@ export default function () {
     'status is 200': (r) => r.status === 200,
     'outcome COMPLETED': (r) => r.json('status') === 'COMPLETED',
   });
-  sleep(0.05);
+  // Think-time per iteration. Default 50ms (caps each VU's rate). Set SLEEP_MS=0 to remove the
+  // cap and drive the server toward saturation (find the real TPS ceiling).
+  const sleepMs = __ENV.SLEEP_MS !== undefined ? Number(__ENV.SLEEP_MS) : 50;
+  if (sleepMs > 0) sleep(sleepMs / 1000);
 }
