@@ -32,7 +32,8 @@ for VU in $VUS_LIST; do
   read R0S R0C < <(snap ledger_raft_wait_apply)
   read A0S A0C < <(snap ledger_apply_total)
   SSH ubuntu@$LPUB "nohup mpstat 1 100 >/tmp/mp.out 2>&1 </dev/null & disown" >/dev/null
-  SSH ubuntu@$MGMT "cd ~/jraft_ledger && nohup k6 run --vus $VU --duration $DUR -e SLEEP_MS=0 -e NODES=$NODES scripts/k6-posting-stress.js >/tmp/k6-sat-$VU.log 2>&1 </dev/null & disown; sleep 2; echo ok" >/dev/null
+  # push k6 metrics to mgmt Prometheus so the Grafana "k6 Test Cycle" dashboard shows the load live
+  SSH ubuntu@$MGMT "cd ~/jraft_ledger && K6_PROMETHEUS_RW_SERVER_URL=http://localhost:9090/api/v1/write K6_PROMETHEUS_RW_TREND_STATS='p(50),p(95),p(99)' nohup k6 run --vus $VU --duration $DUR -o experimental-prometheus-rw --tag testid=sat-$VU -e SLEEP_MS=0 -e NODES=$NODES scripts/k6-posting-stress.js >/tmp/k6-sat-$VU.log 2>&1 </dev/null & disown; sleep 2; echo ok" >/dev/null
   # let it run, sample gauges mid-flight
   sleep 40
   QDEPTH=$(prom "ledger_command_queue_depth" | sort -rn | head -1)
