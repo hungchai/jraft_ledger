@@ -1,16 +1,18 @@
 package com.tomma8.ledger.raft;
 
+import com.alipay.sofa.jraft.JRaftServiceFactory;
 import com.alipay.sofa.jraft.Node;
 import com.alipay.sofa.jraft.RaftGroupService;
-import com.alipay.sofa.jraft.Status;
 import com.alipay.sofa.jraft.conf.Configuration;
 import com.alipay.sofa.jraft.entity.PeerId;
 import com.alipay.sofa.jraft.entity.Task;
 import com.alipay.sofa.jraft.option.NodeOptions;
 import com.alipay.sofa.jraft.option.RaftOptions;
+import com.alipay.sofa.jraft.storage.LogStorage;
 import com.tomma8.ledger.domain.command.BatchRaftCommand;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
+import com.tomma8.ledger.wal.ChronicleWalPruner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,18 +35,38 @@ public class RaftNodeManager implements ConsensusEngine {
 
     private RaftGroupService raftGroupService;
     private Node node;
+    private ChronicleWalPruner pruner;
+    // Strong reference to the custom LogStorage so it isn't GC'd while the
+    // JRaftServiceFactory closure holds only a weak ref. Also used to close
+    // the LogStorage on shutdown (if non-null).
+    @SuppressWarnings("unused")
+    private LogStorage customLogStorage;
 
     // Map of requestId → future, populated by submit(), completed by onApply()
     final ConcurrentHashMap<String, CompletableFuture<CommandResult>> pendingCommands = new ConcurrentHashMap<>();
 
     public RaftNodeManager(String groupId, String serverIdStr, String peerList,
                             String dataPath, LedgerRaftStateMachine stateMachine) {
-        this(groupId, serverIdStr, peerList, dataPath, stateMachine, true);
+        this(groupId, serverIdStr, peerList, dataPath, stateMachine, true, null, null);
     }
 
     public RaftNodeManager(String groupId, String serverIdStr, String peerList,
                             String dataPath, LedgerRaftStateMachine stateMachine,
                             boolean raftLogSync) {
+        this(groupId, serverIdStr, peerList, dataPath, stateMachine, raftLogSync, null, null);
+    }
+
+    /**
+     * Full constructor. {@code customLogStorage} overrides the default
+     * (SOFAJRaft built-in RocksDB-backed) LogStorage. When non-null, the
+     * Chronicle WAL is used (or whichever impl the caller passes). The pruner
+     * starts after the Raft node has initialized the custom LogStorage.
+     */
+    public RaftNodeManager(String groupId, String serverIdStr, String peerList,
+                            String dataPath, LedgerRaftStateMachine stateMachine,
+                            boolean raftLogSync,
+                            LogStorage customLogStorage,
+                            ChronicleWalPruner pruner) {
         this.groupId = groupId;
         this.serverId = new PeerId();
         this.serverId.parse(serverIdStr);
@@ -69,7 +91,36 @@ public class RaftNodeManager implements ConsensusEngine {
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
         nodeOptions.setFsm(this.stateMachine);
-        log.info("Raft log fsync (NodeOptions.setSync) = {}", raftLogSync);
+        if (customLogStorage != null) {
+            // SOFAJRaft 1.4.0 has no setLogStorage; instead install a JRaftServiceFactory
+            // that returns our custom LogStorage from createLogStorage().
+            this.customLogStorage = customLogStorage;
+            final JRaftServiceFactory defaultFactory = nodeOptions.getServiceFactory();
+            nodeOptions.setServiceFactory(new JRaftServiceFactory() {
+                @Override
+                public LogStorage createLogStorage(String uri, RaftOptions opts) {
+                    return customLogStorage;
+                }
+                @Override
+                public com.alipay.sofa.jraft.storage.RaftMetaStorage createRaftMetaStorage(String uri, RaftOptions opts) {
+                    return defaultFactory.createRaftMetaStorage(uri, opts);
+                }
+                @Override
+                public com.alipay.sofa.jraft.storage.SnapshotStorage createSnapshotStorage(com.alipay.sofa.jraft.option.NodeOptions nodeOpts) {
+                    return defaultFactory.createSnapshotStorage(nodeOpts);
+                }
+                @Override
+                public com.alipay.sofa.jraft.entity.codec.LogEntryCodecFactory createLogEntryCodecFactory() {
+                    return defaultFactory.createLogEntryCodecFactory();
+                }
+            });
+            log.info("Raft log fsync (NodeOptions.setSync) = {} — using custom LogStorage: {}",
+                    raftLogSync, customLogStorage.getClass().getSimpleName());
+        } else {
+            log.info("Raft log fsync (NodeOptions.setSync) = {} — using default (SOFAJRaft RocksDB-backed) LogStorage",
+                    raftLogSync);
+        }
+        this.pruner = pruner;
     }
 
     public boolean init() {
@@ -84,6 +135,9 @@ public class RaftNodeManager implements ConsensusEngine {
                     // Wire Node into the FSM so it can recover missing log
                     // entries via reflection (see LedgerRaftStateMachine.setNode)
                     this.stateMachine.setNode(this.node);
+                    if (this.pruner != null) {
+                        this.pruner.start();
+                    }
                     log.info("Raft node started: {}", serverId);
                     return true;
                 }
@@ -231,7 +285,10 @@ public class RaftNodeManager implements ConsensusEngine {
     public java.util.List<String> getAlivePeers() {
         if (node == null) return java.util.List.of();
         try {
-            return node.listAlivePeers().stream().map(PeerId::toString).toList();
+            return node.listAlivePeers().stream()
+                    .filter(java.util.Objects::nonNull)
+                    .map(peer -> peer.toString())
+                    .toList();
         } catch (Exception e) {
             return java.util.List.of();
         }
@@ -245,6 +302,10 @@ public class RaftNodeManager implements ConsensusEngine {
 
     @Override
     public void close() {
+        if (pruner != null) {
+            try { pruner.stop(); } catch (Exception e) { log.warn("Pruner stop error: {}", e.getMessage()); }
+            pruner = null;
+        }
         if (node != null) {
             try {
                 node.shutdown();

@@ -1,5 +1,6 @@
 package com.tomma8.ledger.rest.config;
 
+import com.alipay.sofa.jraft.storage.LogStorage;
 import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.model.BalanceTypeConfig;
 import com.tomma8.ledger.domain.model.NegativeSemantics;
@@ -23,6 +24,9 @@ import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.store.AccountMetaStore;
 import com.tomma8.ledger.store.BalanceStore;
 import com.tomma8.ledger.store.BalanceTypeConfigStore;
+import com.tomma8.ledger.wal.ChronicleLogStorageFactory;
+import com.tomma8.ledger.wal.ChronicleRaftLogStorage;
+import com.tomma8.ledger.wal.ChronicleWalPruner;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.config.MeterFilter;
@@ -30,11 +34,9 @@ import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
 import java.io.File;
 import java.time.Duration;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
@@ -44,6 +46,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
+
+import net.openhft.chronicle.bytes.SyncMode;
 
 @Configuration
 public class LedgerConfig {
@@ -115,7 +119,11 @@ public class LedgerConfig {
     public AccountMetaStore accountMetaStore() { return new AccountMetaStore(); }
 
     @Bean
-    public BalanceTypeConfigStore balanceTypeConfigStore() { return new BalanceTypeConfigStore(); }
+    public BalanceTypeConfigStore balanceTypeConfigStore() {
+        BalanceTypeConfigStore store = new BalanceTypeConfigStore();
+        registerDefaultBalanceTypes(store);
+        return store;
+    }
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
@@ -342,6 +350,7 @@ public class LedgerConfig {
             NodeRole nodeRole,
             MeterRegistry meterRegistry,
             ConfigService cs,
+            Environment env,
             @org.springframework.beans.factory.annotation.Value("${ledger.raft.group-id:ledger-group-1}") String groupId) {
         String nodeId   = cs.get("NODE_ID", null);
         String peers    = cs.get("PEER_NODES", null);
@@ -389,9 +398,41 @@ public class LedgerConfig {
 
         String serverId = nodeId + ":" + raftPort;
         new File(raftPath).mkdirs(); // ensure dir exists before SOFAJRaft init
+
+        // Chronicle WAL: optional opt-in via ledger.chronicle.enabled.
+        // Default OFF (preserves current RocksDB-backed LogStorage). When enabled,
+        // a Chronicle-backed LogStorage replaces the default; the pruner keeps disk
+        // usage bounded (see ChronicleWalPruner for the algorithm).
+        LogStorage customLogStorage = null;
+        ChronicleWalPruner pruner = null;
+        boolean chronicleEnabled = env.getProperty("ledger.chronicle.enabled", Boolean.class, false);
+        if (chronicleEnabled) {
+            try {
+                SyncMode syncMode = ChronicleLogStorageFactory.parseSyncMode(
+                        env.getProperty("ledger.chronicle.sync-mode", "SYNC"));
+                long maxBytes = env.getProperty("ledger.chronicle.max-bytes", Long.class, 10L * 1024 * 1024 * 1024);
+                long retainEntries = env.getProperty("ledger.chronicle.retain-entries", Long.class, 10_000L);
+                long pruneIntervalS = env.getProperty("ledger.chronicle.prune-interval-seconds", Long.class, 30L);
+                long pruneBudgetMs = env.getProperty("ledger.chronicle.prune-tick-budget-ms", Long.class, 5L);
+                customLogStorage = ChronicleLogStorageFactory.create(
+                        raftPath, true, syncMode,
+                        new com.alipay.sofa.jraft.option.RaftOptions(), maxBytes);
+                pruner = new ChronicleWalPruner(
+                        (ChronicleRaftLogStorage) customLogStorage,
+                        fsm::getLastAppliedIndex, retainEntries, maxBytes,
+                        pruneIntervalS * 1000L, pruneBudgetMs);
+                log.info("Chronicle WAL enabled: syncMode={} maxBytes={} retainEntries={}",
+                        syncMode, maxBytes, retainEntries);
+            } catch (Throwable t) {
+                log.error("Chronicle WAL init failed — falling back to default RocksDB-backed LogStorage", t);
+                customLogStorage = null;
+                pruner = null;
+            }
+        }
+
         RaftNodeManager mgr = new RaftNodeManager(
                 groupId, serverId, raftPeers.toString(),
-                raftPath, fsm, raftLogSync);
+                raftPath, fsm, raftLogSync, customLogStorage, pruner);
         mgr.init();
         log.info("Raft node started: {} peers={}", serverId, raftPeers);
         return mgr;
@@ -513,14 +554,9 @@ public class LedgerConfig {
             // snapshots caused followers to skip replaying log entries that fell
             // in the snapshot boundary gap, producing cross-node balance divergence.
 
-            // Register balance types
-            configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
-                    "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
-            configStore.put("TRADE_AHEAD_BALANCE", new BalanceTypeConfig(
-                    "TRADE_AHEAD_BALANCE", true, NegativeSemantics.PRE_AUTHORIZED,
-                    SignConvention.NORMAL_DEBIT, 1));
-            configStore.put("BROKERAGE_BALANCE", new BalanceTypeConfig(
-                    "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+            // Idempotent; default types are seeded during bean creation so Raft
+            // replay can apply postings before CommandLineRunner runs.
+            registerDefaultBalanceTypes(configStore);
             configService.registerType(new BalanceTypeConfig(
                     "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
             configService.registerType(new BalanceTypeConfig(
@@ -564,5 +600,15 @@ public class LedgerConfig {
             try { ledgerStateMachine.takeSnapshot(); log.info("Bootstrap snapshot saved"); }
             catch (Exception e) { log.warn("Bootstrap snapshot failed (RocksDB may not be open): {}", e.getMessage()); }
         };
+    }
+
+    private static void registerDefaultBalanceTypes(BalanceTypeConfigStore configStore) {
+        configStore.put("AVAILABLE_BALANCE", new BalanceTypeConfig(
+                "AVAILABLE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
+        configStore.put("TRADE_AHEAD_BALANCE", new BalanceTypeConfig(
+                "TRADE_AHEAD_BALANCE", true, NegativeSemantics.PRE_AUTHORIZED,
+                SignConvention.NORMAL_DEBIT, 1));
+        configStore.put("BROKERAGE_BALANCE", new BalanceTypeConfig(
+                "BROKERAGE_BALANCE", false, null, SignConvention.NORMAL_CREDIT, 1));
     }
 }

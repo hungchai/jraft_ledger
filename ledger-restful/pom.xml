@@ -44,6 +44,13 @@
             <version>2.2.2</version>
         </dependency>
 
+        <!-- Chronicle Queue — low-latency WAL for SOFAJRaft LogStorage (optional opt-in) -->
+        <dependency>
+            <groupId>net.openhft</groupId>
+            <artifactId>chronicle-queue</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -73,6 +73,13 @@
             <artifactId>kafka-clients</artifactId>
         </dependency>
 
+        <!-- Chronicle Queue (optional WAL backend) -->
+        <dependency>
+            <groupId>net.openhft</groupId>
+            <artifactId>chronicle-queue</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

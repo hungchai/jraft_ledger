@@ -65,6 +65,9 @@
 
         <!-- Misc -->
         <protobuf.version>3.25.5</protobuf.version>
+
+        <!-- Chronicle Queue (low-latency WAL replacement for SOFAJRaft LogStorage) -->
+        <chronicle.queue.version>2026.2</chronicle.queue.version>
     </properties>
 
     <dependencyManagement>
@@ -182,6 +185,13 @@
                 <version>${protobuf.version}</version>
             </dependency>
 
+            <!-- Chronicle Queue 2.x -->
+            <dependency>
+                <groupId>net.openhft</groupId>
+                <artifactId>chronicle-queue</artifactId>
+                <version>${chronicle.queue.version}</version>
+            </dependency>
+
             <!-- Test -->
             <dependency>
                 <groupId>org.assertj</groupId>
@@ -218,8 +228,14 @@
                              java.util.ArrayList.elementData, ThrowUtil → java.lang.Throwable.cause,
                              Netty → nio buffers); JDK 17+ strong encapsulation needs these add-opens. -->
                         <argLine>-XX:+EnableDynamicAgentLoading
+                            --enable-native-access=ALL-UNNAMED
+                            --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED
+                            --add-exports=java.base/sun.nio.ch=ALL-UNNAMED
+                            --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED
                             --add-opens=java.base/java.util=ALL-UNNAMED
                             --add-opens=java.base/java.lang=ALL-UNNAMED
+                            --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                            --add-opens=java.base/java.io=ALL-UNNAMED
                             --add-opens=java.base/java.nio=ALL-UNNAMED
                             --add-opens=java.base/sun.nio.ch=ALL-UNNAMED</argLine>
                     </configuration>

@@ -1,10 +1,11 @@
 #!/bin/bash
 # test-cycle.sh — Standard test procedure for ledger platform
 # Usage: ./scripts/test-cycle.sh [--vus N] [--duration M] [--no-flush] [--recon-only]
+#                                [--chronicle-wal]
 #
 # Procedure:
-#   1. Flush MySQL + RocksDB + Raft log
-#   2. Start stack (if not running)
+#   1. Flush MySQL + RocksDB + Raft log (+ Chronicle WAL when --chronicle-wal)
+#   2. Start stack (if not running) — appends docker-compose.chronicle.yml when --chronicle-wal
 #   2b. Wait for projection (health + end-to-end Kafka probe)
 #   3. Run k6 stress test
 #   4. Reconcile: balances + journals across 3 nodes API + MySQL
@@ -16,8 +17,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Compose file list — override to swap consensus engine (e.g. add docker-compose.ratis.yml).
-# Default keeps the original single-file behaviour byte-identical.
+# Default keeps the original single-file behaviour byte-identical. --chronicle-wal layers in
+# the docker-compose.chronicle.yml override so Chronicle Queue WAL is enabled per node.
+CHRONICLE_WAL=false
 COMPOSE_FILES="${COMPOSE_FILES:--f $PROJECT_DIR/docker-compose.yml}"
+if $CHRONICLE_WAL; then
+  COMPOSE_FILES="$COMPOSE_FILES -f $PROJECT_DIR/docker-compose.chronicle.yml"
+fi
 
 VUS=10
 DURATION=2m
@@ -58,7 +64,7 @@ PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
   echo "         [--proj-lag-max N] [--proj-wait-max-loops N] [--prometheus-url URL]"
-  echo "         [--no-k6-prometheus]"
+  echo "         [--no-k6-prometheus] [--chronicle-wal]"
   echo "         [--reseed] [--reseed-interval SEC] [--reseed-threshold NUM]"
   echo "         [--reseed-amount-usdt NUM] [--reseed-amount-btc NUM]"
   echo "  --vus N         Number of VUs (default: 10)"
@@ -70,6 +76,7 @@ usage() {
   echo "  --proj-wait-max-loops N  Poll iterations in each wait phase (default: 120 = 600s)"
   echo "  --prometheus-url URL  Prometheus query API (default: http://localhost:9090)"
   echo "  --no-k6-prometheus    Skip k6 experimental-prometheus-rw (Grafana k6 dashboard stays empty)"
+  echo "  --chronicle-wal       Enable Chronicle Queue WAL via docker-compose.chronicle.yml override"
   echo "  --no-reseed                   Disable auto top-up of CLIENT balances during k6 (default: on)"
   echo "  --reseed-interval SEC         Poll period for reseed watcher (default: 20)"
   echo "  --reseed-threshold NUM        Trigger top-up when balance < this (default: 1.0)"
@@ -89,6 +96,7 @@ while [ $# -gt 0 ]; do
     --proj-wait-max-loops) PROJ_WAIT_MAX_LOOPS="$2"; shift 2 ;;
     --prometheus-url) PROMETHEUS_URL="$2"; shift 2 ;;
     --no-k6-prometheus) K6_PROMETHEUS_RW=0; shift ;;
+    --chronicle-wal) CHRONICLE_WAL=true; COMPOSE_FILES="$COMPOSE_FILES -f $PROJECT_DIR/docker-compose.chronicle.yml"; shift ;;
     --reseed) RESEED=true; shift ;;
     --no-reseed) RESEED=false; shift ;;
     --reseed-interval) RESEED_INTERVAL="$2"; shift 2 ;;
@@ -513,7 +521,12 @@ if $FLUSH && ! $RECON_ONLY; then
          "$PROJECT_DIR/jraft_ledger/node2/rocksdb" "$PROJECT_DIR/jraft_ledger/node2/raft" \
          "$PROJECT_DIR/jraft_ledger/node3/rocksdb" "$PROJECT_DIR/jraft_ledger/node3/raft" \
          "$PROJECT_DIR/jraft_ledger/kafka"
-  pass "MySQL + RocksDB + Raft log + Kafka flushed"
+  if $CHRONICLE_WAL; then
+    rm -rf "$PROJECT_DIR/jraft_ledger/node1/chronicle" \
+           "$PROJECT_DIR/jraft_ledger/node2/chronicle" \
+           "$PROJECT_DIR/jraft_ledger/node3/chronicle"
+  fi
+  pass "MySQL + RocksDB + Raft log + Kafka${CHRONICLE_WAL:+ + Chronicle WAL} flushed"
 fi
 
 # ============================================================
