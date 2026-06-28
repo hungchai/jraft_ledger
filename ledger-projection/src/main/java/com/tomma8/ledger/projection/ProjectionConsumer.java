@@ -144,6 +144,7 @@ public class ProjectionConsumer {
             safeAck(ack);
             return;
         }
+        java.util.concurrent.CompletableFuture<Void> balanceFuture = null;
         try {
             var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size() * 2);
             for (String m : messages) {
@@ -154,12 +155,17 @@ public class ProjectionConsumer {
                     if (pe != null) parsed.add(pe);
                 }
             }
-            writer.writeBalanceBatch(parsed);
+            // writeBalanceBatch returns the balance-upsert future; journal flush is
+            // synchronous inside it. We MUST await before ack or risk losing the
+            // upsert on a crash between Kafka commit and MySQL commit.
+            balanceFuture = writer.writeBalanceBatch(parsed);
+            balanceFuture.get(30, java.util.concurrent.TimeUnit.SECONDS);
             safeAck(ack);
         } catch (Exception e) {
-            // Persisting the batch failed — DO NOT ack so Kafka redelivers.
-            // The downstream writer is idempotent (INSERT IGNORE +
-            // accountSeq-guarded upsert), so redelivery is safe.
+            // Persisting the batch failed (journal flush OR balance upsert OR
+            // future timeout) — DO NOT ack so Kafka redelivers. The downstream
+            // writer is idempotent (INSERT IGNORE + accountSeq-guarded upsert),
+            // so redelivery is safe.
             log.error("Balance batch projection failed (size={}) — not acking, will redeliver",
                     messages.size(), e);
         }

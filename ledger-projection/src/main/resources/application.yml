@@ -16,11 +16,13 @@ spring:
     listener:
       type: single
       concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
-      # MANUAL_IMMEDIATE: offset is committed only when the listener explicitly
-      # calls ack.acknowledge() and that commit is flushed synchronously. This
-      # is the prerequisite for at-least-once: the consumer must not return
-      # from a poll until the projection write has hit MySQL.
-      ack-mode: manual_immediate
+      # MANUAL with async commits — the effective settings live in
+      # ProjectionConfig.{single,batch}Factory (programmatic setAckMode +
+      # setSyncCommits(false)). This yml key is overridden by every
+      # @KafkaListener that names a containerFactory, so it's effectively
+      # dead code; kept here only so Spring still binds the consumer
+      # factory even when a listener picks a non-default factory.
+      ack-mode: manual
 
 mybatis:
   configuration:
@@ -35,6 +37,17 @@ ledger:
     journal:
       flush-interval-ms: 50
       max-buffer: 4000
+    balance:
+      async:
+        # Bounded queue for in-flight balance upsert batches. Each batch holds
+        # one conflated set of account_balance rows from a Kafka poll. 64
+        # batches × 2000 msgs/poll = ~128k messages worth of buffer before
+        # backpressure fires. Tune lower to fail-fast under sustained pressure.
+        queue-capacity: 64
+        # How long a consumer thread will block on the queue before the submit
+        # throws. Acts as the upper bound on consumer-thread idle time per poll
+        # batch — keep below Kafka max.poll.interval.ms (default 5min).
+        submit-timeout-ms: 2000
   snowflake:
     worker-id: ${SNOWFLAKE_WORKER_ID:}
 

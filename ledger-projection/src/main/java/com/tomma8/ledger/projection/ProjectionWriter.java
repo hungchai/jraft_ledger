@@ -1,12 +1,10 @@
 package com.tomma8.ledger.projection;
 
-import com.tomma8.ledger.dao.mapper.AccountBalanceMapper;
 import com.tomma8.ledger.dao.mapper.AccountMapper;
 import com.tomma8.ledger.dao.mapper.JournalMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.apache.ibatis.session.ExecutorType;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
@@ -22,6 +20,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
@@ -39,6 +38,7 @@ public class ProjectionWriter {
 
     private final SqlSessionFactory sqlSessionFactory;
     private final SnowflakeIdGenerator idGenerator;
+    private final BalanceUpsertExecutor balanceUpsertExecutor;
 
     // accountId → surrogate PK
     private final ConcurrentHashMap<String, Long> accountIdCache = new ConcurrentHashMap<>();
@@ -55,12 +55,17 @@ public class ProjectionWriter {
                             MeterRegistry meterRegistry,
                             @Value("${ledger.projection.journal.flush-interval-ms:50}") int journalFlushIntervalMs,
                             @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer,
+                            @Value("${ledger.projection.balance.async.queue-capacity:64}") int balanceQueueCapacity,
+                            @Value("${ledger.projection.balance.async.submit-timeout-ms:2000}") long balanceSubmitTimeoutMs,
                             @Value("${ledger.snowflake.worker-id:}") String snowflakeWorkerIdRaw) {
         this.sqlSessionFactory = sqlSessionFactory;
         long workerId = snowflakeWorkerIdRaw.isBlank()
                 ? SnowflakeIdGenerator.deriveWorkerId()
                 : Long.parseLong(snowflakeWorkerIdRaw.trim());
         this.idGenerator = SnowflakeIdGenerator.forWorker(workerId);
+
+        this.balanceUpsertExecutor = new BalanceUpsertExecutor(
+                sqlSessionFactory, meterRegistry, balanceQueueCapacity, balanceSubmitTimeoutMs);
 
         this.journalFlushBuffer = new JournalFlushBuffer(
                 sqlSessionFactory, meterRegistry, journalFlushIntervalMs, journalMaxBuffer,
@@ -114,8 +119,10 @@ public class ProjectionWriter {
      * — the broker will redeliver the same poll batch (idempotent via
      * {@code INSERT IGNORE} / accountSeq-guarded upsert).
      */
-    public void writeBalanceBatch(List<BalanceEvent> parsed) throws InterruptedException {
-        if (parsed == null || parsed.isEmpty()) return;
+    public CompletableFuture<Void> writeBalanceBatch(List<BalanceEvent> parsed) throws InterruptedException {
+        if (parsed == null || parsed.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
 
         resolveAccountPks(parsed);
         resolveJournalPks(parsed);
@@ -145,33 +152,28 @@ public class ProjectionWriter {
                     idGenerator.nextId(), journalPk, accountPk, pe, now));
         }
 
-        upsertBalancesSync(conflated);
+        CompletableFuture<Void> balanceFuture = submitBalanceUpsert(conflated);
         journalFlushBuffer.flushPollBatch(journalRows);
 
         lastEventTimestamp.set(System.currentTimeMillis());
+        return balanceFuture;
     }
 
-    /** Synchronous JDBC batch upsert; throws on SQL failure (no silent loss).
+    /** Submit the sorted balance batch to the async executor; returns the
+     * completion future. Empty input → already-complete future.
      * Balance updates are sorted by (accountId, balanceType, currency) so
-     * concurrent transactions acquire account_balance unique-key locks in a
-     * consistent order across projection instances, preventing deadlocks. */
-    private void upsertBalancesSync(LinkedHashMap<BalanceUpdate, BalanceUpdate> conflated) {
-        if (conflated.isEmpty()) return;
+     * concurrent transactions acquire account_balance unique-key locks in
+     * a consistent order across projection instances, preventing deadlocks. */
+    private CompletableFuture<Void> submitBalanceUpsert(LinkedHashMap<BalanceUpdate, BalanceUpdate> conflated) {
+        if (conflated.isEmpty()) return CompletableFuture.completedFuture(null);
         var sorted = new ArrayList<>(conflated.values());
         sorted.sort(Comparator
                 .comparing(BalanceUpdate::accountId)
                 .thenComparing(BalanceUpdate::balanceType)
                 .thenComparing(BalanceUpdate::currency));
-        try (SqlSession session = sqlSessionFactory.openSession(ExecutorType.BATCH)) {
-            AccountBalanceMapper bm = session.getMapper(AccountBalanceMapper.class);
-            for (BalanceUpdate bu : sorted) {
-                bm.upsertBalance(bu.accountPk(), bu.accountId(), bu.balanceType(), bu.currency(),
-                        bu.amount(), bu.position(), bu.accountSeq(), bu.lastJournalId());
-            }
-            session.flushStatements();
-            session.commit();
-        }
+        CompletableFuture<Void> f = balanceUpsertExecutor.submit(sorted);
         balanceWrites.add(conflated.size());
+        return f;
     }
 
     /** Resolve account surrogate PKs for the batch; only cache misses hit the DB, in one session. */
