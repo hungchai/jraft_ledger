@@ -27,25 +27,25 @@
 set -euo pipefail
 
 # ────────────────────────────── config / defaults ──────────────────────────────
-REGION="${AWS_REGION:-ap-southeast-1}"
+REGION="${AWS_REGION:-ap-northeast-1}"   # Tokyo: has c8gd (Graviton+NVMe) + reliable ARM capacity
 PROJECT_TAG="jraft-soak"
 REPO_URL="${REPO_URL:-https://github.com/hungchai/jraft_ledger.git}"
 # Self-contained branch: has the harness + the k6 NODES (multi-host leader discovery) patch.
 # Switch to v3-fix once PR #15 merges (then v3-fix carries the k6 patch too).
 BRANCH="${BRANCH:-feat/aws-soak-harness}"
 NODES=3
-# c7i.large (NOT c7i-flex): non-burstable, sustained full CPU — flex throttles
-# under sustained load and inflates latency. Same 2 vCPU / 4 GiB as flex, so the
-# only changed variable vs the earlier flex runs is burstable→sustained.
-NODE_TYPE="c7i.large"
-MGMT_TYPE="c7i.large"
+# Raft nodes ALWAYS run c8gd.xlarge (Graviton4, 4 vCPU / 8 GiB, local NVMe) — the proven perf
+# config (PERF-TEST-REPORT: fsync 0.375ms vs gp3 2.8ms, P95 1.75ms). NVMe is mandatory for the
+# fsync floor, so DISK defaults to nvme too. Do not run raft nodes on anything else.
+NODE_TYPE="c8gd.xlarge"
+MGMT_TYPE="c7g.large"            # mgmt is just the driver/observability host — small ARM is fine
 ROOT_GB=30
 # Raft-log storage arm (controls ONLY where /var/lib/ledger/raft lives; state RocksDB
 # stays on the root gp3 so the raft disk can be measured in isolation by fio/iostat):
 #   gp3  — raft log on root gp3 (baseline; no extra volume)
 #   io2  — raft log on a dedicated provisioned-IOPS io2 volume (low-latency, durable)
 #   nvme — raft log on the instance-store local NVMe (needs an *d instance type, e.g. c6id.large)
-DISK="gp3"
+DISK="nvme"                      # raft log on c8gd's local NVMe (the fsync-floor win); mandatory for the default node
 RAFT_GB=20                       # size of the dedicated raft-log volume (io2 arm)
 RAFT_IOPS=3000                   # provisioned IOPS for the io2 raft-log volume
 TTL_HOURS=6                      # failsafe: instances self-shutdown after this many hours
@@ -57,11 +57,13 @@ RAFT_PORT=28080
 HTTP_PORT=8080
 GRAFANA_PORT=3000
 PROM_PORT=9090
-# --full: also provision a dedicated `svc` host running mysql + kafka + projection
-# (docker-compose.aws-svc.yml), and wire the ledger nodes to publish to that Kafka.
+# --full: also provision THREE dedicated service hosts — one each for mysql, kafka, projection —
+# and wire the ledger nodes to publish to that Kafka (real outbox→Kafka→projection→MySQL path).
+# Each runs --network host and is addressed by private IP (no shared compose bridge across hosts);
+# projection gets --add-host ledger-mysql:<mysql_priv> so its hardcoded sharding jdbc URL resolves.
 FULL=false
-SVC_TYPE="c7i.xlarge"            # services host (mysql+kafka+projection); needs ~4 vCPU / 8 GiB
-KAFKA_EXT_PORT=29092             # Kafka EXTERNAL advertised listener (off-host: ledger nodes)
+SVC_TYPE="c7g.large"             # each services host (mysql / kafka / projection): 2 vCPU / 4 GiB ARM
+KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the kafka host's private IP)
 MYSQL_PORT=3306
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
@@ -194,9 +196,9 @@ cmd_up() {
     "IpProtocol=tcp,FromPort=$GRAFANA_PORT,ToPort=$GRAFANA_PORT,IpRanges=[{CidrIp=$CIDR,Description=grafana}]" \
     "IpProtocol=tcp,FromPort=$PROM_PORT,ToPort=$PROM_PORT,IpRanges=[{CidrIp=$CIDR,Description=prometheus}]" >/dev/null
   if [ "$FULL" = true ]; then
-    # intra-SG: ledger nodes → kafka EXTERNAL listener; projection → mysql/kafka are in-bridge (no SG hop)
+    # intra-SG: ledger nodes + projection → kafka:9092; projection → mysql:3306; (all cross-host now)
     "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
-      "IpProtocol=tcp,FromPort=$KAFKA_EXT_PORT,ToPort=$KAFKA_EXT_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka-ext}]" \
+      "IpProtocol=tcp,FromPort=$KAFKA_PORT,ToPort=$KAFKA_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka}]" \
       "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=mysql-intra}]" \
       "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=projection-intra}]" >/dev/null
     # from your IP: projection actuator/health + mysql (so you can inspect ledger_view)
@@ -222,7 +224,9 @@ cmd_up() {
   echo "mgmt $(launch_one mgmt "${PROJECT_TAG}-$RUN-mgmt" "$MGMT_TYPE")" >> "$RD/instances"
   local NINST=$((NODES+1))
   if [ "$FULL" = true ]; then
-    echo "svc $(launch_one svc "${PROJECT_TAG}-$RUN-svc" "$SVC_TYPE")" >> "$RD/instances"; NINST=$((NINST+1))
+    for role in mysql kafka projection; do
+      echo "$role $(launch_one "$role" "${PROJECT_TAG}-$RUN-$role" "$SVC_TYPE")" >> "$RD/instances"; NINST=$((NINST+1))
+    done
   fi
   ok "launched $NINST instances"
 
@@ -243,8 +247,12 @@ cmd_up() {
     echo "MGMT_PUB=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")"
     echo "MGMT_PRIV=$(awk '$1=="mgmt"{print $4}' "$RD/hosts")"
     echo "FULL=$FULL"
-    echo "SVC_PUB=$(awk '$1=="svc"{print $3}' "$RD/hosts")"
-    echo "SVC_PRIV=$(awk '$1=="svc"{print $4}' "$RD/hosts")"
+    echo "MYSQL_PUB=$(awk '$1=="mysql"{print $3}' "$RD/hosts")"
+    echo "MYSQL_PRIV=$(awk '$1=="mysql"{print $4}' "$RD/hosts")"
+    echo "KAFKA_PUB=$(awk '$1=="kafka"{print $3}' "$RD/hosts")"
+    echo "KAFKA_PRIV=$(awk '$1=="kafka"{print $4}' "$RD/hosts")"
+    echo "PROJECTION_PUB=$(awk '$1=="projection"{print $3}' "$RD/hosts")"
+    echo "PROJECTION_PRIV=$(awk '$1=="projection"{print $4}' "$RD/hosts")"
   } > "$RD/run.env"
   cat "$RD/hosts" | sed 's/^/  /'
 
@@ -260,8 +268,7 @@ cmd_up() {
   echo
   ok "Cluster UP (run $RUN). Grafana: http://$MGMT_PUB:$GRAFANA_PORT (admin/admin123)  Prometheus: http://$MGMT_PUB:$PROM_PORT"
   if [ "$FULL" = true ]; then
-    local SVC_PUB; SVC_PUB="$(kv_get "$RUN" SVC_PUB)"
-    ok "Full stack: projection http://$SVC_PUB:$PROJECTION_PORT/actuator/health  mysql $SVC_PUB:$MYSQL_PORT (ledger/ledger123 db=ledger_view)  kafka $SVC_PUB:$KAFKA_EXT_PORT"
+    ok "Full stack: projection http://$(kv_get "$RUN" PROJECTION_PUB):$PROJECTION_PORT/actuator/health  mysql $(kv_get "$RUN" MYSQL_PUB):$MYSQL_PORT (ledger/ledger123 db=ledger_view)  kafka $(kv_get "$RUN" KAFKA_PRIV):$KAFKA_PORT"
   fi
   echo "  Run a test:   $0 test --vus $VUS --duration $DURATION"
   echo "  Tear down:    $0 down"
@@ -314,7 +321,7 @@ setup_raft_disk() {
   : > "$RD/volumes"
   log "Setting up Raft-log disk: DISK=$DISK"
   while read -r name id pub priv; do
-    { [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; } && continue
+    case "$name" in node-*) ;; *) continue;; esac   # raft disk only on ledger nodes
     case "$DISK" in
       gp3)
         rssh "$run" "$pub" "sudo mkdir -p /mnt/raft && sudo chown 999:999 /mnt/raft && echo '$name: raft on root gp3'" | sed 's/^/  /'
@@ -351,25 +358,69 @@ setup_raft_disk() {
   ok "raft-log disk ready ($DISK)"
 }
 
-# --full: bring up the services tier (mysql + kafka + projection) on the svc host via
-# docker-compose.aws-svc.yml. Kafka's EXTERNAL listener is advertised on the svc private IP
-# so the ledger nodes (other hosts) can publish; projection↔mysql↔kafka stay on the bridge net.
+# --full: bring up the services tier across THREE dedicated hosts (mysql / kafka / projection),
+# each --network host and addressed by private IP. node_exporter runs on each so the mgmt
+# Prometheus can monitor their CPU/mem (to judge whether the chosen size is enough). Order:
+# mysql + kafka first (parallel), then projection (depends on both), so by the time the ledger
+# nodes start (deploy_cluster, after this) Kafka is ready for required=true publishing.
+NODE_EXPORTER_RUN='docker run -d --name node-exporter --restart unless-stopped --network host --pid host \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro \
+  prom/node-exporter:latest --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs >/dev/null 2>&1 || true'
 deploy_svc() {
   local run=$1; local RD; RD="$(run_dir "$run")"
-  local svc_pub svc_priv; svc_pub=$(awk '$1=="svc"{print $3}' "$RD/hosts"); svc_priv=$(awk '$1=="svc"{print $4}' "$RD/hosts")
-  log "Bringing up services tier on svc ($svc_priv): mysql + kafka + projection (maven build ~5min)..."
-  rssh "$run" "$svc_pub" "cd jraft_ledger && SVC_PRIV=$svc_priv docker compose -f docker-compose.aws-svc.yml up -d --build 2>&1 | tail -3 && echo svc-compose-up" | sed 's/^/  /'
-  log "Waiting for mysql healthy + projection health..."
-  rssh "$run" "$svc_pub" '
-    for i in $(seq 1 40); do
-      mysql_ok=$(docker inspect -f "{{.State.Health.Status}}" ledger-mysql 2>/dev/null)
-      proj=$(curl -s --max-time 3 http://localhost:8089/actuator/health 2>/dev/null | grep -o "\"status\":\"UP\"" | head -1)
-      [ "$mysql_ok" = healthy ] && [ -n "$proj" ] && { echo "  mysql=healthy projection=UP"; exit 0; }
-      sleep 6
-    done
-    echo "  WARN: services not fully healthy after wait (mysql=$mysql_ok projection=${proj:-down}); check docker logs on svc"
-  ' | sed 's/^/  /'
-  ok "services tier up (projection http://$svc_pub:$PROJECTION_PORT, mysql/kafka on $svc_priv)"
+  local mysql_pub mysql_priv kafka_pub kafka_priv proj_pub proj_priv
+  mysql_pub=$(awk '$1=="mysql"{print $3}' "$RD/hosts");      mysql_priv=$(awk '$1=="mysql"{print $4}' "$RD/hosts")
+  kafka_pub=$(awk '$1=="kafka"{print $3}' "$RD/hosts");      kafka_priv=$(awk '$1=="kafka"{print $4}' "$RD/hosts")
+  proj_pub=$(awk '$1=="projection"{print $3}' "$RD/hosts");  proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts")
+
+  log "Services tier: starting mysql ($mysql_priv) + kafka ($kafka_priv) in parallel..."
+  # mysql: init.sql from the cloned repo seeds the ledger_view schema
+  ( rssh "$run" "$mysql_pub" "
+      $NODE_EXPORTER_RUN
+      docker rm -f ledger-mysql >/dev/null 2>&1 || true
+      docker run -d --name ledger-mysql --restart unless-stopped --network host \
+        -e MYSQL_ROOT_PASSWORD=ledger123 -e MYSQL_DATABASE=ledger_view \
+        -e MYSQL_USER=ledger -e MYSQL_PASSWORD=ledger123 \
+        -v \$HOME/jraft_ledger/init.sql:/docker-entrypoint-initdb.d/init.sql \
+        mysql:8.4 --max-connections=1000 >/dev/null && echo 'mysql launched'
+    " | sed 's/^/  /' ) &
+  # kafka: single-node KRaft, advertised on its own private IP so both projection and ledger nodes reach it
+  ( rssh "$run" "$kafka_pub" "
+      $NODE_EXPORTER_RUN
+      docker rm -f ledger-kafka >/dev/null 2>&1 || true
+      docker run -d --name ledger-kafka --restart unless-stopped --network host \
+        -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
+        -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:$KAFKA_PORT,CONTROLLER://0.0.0.0:9093 \
+        -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://$kafka_priv:$KAFKA_PORT \
+        -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+        -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT \
+        -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@$kafka_priv:9093 \
+        -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true -e KAFKA_NUM_PARTITIONS=4 \
+        apache/kafka:3.9.0 >/dev/null && echo 'kafka launched'
+    " | sed 's/^/  /' ) &
+  wait
+
+  log "Waiting for mysql healthy + kafka reachable..."
+  rssh "$run" "$mysql_pub" 'for i in $(seq 1 40); do docker exec ledger-mysql mysqladmin ping -h localhost >/dev/null 2>&1 && { echo "  mysql up"; break; }; [ "$i" = 40 ] && echo "  WARN mysql not ready"; sleep 3; done'
+  rssh "$run" "$kafka_pub" 'for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/'"$KAFKA_PORT"') >/dev/null 2>&1 && { echo "  kafka up"; break; }; [ "$i" = 30 ] && echo "  WARN kafka not ready"; sleep 3; done'
+
+  log "Building + starting projection on $proj_priv (maven build ~5min)..."
+  # --add-host ledger-mysql:<mysql_priv> so projection's hardcoded sharding jdbc (jdbc:mysql://ledger-mysql:3306) resolves
+  rssh "$run" "$proj_pub" "
+    $NODE_EXPORTER_RUN
+    cd jraft_ledger && docker build -q -t ledger-projection:latest -f Dockerfile.projection . >/dev/null && echo 'projection built'
+    docker rm -f ledger-projection >/dev/null 2>&1 || true
+    docker run -d --name ledger-projection --restart unless-stopped --network host \
+      --add-host ledger-mysql:$mysql_priv \
+      -e SERVER_PORT=$PROJECTION_PORT \
+      -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 \
+      -e KAFKA_BOOTSTRAP_SERVERS=$kafka_priv:$KAFKA_PORT -e KAFKA_CONSUMER_CONCURRENCY=4 \
+      -e SNOWFLAKE_WORKER_ID=1 \
+      -e JAVA_OPTS='-Xms1g -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true' \
+      ledger-projection:latest >/dev/null && echo 'projection launched'
+  " | sed 's/^/  /'
+  rssh "$run" "$proj_pub" 'for i in $(seq 1 40); do curl -s --max-time 3 http://localhost:'"$PROJECTION_PORT"'/actuator/health 2>/dev/null | grep -q "\"status\":\"UP\"" && { echo "  projection UP"; break; }; [ "$i" = 40 ] && echo "  WARN projection not UP"; sleep 6; done'
+  ok "services tier up (mysql=$mysql_priv kafka=$kafka_priv projection=http://$proj_pub:$PROJECTION_PORT)"
 }
 
 deploy_cluster() {
@@ -386,7 +437,7 @@ deploy_cluster() {
   scp $(SSHK "$run") -o ProxyCommand="ssh $(SSHK "$run") -W %h:%p $SSH_USER@$mgmt_pub" "$RD/key.pem" "$SSH_USER@$node1_priv:~/.ssh/soak.pem" >/dev/null
   rssh "$run" "$node1_pub" "chmod 600 ~/.ssh/soak.pem"
   while read -r name id pub priv; do
-    if [ "$name" = "node-1" ] || [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; then continue; fi
+    case "$name" in node-1) continue;; node-*) ;; *) continue;; esac   # ship only to node-2..N
     log "Shipping image node-1 → $name ($priv)..."
     rssh "$run" "$node1_pub" "docker save ledger-node:latest | gzip -1 | ssh -i ~/.ssh/soak.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new $SSH_USER@$priv 'gunzip | docker load' >/dev/null && echo shipped" | sed 's/^/  /'
   done < "$RD/hosts"
@@ -396,10 +447,11 @@ deploy_cluster() {
   # Kafka: lean mode points at an invalid broker with required=false (graceful degrade);
   # --full points at the svc host's Kafka EXTERNAL listener with required=true (real outbox path).
   local KAFKA_BOOT="kafka.invalid:9092" KAFKA_REQ="false"
-  if [ "$FULL" = true ]; then KAFKA_BOOT="$(kv_get "$run" SVC_PRIV):$KAFKA_EXT_PORT"; KAFKA_REQ="true"; fi
+  if [ "$FULL" = true ]; then KAFKA_BOOT="$(kv_get "$run" KAFKA_PRIV):$KAFKA_PORT"; KAFKA_REQ="true"; fi
+  # heap fits the default c8gd.xlarge (8 GiB). Override with LEDGER_JAVA_OPTS for smaller nodes.
   local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
   while read -r name id pub priv; do
-    if [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; then continue; fi
+    case "$name" in node-*) ;; *) continue;; esac   # launch ledger-node only on ledger nodes
     rssh "$run" "$pub" "
       docker rm -f ledger-node node-exporter >/dev/null 2>&1 || true
       sudo rm -rf ~/ledger-data; mkdir -p ~/ledger-data; sudo chown -R 999:999 ~/ledger-data
@@ -426,18 +478,19 @@ deploy_cluster() {
 deploy_obs() {
   local run=$1; local RD; RD="$(run_dir "$run")"
   local mgmt_pub; mgmt_pub=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")
-  # ledger raft nodes only (exclude mgmt AND svc — svc runs no ledger-node / node_exporter)
+  # ledger app metrics: raft nodes only (mysql/kafka/projection run no ledger-node)
   local targets; targets=$(awk '$1~/^node-/{printf "%s\"%s:'"$HTTP_PORT"'\"",sep,$4; sep=","}' "$RD/hosts")
-  # host-CPU targets (node_exporter on each ledger node, port 9100 — deploy_cluster runs it)
-  local node_targets; node_targets=$(awk '$1~/^node-/{printf "%s\"%s:9100\"",sep,$4; sep=","}' "$RD/hosts")
+  # host-CPU/mem targets: node_exporter runs on every non-mgmt host (ledger nodes AND the 3 svc hosts,
+  # so we can monitor whether the svc instance size is enough), port 9100.
+  local node_targets; node_targets=$(awk '$1!="mgmt"{printf "%s\"%s:9100\"",sep,$4; sep=","}' "$RD/hosts")
   # --full: scrape the projection service (Micrometer at :8089) too
   local proj_job=""
   if [ "$FULL" = true ]; then
-    local svc_priv; svc_priv=$(awk '$1=="svc"{print $4}' "$RD/hosts")
+    local proj_priv; proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts")
     proj_job="  - job_name: projection
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['$svc_priv:$PROJECTION_PORT']
+      - targets: ['$proj_priv:$PROJECTION_PORT']
         labels: { app: ledger, component: projection }"
   fi
   log "Deploying Prometheus + Grafana on mgmt..."
@@ -665,10 +718,10 @@ aws-soak.sh — on-demand jraft_ledger multi-host soak on AWS
          --disk gp3|io2|nvme  raft-log storage arm (default gp3). io2 → dedicated provisioned-IOPS
                               volume (--raft-gb --raft-iops); nvme → instance-store local disk
                               (requires a *d instance type, e.g. --node-type c6id.large).
-         --full              also provision a dedicated svc host running mysql + kafka + projection
-                             (docker-compose.aws-svc.yml) and wire ledger nodes to publish to it
+         --full              also provision 3 dedicated service hosts (mysql / kafka / projection),
+                             node_exporter on each, and wire ledger nodes to publish to that Kafka
                              (KAFKA_REQUIRED=true → real outbox→Kafka→projection→MySQL path).
-         --svc-type <type>   instance type for the --full services host (default c7i.xlarge).
+         --svc-type <type>   instance type for EACH of the 3 --full service hosts (default c7g.large).
          --ssh-cidr <cidr>   ingress CIDR for ssh/grafana/prometheus/http (default: 0.0.0.0/0, public).
                              Pass your office CIDR to lock it down.
 EOF
