@@ -57,6 +57,13 @@ RAFT_PORT=28080
 HTTP_PORT=8080
 GRAFANA_PORT=3000
 PROM_PORT=9090
+# --full: also provision a dedicated `svc` host running mysql + kafka + projection
+# (docker-compose.aws-svc.yml), and wire the ledger nodes to publish to that Kafka.
+FULL=false
+SVC_TYPE="c7i.xlarge"            # services host (mysql+kafka+projection); needs ~4 vCPU / 8 GiB
+KAFKA_EXT_PORT=29092             # Kafka EXTERNAL advertised listener (off-host: ledger nodes)
+MYSQL_PORT=3306
+PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
 
 AWSCLI=(aws --region "$REGION" --output json)   # uses creds from env
@@ -120,7 +127,25 @@ SSHK() { echo "-i $(run_dir "$1")/key.pem -o IdentitiesOnly=yes -o StrictHostKey
 # The `-n` matters: rssh runs inside `while read ... < hosts` loops. Without it, ssh reads its stdin
 # from the loop's hosts file and swallows the remaining lines → only the first host is processed
 # (the bug that left only node-1 launched / node-2 shipped). -n ties ssh stdin to /dev/null.
-rssh() { local run=$1 ip=$2; shift 2; ssh -n $(SSHK "$run") "$SSH_USER@$ip" "$@"; }
+# Direct local→node public-IP SSH is unreliable from some networks (per-IP route blackholes
+# in the runner's ISP path to the region). mgmt is the one host always reachable, and it can
+# reach every node over the private network, so route all node SSH through mgmt as a ProxyJump
+# to the node's PRIVATE ip. mgmt itself is still reached directly. Same keypair authenticates
+# both hops (-i applies to the jump too), so no key needs to live on mgmt.
+rssh() {
+  local run=$1 ip=$2; shift 2
+  local hf; hf="$(run_dir "$run")/hosts"
+  local mpub; mpub=$(awk '$1=="mgmt"{print $3}' "$hf" 2>/dev/null)
+  if [ -n "$mpub" ] && [ "$ip" != "$mpub" ]; then
+    local priv; priv=$(awk -v p="$ip" '$3==p{print $4}' "$hf")
+    if [ -n "$priv" ]; then
+      # ProxyCommand (not -J): -J's host-key handling ignores our UserKnownHostsFile=/dev/null
+      # on the jump hop and fails verification. -W with the same opts on both hops works.
+      ssh -n $(SSHK "$run") -o ProxyCommand="ssh $(SSHK "$run") -W %h:%p $SSH_USER@$mpub" "$SSH_USER@$priv" "$@"; return
+    fi
+  fi
+  ssh -n $(SSHK "$run") "$SSH_USER@$ip" "$@"
+}
 
 # ────────────────────────────── up ──────────────────────────────
 cmd_up() {
@@ -136,10 +161,11 @@ cmd_up() {
   [ "$CIDR" = "0.0.0.0/0" ] && warn "SG opens ssh/grafana/prometheus/http to 0.0.0.0/0 (public). Use --ssh-cidr to restrict."
   # resolve a per-architecture AMI: node and mgmt types may differ in arch (e.g. ARM nodes +
   # x86 mgmt), and an arm64 instance MUST boot an arm64 AMI. Resolve only the arches in use.
-  local NODE_ARCH MGMT_ARCH; NODE_ARCH="$(instance_arch "$NODE_TYPE")"; MGMT_ARCH="$(instance_arch "$MGMT_TYPE")"
+  local NODE_ARCH MGMT_ARCH SVC_ARCH; NODE_ARCH="$(instance_arch "$NODE_TYPE")"; MGMT_ARCH="$(instance_arch "$MGMT_TYPE")"
+  SVC_ARCH=""; [ "$FULL" = true ] && SVC_ARCH="$(instance_arch "$SVC_TYPE")"
   local AMI_X86="" AMI_ARM=""
-  case "$NODE_ARCH $MGMT_ARCH" in *x86_64*) AMI_X86="$(ubuntu2404_ami x86_64)"; [ "$AMI_X86" != "None" ] || die "No x86_64 Ubuntu 24.04 AMI in $REGION.";; esac
-  case "$NODE_ARCH $MGMT_ARCH" in *arm64*)  AMI_ARM="$(ubuntu2404_ami arm64)";  [ "$AMI_ARM" != "None" ] || die "No arm64 Ubuntu 24.04 AMI in $REGION.";; esac
+  case "$NODE_ARCH $MGMT_ARCH $SVC_ARCH" in *x86_64*) AMI_X86="$(ubuntu2404_ami x86_64)"; [ "$AMI_X86" != "None" ] || die "No x86_64 Ubuntu 24.04 AMI in $REGION.";; esac
+  case "$NODE_ARCH $MGMT_ARCH $SVC_ARCH" in *arm64*)  AMI_ARM="$(ubuntu2404_ami arm64)";  [ "$AMI_ARM" != "None" ] || die "No arm64 Ubuntu 24.04 AMI in $REGION.";; esac
   local SUBNET; SUBNET="$(default_subnet)"; [ "$SUBNET" != "None" ] || die "No default subnet."
   local VPC; VPC="$(subnet_vpc "$SUBNET")"
   log "Run=$RUN  node=$NODE_TYPE($NODE_ARCH:$AMI_ARM$AMI_X86)  mgmt=$MGMT_TYPE($MGMT_ARCH)  subnet=$SUBNET  vpc=$VPC  ingress-cidr=$CIDR"
@@ -167,6 +193,17 @@ cmd_up() {
     "IpProtocol=tcp,FromPort=$HTTP_PORT,ToPort=$HTTP_PORT,IpRanges=[{CidrIp=$CIDR,Description=http-you}]" \
     "IpProtocol=tcp,FromPort=$GRAFANA_PORT,ToPort=$GRAFANA_PORT,IpRanges=[{CidrIp=$CIDR,Description=grafana}]" \
     "IpProtocol=tcp,FromPort=$PROM_PORT,ToPort=$PROM_PORT,IpRanges=[{CidrIp=$CIDR,Description=prometheus}]" >/dev/null
+  if [ "$FULL" = true ]; then
+    # intra-SG: ledger nodes → kafka EXTERNAL listener; projection → mysql/kafka are in-bridge (no SG hop)
+    "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
+      "IpProtocol=tcp,FromPort=$KAFKA_EXT_PORT,ToPort=$KAFKA_EXT_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka-ext}]" \
+      "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=mysql-intra}]" \
+      "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=projection-intra}]" >/dev/null
+    # from your IP: projection actuator/health + mysql (so you can inspect ledger_view)
+    "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
+      "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,IpRanges=[{CidrIp=$CIDR,Description=projection-you}]" \
+      "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,IpRanges=[{CidrIp=$CIDR,Description=mysql-you}]" >/dev/null
+  fi
   ok "security group $SG (raft/http intra-SG; 22/3000/9090/8080 from $CIDR)"
 
   # --- launch instances ---
@@ -183,7 +220,11 @@ cmd_up() {
   : > "$RD/instances"
   for i in $(seq 1 "$NODES"); do echo "node-$i $(launch_one node "${PROJECT_TAG}-$RUN-node-$i" "$NODE_TYPE")" >> "$RD/instances"; done
   echo "mgmt $(launch_one mgmt "${PROJECT_TAG}-$RUN-mgmt" "$MGMT_TYPE")" >> "$RD/instances"
-  ok "launched $((NODES+1)) instances"
+  local NINST=$((NODES+1))
+  if [ "$FULL" = true ]; then
+    echo "svc $(launch_one svc "${PROJECT_TAG}-$RUN-svc" "$SVC_TYPE")" >> "$RD/instances"; NINST=$((NINST+1))
+  fi
+  ok "launched $NINST instances"
 
   # --- wait running + collect IPs ---
   local IDS; IDS=$(awk '{print $2}' "$RD/instances" | tr '\n' ' ')
@@ -197,16 +238,20 @@ cmd_up() {
   done < "$RD/instances"
   {
     echo "RUN=$RUN"; echo "REGION=$REGION"; echo "SG=$SG"; echo "KEY=$KEY"; echo "DISK=$DISK"
-    echo "PEERS=$(awk '$1!="mgmt"{printf "%s%s:'"$RAFT_PORT"'",sep,$4; sep=","}' "$RD/hosts")"
-    echo "NODE_URLS=$(awk '$1!="mgmt"{printf "%shttp://%s:'"$HTTP_PORT"'",sep,$4; sep=","}' "$RD/hosts")"
+    echo "PEERS=$(awk '$1~/^node-/{printf "%s%s:'"$RAFT_PORT"'",sep,$4; sep=","}' "$RD/hosts")"
+    echo "NODE_URLS=$(awk '$1~/^node-/{printf "%shttp://%s:'"$HTTP_PORT"'",sep,$4; sep=","}' "$RD/hosts")"
     echo "MGMT_PUB=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")"
     echo "MGMT_PRIV=$(awk '$1=="mgmt"{print $4}' "$RD/hosts")"
+    echo "FULL=$FULL"
+    echo "SVC_PUB=$(awk '$1=="svc"{print $3}' "$RD/hosts")"
+    echo "SVC_PRIV=$(awk '$1=="svc"{print $4}' "$RD/hosts")"
   } > "$RD/run.env"
   cat "$RD/hosts" | sed 's/^/  /'
 
   wait_ssh "$RUN"
   setup_raft_disk "$RUN"
   install_all "$RUN"
+  [ "$FULL" = true ] && deploy_svc "$RUN"    # kafka+mysql+projection first, so required=true nodes find Kafka ready
   deploy_cluster "$RUN"
   deploy_obs "$RUN"
   verify_cluster "$RUN"
@@ -214,6 +259,10 @@ cmd_up() {
   local MGMT_PUB; MGMT_PUB="$(kv_get "$RUN" MGMT_PUB)"
   echo
   ok "Cluster UP (run $RUN). Grafana: http://$MGMT_PUB:$GRAFANA_PORT (admin/admin123)  Prometheus: http://$MGMT_PUB:$PROM_PORT"
+  if [ "$FULL" = true ]; then
+    local SVC_PUB; SVC_PUB="$(kv_get "$RUN" SVC_PUB)"
+    ok "Full stack: projection http://$SVC_PUB:$PROJECTION_PORT/actuator/health  mysql $SVC_PUB:$MYSQL_PORT (ledger/ledger123 db=ledger_view)  kafka $SVC_PUB:$KAFKA_EXT_PORT"
+  fi
   echo "  Run a test:   $0 test --vus $VUS --duration $DURATION"
   echo "  Tear down:    $0 down"
 }
@@ -265,7 +314,7 @@ setup_raft_disk() {
   : > "$RD/volumes"
   log "Setting up Raft-log disk: DISK=$DISK"
   while read -r name id pub priv; do
-    [ "$name" = "mgmt" ] && continue
+    { [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; } && continue
     case "$DISK" in
       gp3)
         rssh "$run" "$pub" "sudo mkdir -p /mnt/raft && sudo chown 999:999 /mnt/raft && echo '$name: raft on root gp3'" | sed 's/^/  /'
@@ -302,6 +351,27 @@ setup_raft_disk() {
   ok "raft-log disk ready ($DISK)"
 }
 
+# --full: bring up the services tier (mysql + kafka + projection) on the svc host via
+# docker-compose.aws-svc.yml. Kafka's EXTERNAL listener is advertised on the svc private IP
+# so the ledger nodes (other hosts) can publish; projection↔mysql↔kafka stay on the bridge net.
+deploy_svc() {
+  local run=$1; local RD; RD="$(run_dir "$run")"
+  local svc_pub svc_priv; svc_pub=$(awk '$1=="svc"{print $3}' "$RD/hosts"); svc_priv=$(awk '$1=="svc"{print $4}' "$RD/hosts")
+  log "Bringing up services tier on svc ($svc_priv): mysql + kafka + projection (maven build ~5min)..."
+  rssh "$run" "$svc_pub" "cd jraft_ledger && SVC_PRIV=$svc_priv docker compose -f docker-compose.aws-svc.yml up -d --build 2>&1 | tail -3 && echo svc-compose-up" | sed 's/^/  /'
+  log "Waiting for mysql healthy + projection health..."
+  rssh "$run" "$svc_pub" '
+    for i in $(seq 1 40); do
+      mysql_ok=$(docker inspect -f "{{.State.Health.Status}}" ledger-mysql 2>/dev/null)
+      proj=$(curl -s --max-time 3 http://localhost:8089/actuator/health 2>/dev/null | grep -o "\"status\":\"UP\"" | head -1)
+      [ "$mysql_ok" = healthy ] && [ -n "$proj" ] && { echo "  mysql=healthy projection=UP"; exit 0; }
+      sleep 6
+    done
+    echo "  WARN: services not fully healthy after wait (mysql=$mysql_ok projection=${proj:-down}); check docker logs on svc"
+  ' | sed 's/^/  /'
+  ok "services tier up (projection http://$svc_pub:$PROJECTION_PORT, mysql/kafka on $svc_priv)"
+}
+
 deploy_cluster() {
   local run=$1; local RD; RD="$(run_dir "$run")"
   local node1_pub node1_priv; node1_pub=$(awk '$1=="node-1"{print $3}' "$RD/hosts"); node1_priv=$(awk '$1=="node-1"{print $4}' "$RD/hosts")
@@ -310,20 +380,26 @@ deploy_cluster() {
   # build image once on node-1, ship to the other nodes over the private network
   log "Building image on node-1 (maven-in-docker, ~5-10min)..."
   rssh "$run" "$node1_pub" "cd jraft_ledger && docker build -q -t ledger-node:latest -f Dockerfile . >/dev/null && echo built" | sed 's/^/  /'
-  # push key to node-1 temporarily so it can scp the image to peers over private IPs (fast intra-AWS)
-  scp $(SSHK "$run") "$RD/key.pem" "$SSH_USER@$node1_pub:~/.ssh/soak.pem" >/dev/null
+  # push key to node-1 temporarily so it can scp the image to peers over private IPs (fast intra-AWS).
+  # Route via mgmt ProxyJump to node-1's private ip (local→node public path can be blackholed).
+  local mgmt_pub; mgmt_pub=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")
+  scp $(SSHK "$run") -o ProxyCommand="ssh $(SSHK "$run") -W %h:%p $SSH_USER@$mgmt_pub" "$RD/key.pem" "$SSH_USER@$node1_priv:~/.ssh/soak.pem" >/dev/null
   rssh "$run" "$node1_pub" "chmod 600 ~/.ssh/soak.pem"
   while read -r name id pub priv; do
-    if [ "$name" = "node-1" ] || [ "$name" = "mgmt" ]; then continue; fi
+    if [ "$name" = "node-1" ] || [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; then continue; fi
     log "Shipping image node-1 → $name ($priv)..."
     rssh "$run" "$node1_pub" "docker save ledger-node:latest | gzip -1 | ssh -i ~/.ssh/soak.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new $SSH_USER@$priv 'gunzip | docker load' >/dev/null && echo shipped" | sed 's/^/  /'
   done < "$RD/hosts"
   rssh "$run" "$node1_pub" "rm -f ~/.ssh/soak.pem"   # remove temp key
 
-  # launch each node: --network host, private-IP raft peers, no-Kafka, add-opens, chown 999 data
+  # launch each node: --network host, private-IP raft peers, add-opens, chown 999 data.
+  # Kafka: lean mode points at an invalid broker with required=false (graceful degrade);
+  # --full points at the svc host's Kafka EXTERNAL listener with required=true (real outbox path).
+  local KAFKA_BOOT="kafka.invalid:9092" KAFKA_REQ="false"
+  if [ "$FULL" = true ]; then KAFKA_BOOT="$(kv_get "$run" SVC_PRIV):$KAFKA_EXT_PORT"; KAFKA_REQ="true"; fi
   local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
   while read -r name id pub priv; do
-    if [ "$name" = "mgmt" ]; then continue; fi
+    if [ "$name" = "mgmt" ] || [ "$name" = "svc" ]; then continue; fi
     rssh "$run" "$pub" "
       docker rm -f ledger-node node-exporter >/dev/null 2>&1 || true
       sudo rm -rf ~/ledger-data; mkdir -p ~/ledger-data; sudo chown -R 999:999 ~/ledger-data
@@ -335,7 +411,7 @@ deploy_cluster() {
         -e NODE_ID=$priv -e PEER_NODES=$PEERS -e RAFT_SERVER_PORT=$RAFT_PORT \
         -e LEDGER_ADVERTISE_URL=http://$priv:$HTTP_PORT \
         -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=/var/lib/ledger/rocksdb \
-        -e KAFKA_BOOTSTRAP_SERVERS=kafka.invalid:9092 -e LEDGER_KAFKA_REQUIRED=false \
+        -e KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOT -e LEDGER_KAFKA_REQUIRED=$KAFKA_REQ \
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=0 \
         -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
@@ -350,9 +426,20 @@ deploy_cluster() {
 deploy_obs() {
   local run=$1; local RD; RD="$(run_dir "$run")"
   local mgmt_pub; mgmt_pub=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")
-  local targets; targets=$(awk '$1!="mgmt"{printf "%s\"%s:'"$HTTP_PORT"'\"",sep,$4; sep=","}' "$RD/hosts")
+  # ledger raft nodes only (exclude mgmt AND svc — svc runs no ledger-node / node_exporter)
+  local targets; targets=$(awk '$1~/^node-/{printf "%s\"%s:'"$HTTP_PORT"'\"",sep,$4; sep=","}' "$RD/hosts")
   # host-CPU targets (node_exporter on each ledger node, port 9100 — deploy_cluster runs it)
-  local node_targets; node_targets=$(awk '$1!="mgmt"{printf "%s\"%s:9100\"",sep,$4; sep=","}' "$RD/hosts")
+  local node_targets; node_targets=$(awk '$1~/^node-/{printf "%s\"%s:9100\"",sep,$4; sep=","}' "$RD/hosts")
+  # --full: scrape the projection service (Micrometer at :8089) too
+  local proj_job=""
+  if [ "$FULL" = true ]; then
+    local svc_priv; svc_priv=$(awk '$1=="svc"{print $4}' "$RD/hosts")
+    proj_job="  - job_name: projection
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['$svc_priv:$PROJECTION_PORT']
+        labels: { app: ledger, component: projection }"
+  fi
   log "Deploying Prometheus + Grafana on mgmt..."
   rssh "$run" "$mgmt_pub" "mkdir -p ~/obs && cat > ~/obs/prometheus.yml <<EOF
 # 2s scrape so CPU/JVM tail behaviour is visible at fine resolution (bursty core
@@ -368,6 +455,7 @@ scrape_configs:
     static_configs:
       - targets: [$node_targets]
         labels: { app: ledger }
+$proj_job
   - job_name: prometheus
     static_configs: [{ targets: ['localhost:9090'] }]
 EOF
@@ -544,6 +632,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --scenario) SCENARIO="$2"; shift 2;;
   --ssh-cidr) SSH_CIDR="$2"; shift 2;;
   --disk) DISK="$2"; shift 2;;
+  --full) FULL=true; shift;;
+  --svc-type) SVC_TYPE="$2"; shift 2;;
   --raft-gb) RAFT_GB="$2"; shift 2;;
   --raft-iops) RAFT_IOPS="$2"; shift 2;;
   --region) REGION="$2"; AWSCLI=(aws --region "$REGION" --output json); shift 2;;
@@ -575,6 +665,10 @@ aws-soak.sh — on-demand jraft_ledger multi-host soak on AWS
          --disk gp3|io2|nvme  raft-log storage arm (default gp3). io2 → dedicated provisioned-IOPS
                               volume (--raft-gb --raft-iops); nvme → instance-store local disk
                               (requires a *d instance type, e.g. --node-type c6id.large).
+         --full              also provision a dedicated svc host running mysql + kafka + projection
+                             (docker-compose.aws-svc.yml) and wire ledger nodes to publish to it
+                             (KAFKA_REQUIRED=true → real outbox→Kafka→projection→MySQL path).
+         --svc-type <type>   instance type for the --full services host (default c7i.xlarge).
          --ssh-cidr <cidr>   ingress CIDR for ssh/grafana/prometheus/http (default: 0.0.0.0/0, public).
                              Pass your office CIDR to lock it down.
 EOF
