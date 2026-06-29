@@ -6,6 +6,8 @@ import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.util.JsonRecyclerPools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,10 +19,8 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Thin Kafka adapter: parses projection events and delegates all persistence
@@ -69,25 +69,35 @@ public class ProjectionConsumer {
      * hot path; memoising the parsed value avoids re-allocating a {@code Date}
      * and re-running the parser/validator for every message.
      *
-     * <p>Backed by an access-order {@link LinkedHashMap} wrapped with
-     * {@link Collections#synchronizedMap}; the cache is only ever touched from
-     * the four batch-listener consumer threads, so contention is light. The
-     * size is bounded — the eldest entry is evicted on insert past the cap.
+     * <p>Backed by Caffeine: W-TinyLFU + bounded size. Compared with the prior
+     * {@code Collections.synchronizedMap(LinkedHashMap)}: lock-free reads, far
+     * fewer allocations per miss (Caffeine uses a ring-buffer-style entry
+     * representation instead of a per-entry Map.Entry object), and bounded
+     * retention under skewed access patterns (today/yesterday stay hot, stale
+     * dates evict promptly).
+     *
+     * <p>{@code expireAfterAccess=10m} bounds stale entries that may otherwise
+     * sit forever once their event stream dries up; the cache size cap is the
+     * primary retention policy.
      */
-    private static final int DATE_CACHE_SIZE = 1024;
-    private static final Map<String, LocalDate> DATE_CACHE =
-            Collections.synchronizedMap(new LinkedHashMap<>(DATE_CACHE_SIZE, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, LocalDate> eldest) {
-                    return size() > DATE_CACHE_SIZE;
-                }
-            });
+    private static final Cache<String, LocalDate> DATE_CACHE = Caffeine.newBuilder()
+            .maximumSize(1024)
+            .expireAfterAccess(10, TimeUnit.MINUTES)
+            .build();
 
     private final ProjectionWriter writer;
 
     public ProjectionConsumer(ProjectionWriter writer) {
         this.writer = writer;
     }
+
+    // Thread-local scratch — avoids per-poll ArrayList allocation on the Kafka
+    // consumer threads. Sized for typical poll batches (≈512 msgs). The same
+    // thread always uses its own scratch, so consumer-thread safety is preserved.
+    // The scratch is cleared before and after each use to prevent stale references
+    // from leaking into the next poll batch.
+    private static final ThreadLocal<ArrayList<ProjectionWriter.BalanceEvent>> BALANCE_EVENT_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(512));
 
     @KafkaListener(topics = "ledger.account.v1", groupId = "ledger-projection",
             containerFactory = "singleFactory")
@@ -146,20 +156,17 @@ public class ProjectionConsumer {
         }
         java.util.concurrent.CompletableFuture<Void> balanceFuture = null;
         try {
-            var parsed = new ArrayList<ProjectionWriter.BalanceEvent>(messages.size() * 2);
+            ArrayList<ProjectionWriter.BalanceEvent> parsed = BALANCE_EVENT_SCRATCH.get();
+            parsed.clear();
             for (String m : messages) {
-                if (isEnvelope(m)) {
-                    parsed.addAll(parseEnvelopeEvents(m));
-                } else {
-                    ProjectionWriter.BalanceEvent pe = parseBalanceEvent(m);
-                    if (pe != null) parsed.add(pe);
-                }
+                parseOneMessage(m, parsed);
             }
             // writeBalanceBatch returns the balance-upsert future; journal flush is
             // synchronous inside it. We MUST await before ack or risk losing the
             // upsert on a crash between Kafka commit and MySQL commit.
             balanceFuture = writer.writeBalanceBatch(parsed);
             balanceFuture.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            parsed.clear();   // release refs so the scratch stays small for the next batch
             safeAck(ack);
         } catch (Exception e) {
             // Persisting the batch failed (journal flush OR balance upsert OR
@@ -193,6 +200,72 @@ public class ProjectionConsumer {
         } catch (Exception e) {
             log.error("Failed to parse balance event", e);
             return null;
+        }
+    }
+
+    /**
+     * Single-scan dispatch: open the parser once and decide envelope vs single
+     * event by inspecting the first field name in the top-level object.
+     * Replaces the prior two-pass approach ({@code isEnvelope(m)} then
+     * {@code parseEnvelopeEvents(m)} / {@code parseBalanceEvent(m)}) which
+     * opened the parser 2× per Kafka message — the second pass re-tokenised the
+     * entire JSON just to detect the same discriminator.
+     *
+     * <p>Result appended to {@code out}; envelope payloads may add 1..N events.
+     * Parser is closed via try-with-resources on the single open per message.
+     */
+    private void parseOneMessage(String message, List<ProjectionWriter.BalanceEvent> out) {
+        if (message == null || message.isEmpty()) return;
+        try (JsonParser p = JSON_FACTORY.createParser(message)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) return;
+            // Probe first field name. The discriminator is the very first
+            // field of the top-level object: "type" = envelope.
+            JsonToken firstT = p.nextToken();
+            if (firstT == null || firstT == JsonToken.END_OBJECT) return;
+            String firstField = p.currentName();
+            if ("type".equals(firstField)) {
+                // Skip the "type" value token, then continue scanning until END_OBJECT.
+                // The "events" array, if present, will be discovered in the loop.
+                p.nextToken(); // consume the "type" value
+                parseEnvelopeBody(p, out);
+            } else {
+                // Single-event format: parse the object we already entered.
+                // We are currently positioned AT the first field token; parseOneEventObject
+                // handles both positioning cases (inside START_OBJECT or before it).
+                ProjectionWriter.BalanceEvent be = parseOneEventObject(p);
+                if (be != null) out.add(be);
+            }
+        } catch (Exception e) {
+            log.error("Failed to parse balance message", e);
+        }
+    }
+
+    /**
+     * Continue scanning the envelope body after the discriminator field has
+     * been consumed. Looks for the {@code events} array and parses each inner
+     * event object in-place.
+     */
+    private void parseEnvelopeBody(JsonParser p, List<ProjectionWriter.BalanceEvent> out) throws java.io.IOException {
+        boolean seenEventsArray = false;
+        while (p.nextToken() != JsonToken.END_OBJECT) {
+            String field = p.currentName();
+            JsonToken t = p.nextToken();
+            if ("events".equals(field)) {
+                if (t == JsonToken.START_ARRAY) {
+                    while (p.nextToken() != JsonToken.END_ARRAY) {
+                        ProjectionWriter.BalanceEvent be = parseOneEventObject(p);
+                        if (be != null) out.add(be);
+                    }
+                    seenEventsArray = true;
+                } else {
+                    p.skipChildren();
+                }
+            } else {
+                p.skipChildren();
+            }
+        }
+        if (!seenEventsArray) {
+            log.warn("Envelope parsed but no events[] array found");
         }
     }
 
@@ -250,62 +323,12 @@ public class ProjectionConsumer {
                 nullToEmpty(balanceType), position, nullToEmpty(currency),
                 nullToEmpty(entryType),
                 nz(amount), nz(postBalance), accountSeq,
-                nullToEmpty(businessEventRef),
+                nullToEmpty(businessRefSafe(businessEventRef)),
                 toLocalDate(valueDateRaw), configVersion, nz(preBalance));
     }
 
-    /**
-     * Detect envelope vs single-event format. The discriminator is the
-     * first field name in the top-level object: {@code "type"} = envelope.
-     */
-    private static boolean isEnvelope(String message) {
-        if (message == null) return false;
-        try (JsonParser p = JSON_FACTORY.createParser(message)) {
-            if (p.nextToken() != JsonToken.START_OBJECT) return false;
-            // Probe first field
-            JsonToken t = p.nextToken();
-            if (t == null || t == JsonToken.END_OBJECT) return false;
-            String firstField = p.currentName();
-            return "type".equals(firstField);
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * Parse a journal envelope and return all inner events. The envelope
-     * shape: { "type":"JOURNAL", "journalId":"...", "events":[ {...}, ... ] }
-     */
-    private List<ProjectionWriter.BalanceEvent> parseEnvelopeEvents(String message) {
-        List<ProjectionWriter.BalanceEvent> out = new ArrayList<>();
-        try (JsonParser p = JSON_FACTORY.createParser(message)) {
-            if (p.nextToken() != JsonToken.START_OBJECT) return out;
-            boolean seenEventsArray = false;
-            while (p.nextToken() != JsonToken.END_OBJECT) {
-                String field = p.currentName();
-                JsonToken t = p.nextToken();
-                if ("events".equals(field)) {
-                    if (t == JsonToken.START_ARRAY) {
-                        while (p.nextToken() != JsonToken.END_ARRAY) {
-                            ProjectionWriter.BalanceEvent be = parseOneEventObject(p);
-                            if (be != null) out.add(be);
-                        }
-                        seenEventsArray = true;
-                    } else {
-                        p.skipChildren();
-                    }
-                } else {
-                    p.skipChildren();
-                }
-            }
-            if (!seenEventsArray) {
-                log.warn("Envelope parsed but no events[] array found");
-            }
-        } catch (Exception e) {
-            log.error("Failed to parse journal envelope", e);
-        }
-        return out;
-    }
+    /** Null-safe helper: businessEventRef nulls become empty strings. */
+    private static String businessRefSafe(String s) { return s == null ? "" : s; }
 
     /** Read a BigDecimal: numeric tokens go through {@code decimalValue()}, strings via {@code new BigDecimal(text)}. */
     private static BigDecimal readBigDecimal(JsonParser p, JsonToken t) throws java.io.IOException {
@@ -360,25 +383,26 @@ public class ProjectionConsumer {
                         Integer.parseInt(raw, pipe2 + 1, raw.length(), 10));
             }
         }
-        LocalDate cached = DATE_CACHE.get(raw);
+        LocalDate cached = DATE_CACHE.getIfPresent(raw);
         if (cached != null) return cached;
         LocalDate parsed = LocalDate.parse(raw);
-        // putIfAbsent: another thread may have raced and stored a value; either
-        // is correct, no need to overwrite.
-        DATE_CACHE.putIfAbsent(raw, parsed);
+        // Concurrent put: two threads may race parsing the same date. The race
+        // is benign — both threads return the same LocalDate value, and only one
+        // entry survives in the cache.
+        DATE_CACHE.put(raw, parsed);
         return parsed;
     }
 
     /**
      * Drop the date cache on container shutdown. The bounded
      * {@code JsonRecyclerPools.BoundedPool} releases its deque of
-     * {@code BufferRecycler}s when the factory is GC'd; we just clear our
-     * own cache references so they don't outlive the consumer.
+     * {@code BufferRecycler}s when the factory is GC'd; we just invalidate
+     * the date cache so its references don't outlive the consumer.
      */
     @PreDestroy
     void onShutdown() {
-        DATE_CACHE.clear();
-        log.info("ProjectionConsumer shutdown: date cache cleared, bounded recycler pool will be released by GC");
+        DATE_CACHE.invalidateAll();
+        log.info("ProjectionConsumer shutdown: date cache invalidated, bounded recycler pool will be released by GC");
     }
 
     private static LocalDateTime toLocalDateTime(String text) {

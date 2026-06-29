@@ -102,13 +102,14 @@ public class SnowflakeIdGenerator {
     }
 
     /**
-     * Derive a worker ID from environment or fallback to a hash of the hostname.
+     * Derive a worker ID from an explicit configured value or a hash of the hostname.
+     *
+     * @param configuredWorkerId raw worker id from {@code ledger.snowflake.worker-id} (may be blank)
      */
-    public static long deriveWorkerId() {
-        String env = System.getenv("SNOWFLAKE_WORKER_ID");
-        if (env != null) {
+    public static long deriveWorkerId(String configuredWorkerId) {
+        if (configuredWorkerId != null && !configuredWorkerId.isBlank()) {
             try {
-                return Long.parseLong(env) & MAX_WORKER_ID;
+                return Long.parseLong(configuredWorkerId.trim()) & MAX_WORKER_ID;
             } catch (NumberFormatException ignored) {
             }
         }
@@ -118,5 +119,11 @@ public class SnowflakeIdGenerator {
         } catch (Exception e) {
             return 0L;
         }
+    }
+
+    /** @deprecated use {@link #deriveWorkerId(String)} with yml-bound worker id */
+    @Deprecated
+    public static long deriveWorkerId() {
+        return deriveWorkerId(null);
     }
 }

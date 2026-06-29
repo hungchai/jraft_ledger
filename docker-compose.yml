@@ -39,6 +39,11 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_NUM_PARTITIONS: 4
+      # Single-broker dev cluster: keep min-ISR = 1 so acks=all producers don't stall.
+      # Transaction-state log uses the same single-broker constraint.
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
     volumes:
       - ./jraft_ledger/kafka:/var/lib/kafka/data
     networks:

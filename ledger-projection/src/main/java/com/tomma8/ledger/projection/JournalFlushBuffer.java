@@ -48,6 +48,17 @@ public class JournalFlushBuffer implements AutoCloseable {
     private final LongAdder flushRows = new LongAdder();
     private final AtomicLong totalBuffered = new AtomicLong();
 
+    // Thread-local scratch — pending row container reused per flush cycle. The
+    // async flushers each have their own thread, so the ThreadLocal pattern is
+    // the same as in ProjectionWriter. We also keep one for the multi-row INSERT
+    // builders (called inline from flushRowsDirect).
+    private static final ThreadLocal<ArrayList<PendingRow>> PENDING_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(1024));
+    private static final ThreadLocal<ArrayList<JournalMapper.JournalLineBatchRow>> JOURNAL_LINE_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(1024));
+    private static final ThreadLocal<ArrayList<ProjectionEventLogMapper.EventLogBatchRow>> EVENT_LOG_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(1024));
+
     public JournalFlushBuffer(SqlSessionFactory sqlSessionFactory,
                               MeterRegistry meterRegistry,
                               int flushIntervalMs,
@@ -154,6 +165,10 @@ public class JournalFlushBuffer implements AutoCloseable {
         if (!latch.await(30, TimeUnit.SECONDS)) {
             throw new RuntimeException("JournalFlushBuffer.flushPollBatch timed out after 30s");
         }
+        // Release per-shard list references back to GC.
+        for (int i = 0; i < ShardRouting.SHARD_COUNT; i++) {
+            byShard[i].clear();
+        }
         propagateFlushError(firstError.get());
     }
 
@@ -201,7 +216,11 @@ public class JournalFlushBuffer implements AutoCloseable {
         ConcurrentLinkedQueue<PendingRow> q = shardQueues.get(shard);
         if (q.isEmpty()) return;
 
-        var pending = new ArrayList<PendingRow>(Math.min(q.size(), maxBuffer));
+        ArrayList<PendingRow> pending = PENDING_SCRATCH.get();
+        pending.clear();
+        // Cap initial capacity at maxBuffer to avoid oversized backing array on
+        // bursty loads (the queue should normally be much smaller).
+        pending.ensureCapacity(Math.min(q.size(), maxBuffer));
         PendingRow row;
         while ((row = q.poll()) != null) {
             pending.add(row);
@@ -211,11 +230,13 @@ public class JournalFlushBuffer implements AutoCloseable {
 
         try {
             flushRowsDirect(pending);
+            pending.clear();   // release refs for next scheduled flush on this thread
         } catch (Exception e) {
             for (int i = pending.size() - 1; i >= 0; i--) {
                 q.offer(pending.get(i));
             }
             totalBuffered.addAndGet(pending.size());
+            pending.clear();
             log.error("Journal micro-batch flush failed (shard={}, rows={}) — re-queued for retry",
                     shard, pending.size(), e);
             throw new RuntimeException("Journal micro-batch flush failed (shard=" + shard + ")", e);
@@ -279,13 +300,19 @@ public class JournalFlushBuffer implements AutoCloseable {
     }
 
     static List<JournalMapper.JournalLineBatchRow> toJournalLineRows(List<PendingRow> rows) {
-        var out = new ArrayList<JournalMapper.JournalLineBatchRow>(rows.size());
+        // Borrow the thread-local scratch — caller (flushRowsDirect) consumes
+        // the returned list synchronously via batchInsertJournalLines, so reuse
+        // is safe. Cleared on return to drop refs for the next call.
+        ArrayList<JournalMapper.JournalLineBatchRow> out = JOURNAL_LINE_SCRATCH.get();
+        out.clear();
+        out.ensureCapacity(rows.size());
         for (PendingRow p : rows) {
+            ProjectionWriter.BalanceEvent pe = p.pe();
             out.add(new JournalMapper.JournalLineBatchRow(
-                    p.lineId(), p.journalPk(), p.accountPk(), p.pe().journalLineId(),
-                    p.pe().journalId(), p.pe().accountId(), p.pe().balanceType(), p.pe().position(),
-                    p.pe().currency(), p.pe().entryType(), p.pe().amount(), p.pe().preBalance(),
-                    p.pe().postBalance(), p.pe().configVersion(), p.createdAt()));
+                    p.lineId(), p.journalPk(), p.accountPk(), pe.journalLineId(),
+                    pe.journalId(), pe.accountId(), pe.balanceType(), pe.position(),
+                    pe.currency(), pe.entryType(), pe.amount(), pe.preBalance(),
+                    pe.postBalance(), pe.configVersion(), p.createdAt()));
         }
         out.sort(Comparator
                 .comparing(JournalMapper.JournalLineBatchRow::accountAccountId)
@@ -294,7 +321,9 @@ public class JournalFlushBuffer implements AutoCloseable {
     }
 
     private static List<ProjectionEventLogMapper.EventLogBatchRow> toEventLogRows(List<PendingRow> rows) {
-        var out = new ArrayList<ProjectionEventLogMapper.EventLogBatchRow>(rows.size());
+        ArrayList<ProjectionEventLogMapper.EventLogBatchRow> out = EVENT_LOG_SCRATCH.get();
+        out.clear();
+        out.ensureCapacity(rows.size());
         for (PendingRow p : rows) {
             out.add(new ProjectionEventLogMapper.EventLogBatchRow(
                     p.pe().accountId(), p.pe().balanceType(), p.pe().currency(), p.pe().accountSeq(),

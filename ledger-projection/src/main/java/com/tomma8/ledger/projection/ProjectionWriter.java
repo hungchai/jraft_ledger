@@ -9,7 +9,7 @@ import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
+import com.tomma8.ledger.projection.config.ProjectionLedgerProperties;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -51,24 +51,32 @@ public class ProjectionWriter {
     private final LongAdder eventsProcessed = new LongAdder();
     private final LongAdder balanceWrites = new LongAdder();
 
+    // Thread-local scratch — one ArrayList<PendingRow> per Kafka consumer thread,
+    // reused across poll batches. The caller (ProjectionConsumer.onBalanceChange)
+    // passes it through flushPollBatch synchronously and never re-reads after
+    // that method returns, so reusing the same backing array is safe.
+    private static final ThreadLocal<ArrayList<JournalFlushBuffer.PendingRow>> JOURNAL_ROW_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(1024));
+
     public ProjectionWriter(SqlSessionFactory sqlSessionFactory,
                             MeterRegistry meterRegistry,
-                            @Value("${ledger.projection.journal.flush-interval-ms:50}") int journalFlushIntervalMs,
-                            @Value("${ledger.projection.journal.max-buffer:4000}") int journalMaxBuffer,
-                            @Value("${ledger.projection.balance.async.queue-capacity:64}") int balanceQueueCapacity,
-                            @Value("${ledger.projection.balance.async.submit-timeout-ms:2000}") long balanceSubmitTimeoutMs,
-                            @Value("${ledger.snowflake.worker-id:}") String snowflakeWorkerIdRaw) {
+                            ProjectionLedgerProperties ledgerProps) {
         this.sqlSessionFactory = sqlSessionFactory;
+        var journal = ledgerProps.getProjection().getJournal();
+        var balanceAsync = ledgerProps.getProjection().getBalance().getAsync();
+        String snowflakeWorkerIdRaw = ledgerProps.getSnowflake().getWorkerId();
         long workerId = snowflakeWorkerIdRaw.isBlank()
-                ? SnowflakeIdGenerator.deriveWorkerId()
+                ? SnowflakeIdGenerator.deriveWorkerId(snowflakeWorkerIdRaw)
                 : Long.parseLong(snowflakeWorkerIdRaw.trim());
         this.idGenerator = SnowflakeIdGenerator.forWorker(workerId);
 
         this.balanceUpsertExecutor = new BalanceUpsertExecutor(
-                sqlSessionFactory, meterRegistry, balanceQueueCapacity, balanceSubmitTimeoutMs);
+                sqlSessionFactory, meterRegistry,
+                balanceAsync.getQueueCapacity(), balanceAsync.getSubmitTimeoutMs());
 
         this.journalFlushBuffer = new JournalFlushBuffer(
-                sqlSessionFactory, meterRegistry, journalFlushIntervalMs, journalMaxBuffer,
+                sqlSessionFactory, meterRegistry,
+                journal.getFlushIntervalMs(), journal.getMaxBuffer(),
                 count -> eventsProcessed.add(count));
 
         Gauge.builder("ledger.projection.seconds.since.last.event", this,
@@ -129,7 +137,8 @@ public class ProjectionWriter {
 
         LocalDateTime now = LocalDateTime.now();
         var conflated = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
-        var journalRows = new ArrayList<JournalFlushBuffer.PendingRow>(parsed.size());
+        ArrayList<JournalFlushBuffer.PendingRow> journalRows = JOURNAL_ROW_SCRATCH.get();
+        journalRows.clear();
 
         for (BalanceEvent pe : parsed) {
             Long accountPk = accountIdCache.get(pe.accountId());
@@ -154,6 +163,7 @@ public class ProjectionWriter {
 
         CompletableFuture<Void> balanceFuture = submitBalanceUpsert(conflated);
         journalFlushBuffer.flushPollBatch(journalRows);
+        journalRows.clear();   // release refs for next poll batch on the same thread
 
         lastEventTimestamp.set(System.currentTimeMillis());
         return balanceFuture;

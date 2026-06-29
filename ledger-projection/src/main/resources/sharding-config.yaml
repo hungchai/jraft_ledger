@@ -9,9 +9,15 @@ dataSources:
   ds_0:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
     driverClassName: com.mysql.cj.jdbc.Driver
-    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false
+    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false&rewriteBatchedStatements=true&cachePrepStmts=true&useServerPrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048
     username: ledger
     password: ledger123
+    maximum-pool-size: 30
+    minimum-idle: 10
+    connection-timeout: 5000
+    idle-timeout: 600000
+    max-lifetime: 1800000
+    pool-name: ledger-projection-hikari-0
 
 rules:
 - !SINGLE

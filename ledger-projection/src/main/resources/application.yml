@@ -4,13 +4,23 @@ spring:
   datasource:
     url: jdbc:shardingsphere:classpath:sharding-config.yaml
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    hikari:
+      # Outer Spring HikariPool — was defaulting to 10, capping throughput.
+      # Inner ShardingSphere ds_0 is already 30, so 10 here was the real bottleneck.
+      pool-name: ledger-projection-outer
+      maximum-pool-size: 30
+      minimum-idle: 10
+      connection-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
       group-id: ledger-projection
       auto-offset-reset: latest
       enable-auto-commit: false
-      max-poll-records: 2000
+      # Smaller poll batches keep flushPollBatch under the 30s latch timeout.
+      max-poll-records: 500
       fetch-min-size: 1048576
       fetch-max-wait: 200ms
     listener:

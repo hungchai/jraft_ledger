@@ -12,6 +12,23 @@ spring:
   sql:
     init:
       mode: never
+  # Spring-Kafka producer config — documentation only. The actual producer is built
+  # programmatically in com.tomma8.ledger.event.KafkaEventPublisher (raw Apache
+  # Kafka client). Keep both in sync if you tune either side.
+  kafka:
+    producer:
+      acks: all
+      retries: 2147483647          # Integer.MAX_VALUE — retry forever with idempotence on
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+        linger.ms: 5
+        batch.size: 65536          # 64 KiB
+        compression.type: lz4
+        buffer.memory: 268435456   # 256 MiB
+        client.id: ledger-node-${HOSTNAME}
 
 mybatis:
   mapper-locations: classpath:mapper/*.xml
@@ -57,9 +74,10 @@ ledger:
     max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
     batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
     batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
-  posting:
+    posting:
     max-inflight: ${LEDGER_MAX_INFLIGHT_POSTINGS:256}
     inflight-acquire-ms: ${LEDGER_INFLIGHT_ACQUIRE_MS:100}
+    trace-sample-n: ${LEDGER_POSTING_TRACE_SAMPLE:0}
   idempotency:
     ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
   snowflake:
@@ -68,6 +86,12 @@ ledger:
 outbox:
   poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}
   batch-size: ${OUTBOX_BATCH_SIZE:100}
+  # Async tier-1: in-process queue + drain threads that absorb the
+  # FSM-apply → producer.send() critical path. Tier-2 (this) RocksDB
+  # scanner is the durable safety net for crash recovery.
+  async:
+    queue-capacity: ${OUTBOX_ASYNC_QUEUE_CAPACITY:10000}
+    drain-threads: ${OUTBOX_ASYNC_DRAIN_THREADS:2}
 
 server:
   port: ${SERVER_PORT:8080}

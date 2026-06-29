@@ -1,6 +1,5 @@
 package com.tomma8.ledger.rest.config;
 
-import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.model.BalanceTypeConfig;
 import com.tomma8.ledger.domain.model.NegativeSemantics;
 import com.tomma8.ledger.domain.model.SignConvention;
@@ -16,6 +15,8 @@ import com.tomma8.ledger.raft.ratis.RatisNodeManager;
 import com.tomma8.ledger.rocksdb.OutboxStore;
 import com.tomma8.ledger.rocksdb.RocksDBManager;
 import com.tomma8.ledger.service.*;
+import com.tomma8.ledger.rest.config.properties.LedgerProperties;
+import com.tomma8.ledger.rest.config.properties.OutboxProperties;
 import com.tomma8.ledger.rest.controller.ClusterController;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 import com.tomma8.ledger.queue.AccountQueueManager;
@@ -95,12 +96,13 @@ public class LedgerConfig {
     }
 
     @Bean
-    public NodeRole nodeRole(ConfigService cs, org.springframework.core.env.Environment env) {
+    public NodeRole nodeRole(LedgerProperties ledgerProps, org.springframework.core.env.Environment env) {
         NodeRole nr = new NodeRole();
-        String nodeId = cs.get("NODE_ID", null);
-        String nodeName = nodeId != null ? nodeId : "standalone";
+        String nodeId = ledgerProps.getNode().getId();
+        String nodeName = (nodeId != null && !nodeId.isBlank()) ? nodeId : "standalone";
+        String peers = ledgerProps.getRaft().getPeers();
         if (env.acceptsProfiles(org.springframework.core.env.Profiles.of("test"))
-                || cs.get("PEER_NODES", null) == null) {
+                || peers == null || peers.isBlank()) {
             nr.setLeader(nodeName, 0);
         } else {
             nr.setFollower(nodeName);
@@ -119,19 +121,17 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public RocksDBManager rocksDBManager(ConfigService cs, MeterRegistry meterRegistry) {
+    public RocksDBManager rocksDBManager(LedgerProperties ledgerProps, MeterRegistry meterRegistry) {
         // Init ledger-core hot-path timers (idempotent).
         com.tomma8.ledger.metrics.LedgerMetrics.init(meterRegistry);
-        String dbPath = cs.get("LEDGER_ROCKSDB_PATH", "/tmp/ledger/rocksdb");
-        int cacheMb = cs.getInt("LEDGER_ROCKSDB_CACHE_MB", 256);
-        int writeBufferMb = cs.getInt("LEDGER_ROCKSDB_WRITE_BUFFER_MB", 32);
-        boolean fsync = cs.getBool("LEDGER_ROCKSDB_FSYNC", true);
-        RocksDBManager mgr = new RocksDBManager(dbPath, cacheMb, writeBufferMb, fsync);
+        var rocks = ledgerProps.getRocksdb();
+        RocksDBManager mgr = new RocksDBManager(
+                rocks.getPath(), rocks.getCacheMb(), rocks.getWriteBufferMb(), rocks.isFsync());
         try {
             mgr.open();
-            log.info("RocksDB opened at {}", dbPath);
+            log.info("RocksDB opened at {}", rocks.getPath());
         } catch (Exception e) {
-            log.error("Failed to open RocksDB at {} — running in-memory only", dbPath, e);
+            log.error("Failed to open RocksDB at {} — running in-memory only", rocks.getPath(), e);
         }
         return mgr;
     }
@@ -144,23 +144,25 @@ public class LedgerConfig {
 
     @Bean(destroyMethod = "close")
     @Profile("!test")
-    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore, ConfigService cs, Environment env) {
+    public KafkaEventPublisher kafkaEventPublisher(OutboxStore outboxStore,
+                                                   LedgerProperties ledgerProps,
+                                                   OutboxProperties outboxProps) {
         // Kafka is detected at runtime. The KafkaProducer constructor resolves bootstrap.servers DNS
         // eagerly and THROWS if the host is unresolvable (broker truly absent, e.g. run without the
         // kafka container).
         //
         // ledger.kafka.required controls what happens then:
-        //   false (default; dev/local) → degrade to no-Kafka mode. Node still serves all writes + live
-        //          balance reads (Raft journal is source of truth); no event listener is set, so the
-        //          Kafka projection is simply not produced while the broker is absent. (Host resolves
-        //          but broker down → construction succeeds, fail-fast producer timeouts retry + drain.)
-        //   true  (production) → FAIL STARTUP. Prod must not silently run without the projection, which
-        //          would lose the CQRS read-model for the no-Kafka window; better to crash loudly so the
-        //          deploy is fixed. Set in application-prod.yml.
-        boolean required = env.getProperty("ledger.kafka.required", Boolean.class, false);
-        String brokers = cs.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092");
+        //   false (default; dev/local) → degrade to no-Kafka mode.
+        //   true  (production) → FAIL STARTUP. Set in application-prod.yml.
+        boolean required = ledgerProps.getKafka().isRequired();
+        String brokers = ledgerProps.getKafka().getBootstrapServers();
+        int queueCapacity = outboxProps.getAsync().getQueueCapacity();
+        int drainThreads = outboxProps.getAsync().getDrainThreads();
+        String clientIdSuffix = resolveKafkaClientIdSuffix(ledgerProps);
         try {
-            KafkaEventPublisher publisher = new KafkaEventPublisher(brokers, "ledger.balance.change.v1");
+            KafkaEventPublisher publisher = new KafkaEventPublisher(
+                    brokers, "ledger.balance.change.v1", "ledger.account.v1",
+                    queueCapacity, drainThreads, clientIdSuffix);
             publisher.setOutboxStore(outboxStore);
             return publisher;
         } catch (Exception e) {
@@ -182,9 +184,9 @@ public class LedgerConfig {
                                                       @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
                                                       LedgerStateMachine ledgerStateMachine,
                                                       MeterRegistry meterRegistry,
-                                                      ConfigService cs) {
-        Duration pollInterval = Duration.ofSeconds(cs.getInt("OUTBOX_POLL_INTERVAL_SECS", 10));
-        int batchSize = cs.getInt("OUTBOX_BATCH_SIZE", 100);
+                                                      OutboxProperties outboxProps) {
+        Duration pollInterval = Duration.ofSeconds(outboxProps.getPollIntervalSecs());
+        int batchSize = outboxProps.getBatchSize();
         AsyncOutboxPublisher publisher = new AsyncOutboxPublisher(
                 outboxStore, kafkaPublisher, ledgerStateMachine.getEmitGate(), pollInterval, batchSize);
 
@@ -204,6 +206,30 @@ public class LedgerConfig {
         Gauge.builder("ledger.outbox.last_scan_duration_ms", publisher::getLastScanDurationMs)
                 .description("Duration of last outbox scan in milliseconds")
                 .register(meterRegistry);
+
+        // Async tier-1 in-process queue gauges — read directly from the
+        // publisher instance. Visible only when KafkaEventPublisher is wired
+        // (i.e. the broker is up). 0 in no-Kafka mode is fine.
+        if (kafkaPublisher != null) {
+            Gauge.builder("ledger.outbox.async.queue_depth", kafkaPublisher::getQueueDepth)
+                    .description("In-process async outbox queue depth (FSM-apply → drain-thread handoff)")
+                    .register(meterRegistry);
+            Gauge.builder("ledger.outbox.async.queue_peak", kafkaPublisher::getQueuePeakDepth)
+                    .description("Peak in-process async outbox queue depth since startup")
+                    .register(meterRegistry);
+            Gauge.builder("ledger.outbox.async.enqueued", kafkaPublisher::getEnqueuedCount)
+                    .description("Total envelopes enqueued onto the in-process async outbox")
+                    .register(meterRegistry);
+            Gauge.builder("ledger.outbox.async.drained", kafkaPublisher::getDrainedCount)
+                    .description("Total envelopes handed to Kafka producer by drain threads")
+                    .register(meterRegistry);
+            Gauge.builder("ledger.outbox.async.dropped_sync", kafkaPublisher::getDroppedToSyncCount)
+                    .description("Backpressure events: queue full → fell back to sync send on FSM-apply thread")
+                    .register(meterRegistry);
+            Gauge.builder("ledger.outbox.async.drain_errors", kafkaPublisher::getDrainErrorCount)
+                    .description("Drain-thread unexpected errors")
+                    .register(meterRegistry);
+        }
 
         log.info("AsyncOutboxPublisher wired with pollInterval={} batchSize={}", pollInterval, batchSize);
         return publisher;
@@ -276,10 +302,8 @@ public class LedgerConfig {
             @org.springframework.beans.factory.annotation.Autowired(required = false) RocksDBManager rocksDBManager,
             @org.springframework.beans.factory.annotation.Autowired(required = false) OutboxStore outboxStore,
             @org.springframework.beans.factory.annotation.Autowired(required = false) KafkaEventPublisher kafkaPublisher,
-            @org.springframework.beans.factory.annotation.Value("${ledger.idempotency.ttl:30d}") Duration idempotencyTtl) {
-        // Spring Boot 3.x binds the @Value string ("30d", "3m", "1h") to java.time.Duration
-        // via ApplicationConversionService. Production default 30d; pressure tests can run
-        // with --spring.config.additional-location or env LEDGER_IDEMPOTENCY_TTL=3m.
+            LedgerProperties ledgerProps) {
+        Duration idempotencyTtl = ledgerProps.getIdempotency().getTtl();
         LedgerStateMachine sm = new LedgerStateMachine(
                 balanceStore, accountMetaStore, balanceTypeConfigStore,
                 idempotencyTtl, java.time.Clock.systemUTC(), true);
@@ -330,10 +354,9 @@ public class LedgerConfig {
 
     @Bean
     public ClusterController clusterController(NodeRole nodeRole,
-            ConfigService cs,
-            MeterRegistry meterRegistry,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager) {
-        return new ClusterController(nodeRole, raftNodeManager, cs);
+            @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+            LedgerProperties ledgerProps) {
+        return new ClusterController(nodeRole, raftNodeManager, ledgerProps);
     }
 
     @Bean(destroyMethod = "close")
@@ -341,17 +364,17 @@ public class LedgerConfig {
             LedgerStateMachine ledgerStateMachine,
             NodeRole nodeRole,
             MeterRegistry meterRegistry,
-            ConfigService cs,
-            @org.springframework.beans.factory.annotation.Value("${ledger.raft.group-id:ledger-group-1}") String groupId) {
-        String nodeId   = cs.get("NODE_ID", null);
-        String peers    = cs.get("PEER_NODES", null);
-        String raftPath = cs.get("LEDGER_RAFT_DATA_PATH", "/tmp/ledger/raft");
-        int raftPort    = cs.getInt("RAFT_SERVER_PORT", 28080);
-        String engineRaw = cs.get("CONSENSUS_ENGINE", "jraft");
-        boolean raftLogSync = cs.getBool("LEDGER_RAFT_LOG_FSYNC", true);
+            LedgerProperties ledgerProps) {
+        String nodeId   = ledgerProps.getNode().getId();
+        String peers    = ledgerProps.getRaft().getPeers();
+        String raftPath = ledgerProps.getRaft().getDataPath();
+        int raftPort    = ledgerProps.getRaft().getServerPort();
+        String engineRaw = ledgerProps.getRaft().getEngine();
+        boolean raftLogSync = ledgerProps.getRaft().isLogFsync();
+        String groupId = ledgerProps.getRaft().getGroupId();
         String engine   = (engineRaw == null ? "jraft" : engineRaw).toLowerCase();
 
-        if (nodeId == null || peers == null) {
+        if (nodeId == null || nodeId.isBlank() || peers == null || peers.isBlank()) {
             log.info("Raft cluster not configured — running standalone");
             return null;
         }
@@ -441,19 +464,18 @@ public class LedgerConfig {
     public CommandQueueManager commandQueueManager(
             @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
             MeterRegistry meterRegistry,
-            Environment env) {
+            LedgerProperties ledgerProps) {
         if (raftNodeManager == null) {
             log.info("CommandQueueManager not created — standalone mode");
             return null;
         }
-        boolean enabled = env.getProperty("ledger.command-queue.enabled", Boolean.class, true);
-        if (!enabled) {
+        if (!ledgerProps.getCommandQueue().isEnabled()) {
             log.info("CommandQueueManager disabled via ledger.command-queue.enabled=false");
             return null;
         }
-        int maxSize = env.getProperty("ledger.command-queue.max-size", Integer.class, 50_000);
-        int batchSize = env.getProperty("ledger.command-queue.batch-size", Integer.class, 16);
-        long batchWaitMs = env.getProperty("ledger.command-queue.batch-wait-ms", Long.class, 1L);
+        int maxSize = ledgerProps.getCommandQueue().getMaxSize();
+        int batchSize = ledgerProps.getCommandQueue().getBatchSize();
+        long batchWaitMs = ledgerProps.getCommandQueue().getBatchWaitMs();
         CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs);
         Gauge.builder("ledger.command.queue.depth", cqm::getQueueDepth)
                 .description("Depth of global command ingress queue")
@@ -564,5 +586,16 @@ public class LedgerConfig {
             try { ledgerStateMachine.takeSnapshot(); log.info("Bootstrap snapshot saved"); }
             catch (Exception e) { log.warn("Bootstrap snapshot failed (RocksDB may not be open): {}", e.getMessage()); }
         };
+    }
+
+    private static String resolveKafkaClientIdSuffix(LedgerProperties ledgerProps) {
+        String host = ledgerProps.getNode().getHostname();
+        if (host == null || host.isBlank()) {
+            host = ledgerProps.getNode().getId();
+        }
+        if (host == null || host.isBlank()) {
+            host = "ledger-node";
+        }
+        return host;
     }
 }

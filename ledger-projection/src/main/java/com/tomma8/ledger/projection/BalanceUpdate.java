@@ -7,7 +7,7 @@ import java.util.Objects;
  * A balance update to be applied to MySQL via the {@link ConflationQueue}.
  * Keyed by (accountId, balanceType, currency) — only the highest accountSeq wins.
  *
- * equals/hashCode use only the key fields so ConflationQueue can conflate
+ * <p>equals/hashCode use only the key fields so ConflationQueue can conflate
  * by replacing entries in a HashMap.
  */
 public record BalanceUpdate(

@@ -65,6 +65,9 @@
 
         <!-- Misc -->
         <protobuf.version>3.25.5</protobuf.version>
+
+        <!-- Caffeine: high-perf, near-zero-allocation cache for the projection date LRU. -->
+        <caffeine.version>3.1.8</caffeine.version>
     </properties>
 
     <dependencyManagement>
@@ -180,6 +183,15 @@
                 <groupId>com.google.protobuf</groupId>
                 <artifactId>protobuf-java</artifactId>
                 <version>${protobuf.version}</version>
+            </dependency>
+
+            <!-- Caffeine: bounded LRU cache (replaces Collections.synchronizedMap
+                 + LinkedHashMap for the projection DATE_CACHE — lock-free, lower
+                 allocation rate, O(1) evict). -->
+            <dependency>
+                <groupId>com.github.ben-manes.caffeine</groupId>
+                <artifactId>caffeine</artifactId>
+                <version>${caffeine.version}</version>
             </dependency>
 
             <!-- Test -->

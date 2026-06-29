@@ -6,3 +6,21 @@ ledger:
     # instead of silently degrading to no-Kafka mode (which would drop the CQRS projection for the
     # outage window). Dev/local leave this false (graceful degrade). See LedgerConfig.kafkaEventPublisher.
     required: ${LEDGER_KAFKA_REQUIRED:true}
+
+# Spring-Kafka producer config — production overrides. Idempotence on, retries infinite,
+# in-flight=5, ample buffer memory for batched throughput. See application.yml for context.
+spring:
+  kafka:
+    producer:
+      acks: all
+      retries: 2147483647
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+        linger.ms: 5
+        batch.size: 65536
+        compression.type: lz4
+        buffer.memory: 268435456
+        client.id: ledger-node-${HOSTNAME}

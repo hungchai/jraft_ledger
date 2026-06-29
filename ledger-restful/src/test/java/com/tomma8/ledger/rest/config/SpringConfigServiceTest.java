@@ -4,49 +4,55 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.tomma8.ledger.rest.config.properties.DataSourceConnectionProperties;
+import com.tomma8.ledger.rest.config.properties.LedgerProperties;
+import com.tomma8.ledger.rest.config.properties.OutboxProperties;
+import com.tomma8.ledger.rest.config.properties.ServerPortProperties;
 import org.junit.jupiter.api.Test;
-import org.springframework.mock.env.MockEnvironment;
 
 class SpringConfigServiceTest {
 
   @Test
-  void resolvesLegacyEnvKeyFromYmlProperty() {
-    MockEnvironment env = new MockEnvironment();
-    env.setProperty("ledger.rocksdb.path", "/custom/path");
-    SpringConfigService cs = new SpringConfigService(env);
+  void resolvesLegacyEnvKeyFromProperties() {
+    LedgerProperties ledger = new LedgerProperties();
+    ledger.getRocksdb().setPath("/custom/path");
+    SpringConfigService cs = service(ledger, new OutboxProperties());
     assertEquals("/custom/path", cs.get("LEDGER_ROCKSDB_PATH", "default"));
   }
 
   @Test
   void resolvesPropertyKeyDirectly() {
-    MockEnvironment env = new MockEnvironment();
-    env.setProperty("ledger.rocksdb.path", "/custom/path");
-    SpringConfigService cs = new SpringConfigService(env);
+    LedgerProperties ledger = new LedgerProperties();
+    ledger.getRocksdb().setPath("/custom/path");
+    SpringConfigService cs = service(ledger, new OutboxProperties());
     assertEquals("/custom/path", cs.get("ledger.rocksdb.path", "default"));
   }
 
   @Test
   void fallsBackToDefaultWhenUnset() {
-    MockEnvironment env = new MockEnvironment();
-    SpringConfigService cs = new SpringConfigService(env);
+    SpringConfigService cs = service(new LedgerProperties(), new OutboxProperties());
     assertEquals("fallback", cs.get("kafka.bootstrap.servers", "fallback"));
   }
 
   @Test
   void getIntReadsTypedProperty() {
-    MockEnvironment env = new MockEnvironment();
-    env.setProperty("outbox.batch-size", "250");
-    SpringConfigService cs = new SpringConfigService(env);
+    OutboxProperties outbox = new OutboxProperties();
+    outbox.setBatchSize(250);
+    SpringConfigService cs = service(new LedgerProperties(), outbox);
     assertEquals(250, cs.getInt("OUTBOX_BATCH_SIZE", 100));
   }
 
   @Test
   void getBoolReadsTypedProperty() {
-    MockEnvironment env = new MockEnvironment();
-    env.setProperty("ledger.kafka.required", "true");
-    SpringConfigService cs = new SpringConfigService(env);
+    LedgerProperties ledger = new LedgerProperties();
+    ledger.getKafka().setRequired(true);
+    SpringConfigService cs = service(ledger, new OutboxProperties());
     assertTrue(cs.getBool("LEDGER_KAFKA_REQUIRED", false));
-    env.setProperty("ledger.kafka.required", "false");
+    ledger.getKafka().setRequired(false);
     assertFalse(cs.getBool("LEDGER_KAFKA_REQUIRED", true));
+  }
+
+  private static SpringConfigService service(LedgerProperties ledger, OutboxProperties outbox) {
+    return new SpringConfigService(ledger, outbox, new DataSourceConnectionProperties(), new ServerPortProperties());
   }
 }

@@ -59,6 +59,12 @@
             <artifactId>shardingsphere-jdbc</artifactId>
         </dependency>
 
+        <!-- Caffeine — bounded LRU for ISO LocalDate parsing cache -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
