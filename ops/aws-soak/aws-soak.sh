@@ -321,7 +321,8 @@ deploy_cluster() {
   rssh "$run" "$node1_pub" "rm -f ~/.ssh/soak.pem"   # remove temp key
 
   # launch each node: --network host, private-IP raft peers, no-Kafka, add-opens, chown 999 data
-  local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
+  local CHRONICLE_OPTS="--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED"
+  local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED $CHRONICLE_OPTS"
   while read -r name id pub priv; do
     if [ "$name" = "mgmt" ]; then continue; fi
     rssh "$run" "$pub" "
@@ -339,6 +340,8 @@ deploy_cluster() {
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=0 \
         -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
+        -e LEDGER_CHRONICLE_WAL_ENABLED=${LEDGER_CHRONICLE_WAL_ENABLED:-false} \
+        -e LEDGER_CHRONICLE_SYNC_MODE=${LEDGER_CHRONICLE_SYNC_MODE:-SYNC} \
         -e JAVA_OPTS='$JOPTS' \
         -v /home/$SSH_USER/ledger-data:/var/lib/ledger -v /mnt/raft:/var/lib/ledger/raft \
         ledger-node:latest >/dev/null && echo '$name launched'
