@@ -64,6 +64,7 @@ PROM_PORT=9090
 FULL=false
 SVC_TYPE="c7g.large"             # each services host (mysql / kafka / projection): 2 vCPU / 4 GiB ARM
 KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the kafka host's private IP)
+KAFKA_EXPORTER_PORT=9308         # kafka-exporter: authoritative consumergroup lag (true backlog)
 MYSQL_PORT=3306
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
@@ -125,7 +126,9 @@ run_dir() { echo "$STATE_ROOT/$1"; }
 kv_get() { grep -E "^$2=" "$(run_dir "$1")/run.env" 2>/dev/null | cut -d= -f2-; }
 # UserKnownHostsFile=/dev/null + StrictHostKeyChecking=no: public IPs get reused across runs, so a
 # stale known_hosts entry would otherwise fail host-key verification on a later run.
-SSHK() { echo "-i $(run_dir "$1")/key.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o ServerAliveInterval=10"; }
+# ConnectTimeout=30 + ConnectionAttempts=4: tolerate transient connect/banner-exchange flakes
+# (Tokyo public-IP path is occasionally lossy); ServerAliveInterval keeps long builds alive.
+SSHK() { echo "-i $(run_dir "$1")/key.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ConnectionAttempts=4 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"; }
 # The `-n` matters: rssh runs inside `while read ... < hosts` loops. Without it, ssh reads its stdin
 # from the loop's hosts file and swallows the remaining lines → only the first host is processed
 # (the bug that left only node-1 launched / node-2 shipped). -n ties ssh stdin to /dev/null.
@@ -199,6 +202,7 @@ cmd_up() {
     # intra-SG: ledger nodes + projection → kafka:9092; projection → mysql:3306; (all cross-host now)
     "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
       "IpProtocol=tcp,FromPort=$KAFKA_PORT,ToPort=$KAFKA_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka}]" \
+      "IpProtocol=tcp,FromPort=$KAFKA_EXPORTER_PORT,ToPort=$KAFKA_EXPORTER_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka-exporter}]" \
       "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=mysql-intra}]" \
       "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=projection-intra}]" >/dev/null
     # from your IP: projection actuator/health + mysql (so you can inspect ledger_view)
@@ -390,7 +394,7 @@ deploy_svc() {
       docker rm -f ledger-kafka >/dev/null 2>&1 || true
       docker run -d --name ledger-kafka --restart unless-stopped --network host \
         -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
-        -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:$KAFKA_PORT,CONTROLLER://0.0.0.0:9093 \
+        -e KAFKA_LISTENERS=PLAINTEXT://$kafka_priv:$KAFKA_PORT,CONTROLLER://$kafka_priv:9093 \
         -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://$kafka_priv:$KAFKA_PORT \
         -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
         -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT \
@@ -403,6 +407,13 @@ deploy_svc() {
   log "Waiting for mysql healthy + kafka reachable..."
   rssh "$run" "$mysql_pub" 'for i in $(seq 1 40); do docker exec ledger-mysql mysqladmin ping -h localhost >/dev/null 2>&1 && { echo "  mysql up"; break; }; [ "$i" = 40 ] && echo "  WARN mysql not ready"; sleep 3; done'
   rssh "$run" "$kafka_pub" 'for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/'"$KAFKA_PORT"') >/dev/null 2>&1 && { echo "  kafka up"; break; }; [ "$i" = 30 ] && echo "  WARN kafka not ready"; sleep 3; done'
+  # kafka-exporter: broker-side consumergroup lag (true backlog, survives a dead/slow consumer)
+  rssh "$run" "$kafka_pub" "
+    docker rm -f kafka-exporter >/dev/null 2>&1 || true
+    docker run -d --name kafka-exporter --restart unless-stopped --network host \
+      danielqsj/kafka-exporter:latest --kafka.server=$kafka_priv:$KAFKA_PORT --web.listen-address=:$KAFKA_EXPORTER_PORT >/dev/null 2>&1 \
+      && echo 'kafka-exporter launched'
+  " | sed 's/^/  /'
 
   log "Building + starting projection on $proj_priv (maven build ~5min)..."
   # --add-host ledger-mysql:<mysql_priv> so projection's hardcoded sharding jdbc (jdbc:mysql://ledger-mysql:3306) resolves
@@ -486,12 +497,16 @@ deploy_obs() {
   # --full: scrape the projection service (Micrometer at :8089) too
   local proj_job=""
   if [ "$FULL" = true ]; then
-    local proj_priv; proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts")
+    local proj_priv kafka_priv; proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts"); kafka_priv=$(awk '$1=="kafka"{print $4}' "$RD/hosts")
     proj_job="  - job_name: projection
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ['$proj_priv:$PROJECTION_PORT']
-        labels: { app: ledger, component: projection }"
+        labels: { app: ledger, component: projection }
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ['$kafka_priv:$KAFKA_EXPORTER_PORT']
+        labels: { app: ledger, component: kafka }"
   fi
   log "Deploying Prometheus + Grafana on mgmt..."
   rssh "$run" "$mgmt_pub" "mkdir -p ~/obs && cat > ~/obs/prometheus.yml <<EOF
