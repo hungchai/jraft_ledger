@@ -9,9 +9,9 @@ dataSources:
   ds_0:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
     driverClassName: org.postgresql.Driver
-    jdbcUrl: jdbc:postgresql://ledger-postgres:5432/ledger_view?reWriteBatchedInserts=true&prepareThreshold=1
-    username: ledger
-    password: ledger123
+    jdbcUrl: jdbc:postgresql://$${env::DB_HOST::ledger-postgres}:$${env::DB_PORT::5432}/ledger_view?reWriteBatchedInserts=true&prepareThreshold=1
+    username: $${env::DB_USER::ledger}
+    password: $${env::DB_PASSWORD::ledger123}
     maximum-pool-size: 30
     minimum-idle: 10
     connection-timeout: 5000
