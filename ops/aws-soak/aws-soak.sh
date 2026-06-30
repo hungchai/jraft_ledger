@@ -67,6 +67,7 @@ KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the k
 KAFKA_EXPORTER_PORT=9308         # kafka-exporter: authoritative consumergroup lag (true backlog)
 DB_PORT=5432                     # Aurora PostgreSQL port
 AURORA_CLASS="db.t4g.medium"     # Aurora PG instance class (Graviton; cheapest that fits a soak)
+PG_EXPORTER_PORT=9187            # postgres_exporter (on projection host → Aurora) for pg_* metrics
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
 
@@ -205,6 +206,7 @@ cmd_up() {
     "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
       "IpProtocol=tcp,FromPort=$KAFKA_PORT,ToPort=$KAFKA_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka}]" \
       "IpProtocol=tcp,FromPort=$KAFKA_EXPORTER_PORT,ToPort=$KAFKA_EXPORTER_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka-exporter}]" \
+      "IpProtocol=tcp,FromPort=$PG_EXPORTER_PORT,ToPort=$PG_EXPORTER_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=pg-exporter}]" \
       "IpProtocol=tcp,FromPort=$DB_PORT,ToPort=$DB_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=aurora-pg-intra}]" \
       "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=projection-intra}]" >/dev/null
     # from your IP: projection actuator/health + Aurora PG (so you can psql into ledger_view)
@@ -473,6 +475,14 @@ deploy_svc() {
       ledger-projection:latest >/dev/null && echo 'projection launched'
   " | sed 's/^/  /'
   rssh "$run" "$proj_pub" 'for i in $(seq 1 40); do curl -s --max-time 3 http://localhost:'"$PROJECTION_PORT"'/actuator/health 2>/dev/null | grep -q "\"status\":\"UP\"" && { echo "  projection UP"; break; }; [ "$i" = 40 ] && echo "  WARN projection not UP"; sleep 6; done'
+  # postgres_exporter (on the projection host, → Aurora endpoint) → pg_* metrics for Grafana
+  rssh "$run" "$proj_pub" "
+    docker rm -f postgres-exporter >/dev/null 2>&1 || true
+    docker run -d --name postgres-exporter --restart unless-stopped --network host \
+      -e DATA_SOURCE_NAME='postgresql://ledger:ledger123@$ep:$DB_PORT/ledger_view?sslmode=disable' \
+      -e PG_EXPORTER_WEB_LISTEN_ADDRESS=':$PG_EXPORTER_PORT' \
+      quay.io/prometheuscommunity/postgres-exporter:latest >/dev/null 2>&1 && echo 'postgres-exporter launched'
+  " | sed 's/^/  /'
   ok "services tier up (aurora=$ep kafka=$kafka_priv projection=http://$proj_pub:$PROJECTION_PORT)"
 }
 
@@ -562,7 +572,11 @@ deploy_obs() {
   - job_name: kafka
     static_configs:
       - targets: ['$kafka_priv:$KAFKA_EXPORTER_PORT']
-        labels: { app: ledger, component: kafka, node: kafka }"
+        labels: { app: ledger, component: kafka, node: kafka }
+  - job_name: postgres
+    static_configs:
+      - targets: ['$proj_priv:$PG_EXPORTER_PORT']
+        labels: { app: ledger, component: postgres, node: aurora }"
   fi
   log "Deploying Prometheus + Grafana on mgmt..."
   rssh "$run" "$mgmt_pub" "mkdir -p ~/obs && cat > ~/obs/prometheus.yml <<EOF

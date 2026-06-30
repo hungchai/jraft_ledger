@@ -526,8 +526,8 @@
     },
     {
       "id": 102,
-      "title": "MySQL Performance",
-      "description": "MySQL server QPS/connections/slow queries plus projection write throughput.",
+      "title": "Aurora PostgreSQL Performance",
+      "description": "Aurora PostgreSQL txn/s, connections, rows inserted/s, plus projection write throughput.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -574,28 +574,48 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "MySQL QPS",
-          "expr": "rate(mysql_global_status_questions{job=\"mysql\"}[1m])"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"ledger_view\"}[1m]) + rate(pg_stat_database_xact_rollback{datname=\"ledger_view\"}[1m])",
+          "legendFormat": "PG txn/s"
         },
         {
           "refId": "B",
-          "legendFormat": "connections",
-          "expr": "mysql_global_status_threads_connected{job=\"mysql\"}"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "pg_stat_database_numbackends{datname=\"ledger_view\"}",
+          "legendFormat": "connections"
         },
         {
           "refId": "C",
-          "legendFormat": "slow queries/s",
-          "expr": "rate(mysql_global_status_slow_queries{job=\"mysql\"}[1m])"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(pg_stat_database_tup_inserted{datname=\"ledger_view\"}[1m])",
+          "legendFormat": "rows inserted/s"
         },
         {
           "refId": "D",
-          "legendFormat": "projection flush rows/s",
-          "expr": "rate(ledger_projection_journal_flush_rows{job=\"projection\"}[1m])"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(ledger_projection_journal_flush_rows[1m])",
+          "legendFormat": "projection flush rows/s"
         },
         {
           "refId": "E",
-          "legendFormat": "balance writes/s",
-          "expr": "rate(ledger_projection_balance_writes{job=\"projection\"}[1m])"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(ledger_projection_balance_writes[1m])",
+          "legendFormat": "balance writes/s"
         }
       ]
     },
@@ -1060,7 +1080,7 @@
       "type": "timeseries"
     },
     {
-      "description": "State machine journal sequence (smJournalSeq) per node. Same as test-cycle lag: SM_journals - MySQL_journals. Alert if follower lags > 100 behind leader.",
+      "description": "State machine journal sequence (smJournalSeq) per node. Same as test-cycle lag: SM_journals - DB_journals. Alert if follower lags > 100 behind leader.",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1488,7 +1508,7 @@
             "uid": "prometheus"
           },
           "expr": "rate(ledger_projection_journal_flush_rows[1m])",
-          "legendFormat": "journal rows\u2192mysql"
+          "legendFormat": "journal rows\u2192db"
         },
         {
           "refId": "C",
@@ -1497,14 +1517,14 @@
             "uid": "prometheus"
           },
           "expr": "rate(ledger_projection_balance_writes[1m])",
-          "legendFormat": "balance upserts\u2192mysql"
+          "legendFormat": "balance upserts\u2192db"
         }
       ]
     },
     {
       "id": 203,
       "type": "timeseries",
-      "title": "MySQL upsert mean latency (ms)",
+      "title": "DB upsert mean latency (ms)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
