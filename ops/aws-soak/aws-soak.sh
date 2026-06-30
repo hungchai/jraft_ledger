@@ -460,14 +460,15 @@ deploy_svc() {
       psql -h $ep -p $DB_PORT -U ledger -d ledger_view -v ON_ERROR_STOP=1 -f /init.sql >/dev/null && echo 'schema applied'" | sed 's/^/  /'
 
   log "Building + starting projection on $proj_priv (maven build ~5min)..."
-  # Projection's ShardingSphere jdbcUrl host is env-overridable ($${env::DB_HOST::...}); point it at Aurora.
+  # ShardingSphere parses the jdbcUrl before resolving env placeholders, so the Aurora endpoint
+  # must be baked into sharding-config.yaml BEFORE the image build (sed the default host → endpoint).
   rssh "$run" "$proj_pub" "
     $NODE_EXPORTER_RUN
-    cd jraft_ledger && docker build -q -t ledger-projection:latest -f Dockerfile.projection . >/dev/null && echo 'projection built'
+    cd jraft_ledger && sed -i 's|jdbc:postgresql://ledger-postgres:5432|jdbc:postgresql://$ep:$DB_PORT|' ledger-projection/src/main/resources/sharding-config.yaml
+    docker build -q -t ledger-projection:latest -f Dockerfile.projection . >/dev/null && echo 'projection built'
     docker rm -f ledger-projection >/dev/null 2>&1 || true
     docker run -d --name ledger-projection --restart unless-stopped --network host \
       -e SERVER_PORT=$PROJECTION_PORT \
-      -e DB_HOST=$ep -e DB_PORT=$DB_PORT -e DB_USER=ledger -e DB_PASSWORD=ledger123 \
       -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 \
       -e KAFKA_BOOTSTRAP_SERVERS=$kafka_priv:$KAFKA_PORT -e KAFKA_CONSUMER_CONCURRENCY=4 \
       -e SNOWFLAKE_WORKER_ID=1 \

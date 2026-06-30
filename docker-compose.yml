@@ -296,8 +296,6 @@ services:
       SERVER_PORT: 8089
       SPRING_DATASOURCE_USERNAME: ledger
       SPRING_DATASOURCE_PASSWORD: ledger123
-      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_view
-      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
       KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
       KAFKA_CONSUMER_CONCURRENCY: 4
       SNOWFLAKE_WORKER_ID: 1

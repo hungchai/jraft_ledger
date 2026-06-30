@@ -53,7 +53,7 @@ public interface JournalMapper {
             "INSERT INTO journal_line (" +
             "  id, journal_id, account_id, account_balance_id, " +
             "  journal_line_id, journal_journal_id, account_account_id, " +
-            "  leg_id, balance_type, position, currency, entry_type, " +
+            "  leg_id, balance_type, \"position\", currency, entry_type, " +
             "  amount, balance_before, balance_after, config_version, created_at" +
             ") VALUES (" +
             "  #{id}, #{journalId}, #{accountId}, #{accountBalanceId}, " +
@@ -82,7 +82,7 @@ public interface JournalMapper {
 
     @Select("SELECT id, journal_id, account_id, account_balance_id, " +
             "  journal_line_id, journal_journal_id, account_account_id, " +
-            "  leg_id, balance_type, position, currency, entry_type, " +
+            "  leg_id, balance_type, \"position\", currency, entry_type, " +
             "  amount, balance_before, balance_after, config_version, created_at " +
             "FROM journal_line WHERE journal_journal_id = #{journalJournalId}")
     List<Map<String, Object>> findLinesByJournalId(@Param("journalJournalId") String journalJournalId);
@@ -110,7 +110,7 @@ public interface JournalMapper {
     @Insert("<script>" +
             "INSERT INTO journal_line (" +
             "  id, journal_id, account_id, account_balance_id, journal_line_id, journal_journal_id, " +
-            "  account_account_id, leg_id, balance_type, position, currency, entry_type, " +
+            "  account_account_id, leg_id, balance_type, \"position\", currency, entry_type, " +
             "  amount, balance_before, balance_after, config_version, created_at" +
             ") VALUES " +
             "<foreach collection='rows' item='r' separator=','>" +
