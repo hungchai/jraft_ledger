@@ -92,7 +92,7 @@ services:
       LEDGER_ROCKSDB_FSYNC: "false"
       LEDGER_RAFT_LOG_FSYNC: "true"
       JAVA_OPTS: >-
-        -Xms2g
+        -Xms3g
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
@@ -148,7 +148,7 @@ services:
       LEDGER_ROCKSDB_FSYNC: "false"
       LEDGER_RAFT_LOG_FSYNC: "true"
       JAVA_OPTS: >-
-        -Xms2g
+        -Xms3g
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
@@ -206,7 +206,7 @@ services:
       LEDGER_ROCKSDB_FSYNC: "false"
       LEDGER_RAFT_LOG_FSYNC: "true"
       JAVA_OPTS: >-
-        -Xms2g
+        -Xms3g
         -Xmx3g
         -XX:+UseZGC
         -XX:MaxGCPauseMillis=5
@@ -300,10 +300,10 @@ services:
       KAFKA_CONSUMER_CONCURRENCY: 4
       SNOWFLAKE_WORKER_ID: 1
       JAVA_OPTS: >-
-        -Xms2g
+        -Xms3g
         -Xmx3g
-        -XX:+UseG1GC
-        -XX:MaxGCPauseMillis=50
+        -XX:+UseZGC
+        -XX:+ZGenerational
 
         -XX:+HeapDumpOnOutOfMemoryError
         -XX:HeapDumpPath=/var/lib/projection/
