@@ -303,6 +303,10 @@ install_all() {
         set -e
         sudo shutdown -h +$ttl_min >/dev/null 2>&1 || true   # TTL failsafe
         if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1; sudo usermod -aG docker $SSH_USER; sudo systemctl enable --now docker; fi
+        # docker group membership only applies to a NEW login — the deploy rssh sessions race ahead
+        # of that and hit 'permission denied on docker.sock'. Open the socket so docker works without
+        # re-login (throwaway rig). Idempotent; safe to run every time.
+        sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
         test -d jraft_ledger/.git || git clone -q $REPO_URL
         cd jraft_ledger && git fetch -q origin && git checkout -q $BRANCH && git pull -q
         if [ '$name' = 'mgmt' ] && ! command -v k6 >/dev/null; then
