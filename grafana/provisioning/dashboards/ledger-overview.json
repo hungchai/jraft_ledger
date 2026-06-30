@@ -650,7 +650,7 @@
         {
           "refId": "A",
           "legendFormat": "{{node}} {{action}}",
-          "expr": "sum by (instance, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
+          "expr": "sum by (node, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
         }
       ]
     },
@@ -709,7 +709,7 @@
         {
           "refId": "A",
           "legendFormat": "{{node}}",
-          "expr": "max by (instance) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
+          "expr": "max by (node) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
         }
       ]
     },
