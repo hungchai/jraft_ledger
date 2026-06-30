@@ -5,10 +5,10 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger_view}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/ledger_view}
     username: ${SPRING_DATASOURCE_USERNAME:ledger}
     password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    driver-class-name: org.postgresql.Driver
   sql:
     init:
       mode: never
