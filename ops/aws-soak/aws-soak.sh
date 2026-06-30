@@ -388,12 +388,10 @@ provision_aurora() {
   "${AWSCLI[@]}" rds create-db-subnet-group --db-subnet-group-name "$cid" \
     --db-subnet-group-description "jraft soak $run" --subnet-ids $subnets \
     --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
-  # latest Aurora PostgreSQL 16 engine version (fall back to newest available)
-  local ver; ver=$("${AWSCLI[@]}" rds describe-db-engine-versions --engine aurora-postgresql \
-    --query 'DBEngineVersions[?starts_with(EngineVersion, `16`)].EngineVersion | [-1]' --output text 2>/dev/null)
-  { [ -z "$ver" ] || [ "$ver" = "None" ]; } && ver=$("${AWSCLI[@]}" rds describe-db-engine-versions --engine aurora-postgresql --query 'DBEngineVersions[-1].EngineVersion' --output text)
+  # No --engine-version: let Aurora pick its current default aurora-postgresql version
+  # (avoids brittle version lookups + invalid-version failures).
   "${AWSCLI[@]}" rds create-db-cluster --db-cluster-identifier "$cid" \
-    --engine aurora-postgresql --engine-version "$ver" \
+    --engine aurora-postgresql \
     --master-username ledger --master-user-password ledger123 --database-name ledger_view \
     --db-subnet-group-name "$cid" --vpc-security-group-ids "$SG" \
     --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
@@ -401,7 +399,7 @@ provision_aurora() {
     --db-cluster-identifier "$cid" --engine aurora-postgresql --db-instance-class "$AURORA_CLASS" \
     --publicly-accessible \
     --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
-  ok "Aurora $cid creating (engine $ver, $AURORA_CLASS)"
+  ok "Aurora $cid creating ($AURORA_CLASS, default engine version)"
 }
 wait_aurora() {
   local run=$1; local RD; RD="$(run_dir "$run")"; local cid; cid="$(kv_get "$run" AURORA_CLUSTER)"
