@@ -11,7 +11,7 @@ public interface AccountBalanceMapper {
 
     /**
      * Ensure an account_balance row exists, returning the surrogate id.
-     * On duplicate key: only touch the row by setting LAST_INSERT_ID(id),
+     * On conflict (unique key): no-op (ON CONFLICT DO NOTHING),
      * actual data update comes via applyBalanceChange().
      */
     @Insert("<script>" +
@@ -23,7 +23,7 @@ public interface AccountBalanceMapper {
             "    <otherwise>#{amount}, 0, 0</otherwise>" +
             "  </choose>" +
             ", #{accountSeq}, #{lastJournalId}) " +
-            "ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)" +
+            "ON CONFLICT (account_account_id, balance_type, currency) DO NOTHING" +
             "</script>")
     int ensureBalanceRow(@Param("accountId") long accountId,
                          @Param("accountAccountId") String accountAccountId,
@@ -58,8 +58,8 @@ public interface AccountBalanceMapper {
 
     /**
      * Upsert balance with accountSeq guard in a single atomic operation.
-     * Uses INSERT ... ON DUPLICATE KEY UPDATE with IF guards.
-     * Returns the surrogate id (via LAST_INSERT_ID) on success.
+     * Uses INSERT ... ON CONFLICT DO UPDATE with CASE seq guards (EXCLUDED vs stored).
+     * Returns affected-row count; the surrogate id is resolved via findIdByKey when needed.
      * If incoming accountSeq < stored, data columns are not updated but id is still returned.
      * Caller should check account_seq after this to determine if change was applied.
      */
@@ -72,21 +72,21 @@ public interface AccountBalanceMapper {
             "    <otherwise>#{amount}, 0, 0</otherwise>" +
             "  </choose>" +
             ", #{accountSeq}, #{lastJournalId}) " +
-            "ON DUPLICATE KEY UPDATE " +
+            "ON CONFLICT (account_account_id, balance_type, currency) DO UPDATE SET " +
             "  <choose>" +
             "    <when test='position == \"FROZEN\"'>" +
-            "      frozen_amount = IF(#{accountSeq} &gt;= account_seq, VALUES(frozen_amount), frozen_amount)" +
+            "      frozen_amount = CASE WHEN EXCLUDED.account_seq &gt;= account_balance.account_seq THEN EXCLUDED.frozen_amount ELSE account_balance.frozen_amount END" +
             "    </when>" +
             "    <when test='position == \"LOCKED\"'>" +
-            "      locked_amount = IF(#{accountSeq} &gt;= account_seq, VALUES(locked_amount), locked_amount)" +
+            "      locked_amount = CASE WHEN EXCLUDED.account_seq &gt;= account_balance.account_seq THEN EXCLUDED.locked_amount ELSE account_balance.locked_amount END" +
             "    </when>" +
             "    <otherwise>" +
-            "      amount = IF(#{accountSeq} &gt;= account_seq, VALUES(amount), amount)" +
+            "      amount = CASE WHEN EXCLUDED.account_seq &gt;= account_balance.account_seq THEN EXCLUDED.amount ELSE account_balance.amount END" +
             "    </otherwise>" +
             "  </choose>" +
-            ", account_seq = IF(#{accountSeq} &gt;= account_seq, VALUES(account_seq), account_seq)" +
-            ", last_journal_id = IF(#{accountSeq} &gt;= account_seq, VALUES(last_journal_id), last_journal_id)" +
-            ", id = LAST_INSERT_ID(id)" +
+            ", account_seq = CASE WHEN EXCLUDED.account_seq &gt;= account_balance.account_seq THEN EXCLUDED.account_seq ELSE account_balance.account_seq END" +
+            ", last_journal_id = CASE WHEN EXCLUDED.account_seq &gt;= account_balance.account_seq THEN EXCLUDED.last_journal_id ELSE account_balance.last_journal_id END" +
+            ", updated_at = CURRENT_TIMESTAMP" +
             "</script>")
     int upsertBalance(@Param("accountId") long accountId,
                       @Param("accountAccountId") String accountAccountId,

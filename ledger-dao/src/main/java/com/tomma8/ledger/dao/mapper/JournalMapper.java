@@ -16,8 +16,8 @@ public interface JournalMapper {
     // ============================================================
 
     @Insert("<script>" +
-            "INSERT IGNORE INTO journal (id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at) " +
-            "VALUES (#{id}, #{journalId}, #{journalType}, #{requestId}, #{businessEventType}, #{businessEventRef}, #{valueDate}, #{status}, #{crossPeriod}, #{createdAt})" +
+            "INSERT INTO journal (id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at) " +
+            "VALUES (#{id}, #{journalId}, #{journalType}, #{requestId}, #{businessEventType}, #{businessEventRef}, #{valueDate}, #{status}, #{crossPeriod}, #{createdAt}) ON CONFLICT DO NOTHING" +
             "</script>")
     int insertJournal(@Param("id") long id,
                       @Param("journalId") String journalId,
@@ -50,7 +50,7 @@ public interface JournalMapper {
     // ============================================================
 
     @Insert("<script>" +
-            "INSERT IGNORE INTO journal_line (" +
+            "INSERT INTO journal_line (" +
             "  id, journal_id, account_id, account_balance_id, " +
             "  journal_line_id, journal_journal_id, account_account_id, " +
             "  leg_id, balance_type, position, currency, entry_type, " +
@@ -60,7 +60,7 @@ public interface JournalMapper {
             "  #{journalLineId}, #{journalJournalId}, #{accountAccountId}, " +
             "  #{legId}, #{balanceType}, #{position}, #{currency}, #{entryType}, " +
             "  #{amount}, #{balanceBefore}, #{balanceAfter}, #{configVersion}, #{createdAt}" +
-            ")" +
+            ") ON CONFLICT DO NOTHING" +
             "</script>")
     int insertJournalLine(@Param("id") long id,
                           @Param("journalId") long journalId,
@@ -108,7 +108,7 @@ public interface JournalMapper {
     Long findIdByJournalLineId(@Param("journalLineId") String journalLineId);
 
     @Insert("<script>" +
-            "INSERT IGNORE INTO journal_line (" +
+            "INSERT INTO journal_line (" +
             "  id, journal_id, account_id, account_balance_id, journal_line_id, journal_journal_id, " +
             "  account_account_id, leg_id, balance_type, position, currency, entry_type, " +
             "  amount, balance_before, balance_after, config_version, created_at" +
@@ -117,7 +117,7 @@ public interface JournalMapper {
             "(#{r.id}, #{r.journalPk}, #{r.accountPk}, 0, #{r.journalLineId}, #{r.journalJournalId}, " +
             " #{r.accountAccountId}, '', #{r.balanceType}, #{r.position}, #{r.currency}, #{r.entryType}, " +
             " #{r.amount}, #{r.balanceBefore}, #{r.balanceAfter}, #{r.configVersion}, #{r.createdAt})" +
-            "</foreach>" +
+            "</foreach> ON CONFLICT DO NOTHING" +
             "</script>")
     int batchInsertJournalLines(@Param("rows") List<JournalLineBatchRow> rows);
 
