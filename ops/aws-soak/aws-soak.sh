@@ -57,15 +57,16 @@ RAFT_PORT=28080
 HTTP_PORT=8080
 GRAFANA_PORT=3000
 PROM_PORT=9090
-# --full: also provision THREE dedicated service hosts — one each for mysql, kafka, projection —
-# and wire the ledger nodes to publish to that Kafka (real outbox→Kafka→projection→MySQL path).
-# Each runs --network host and is addressed by private IP (no shared compose bridge across hosts);
-# projection gets --add-host ledger-mysql:<mysql_priv> so its hardcoded sharding jdbc URL resolves.
+# --full: provision TWO dedicated service EC2 hosts (kafka, projection) + a managed RDS
+# Aurora PostgreSQL cluster for the read model. The ledger nodes publish to Kafka; projection
+# consumes → writes Aurora PG (real outbox→Kafka→projection→Aurora path). The DB is Aurora (not
+# a container) — projection/nodes reach it via the cluster writer endpoint, passed as DB_HOST.
 FULL=false
-SVC_TYPE="c7g.large"             # each services host (mysql / kafka / projection): 2 vCPU / 4 GiB ARM
+SVC_TYPE="c7g.large"             # each services EC2 host (kafka, projection): 2 vCPU / 4 GiB ARM
 KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the kafka host's private IP)
 KAFKA_EXPORTER_PORT=9308         # kafka-exporter: authoritative consumergroup lag (true backlog)
-MYSQL_PORT=3306
+DB_PORT=5432                     # Aurora PostgreSQL port
+AURORA_CLASS="db.t4g.medium"     # Aurora PG instance class (Graviton; cheapest that fits a soak)
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
 
@@ -199,16 +200,17 @@ cmd_up() {
     "IpProtocol=tcp,FromPort=$GRAFANA_PORT,ToPort=$GRAFANA_PORT,IpRanges=[{CidrIp=$CIDR,Description=grafana}]" \
     "IpProtocol=tcp,FromPort=$PROM_PORT,ToPort=$PROM_PORT,IpRanges=[{CidrIp=$CIDR,Description=prometheus}]" >/dev/null
   if [ "$FULL" = true ]; then
-    # intra-SG: ledger nodes + projection → kafka:9092; projection → mysql:3306; (all cross-host now)
+    # intra-SG: ledger nodes + projection → kafka:9092; projection + nodes → Aurora PG:5432
+    # (Aurora's ENI is placed in this same SG, so intra-SG 5432 lets the consumers reach it).
     "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
       "IpProtocol=tcp,FromPort=$KAFKA_PORT,ToPort=$KAFKA_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka}]" \
       "IpProtocol=tcp,FromPort=$KAFKA_EXPORTER_PORT,ToPort=$KAFKA_EXPORTER_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=kafka-exporter}]" \
-      "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=mysql-intra}]" \
+      "IpProtocol=tcp,FromPort=$DB_PORT,ToPort=$DB_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=aurora-pg-intra}]" \
       "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,UserIdGroupPairs=[{GroupId=$SG,Description=projection-intra}]" >/dev/null
-    # from your IP: projection actuator/health + mysql (so you can inspect ledger_view)
+    # from your IP: projection actuator/health + Aurora PG (so you can psql into ledger_view)
     "${AWSCLI[@]}" ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
       "IpProtocol=tcp,FromPort=$PROJECTION_PORT,ToPort=$PROJECTION_PORT,IpRanges=[{CidrIp=$CIDR,Description=projection-you}]" \
-      "IpProtocol=tcp,FromPort=$MYSQL_PORT,ToPort=$MYSQL_PORT,IpRanges=[{CidrIp=$CIDR,Description=mysql-you}]" >/dev/null
+      "IpProtocol=tcp,FromPort=$DB_PORT,ToPort=$DB_PORT,IpRanges=[{CidrIp=$CIDR,Description=aurora-pg-you}]" >/dev/null
   fi
   ok "security group $SG (raft/http intra-SG; 22/3000/9090/8080 from $CIDR)"
 
@@ -228,7 +230,7 @@ cmd_up() {
   echo "mgmt $(launch_one mgmt "${PROJECT_TAG}-$RUN-mgmt" "$MGMT_TYPE")" >> "$RD/instances"
   local NINST=$((NODES+1))
   if [ "$FULL" = true ]; then
-    for role in mysql kafka projection; do
+    for role in kafka projection; do
       echo "$role $(launch_one "$role" "${PROJECT_TAG}-$RUN-$role" "$SVC_TYPE")" >> "$RD/instances"; NINST=$((NINST+1))
     done
   fi
@@ -251,19 +253,22 @@ cmd_up() {
     echo "MGMT_PUB=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")"
     echo "MGMT_PRIV=$(awk '$1=="mgmt"{print $4}' "$RD/hosts")"
     echo "FULL=$FULL"
-    echo "MYSQL_PUB=$(awk '$1=="mysql"{print $3}' "$RD/hosts")"
-    echo "MYSQL_PRIV=$(awk '$1=="mysql"{print $4}' "$RD/hosts")"
     echo "KAFKA_PUB=$(awk '$1=="kafka"{print $3}' "$RD/hosts")"
     echo "KAFKA_PRIV=$(awk '$1=="kafka"{print $4}' "$RD/hosts")"
     echo "PROJECTION_PUB=$(awk '$1=="projection"{print $3}' "$RD/hosts")"
     echo "PROJECTION_PRIV=$(awk '$1=="projection"{print $4}' "$RD/hosts")"
+    echo "AURORA_CLUSTER=${PROJECT_TAG}-${RUN}"
+    echo "AURORA_ENDPOINT="          # filled by wait_aurora once the writer is available
   } > "$RD/run.env"
   cat "$RD/hosts" | sed 's/^/  /'
+
+  # Aurora takes ~10-15min to provision — kick it off NOW (async) so it overlaps the maven build.
+  [ "$FULL" = true ] && provision_aurora "$RUN"
 
   wait_ssh "$RUN"
   setup_raft_disk "$RUN"
   install_all "$RUN"
-  [ "$FULL" = true ] && deploy_svc "$RUN"    # kafka+mysql+projection first, so required=true nodes find Kafka ready
+  [ "$FULL" = true ] && deploy_svc "$RUN"    # kafka first; waits for Aurora available before projection
   deploy_cluster "$RUN"
   deploy_obs "$RUN"
   verify_cluster "$RUN"
@@ -272,7 +277,7 @@ cmd_up() {
   echo
   ok "Cluster UP (run $RUN). Grafana: http://$MGMT_PUB:$GRAFANA_PORT (admin/admin123)  Prometheus: http://$MGMT_PUB:$PROM_PORT"
   if [ "$FULL" = true ]; then
-    ok "Full stack: projection http://$(kv_get "$RUN" PROJECTION_PUB):$PROJECTION_PORT/actuator/health  mysql $(kv_get "$RUN" MYSQL_PUB):$MYSQL_PORT (ledger/ledger123 db=ledger_view)  kafka $(kv_get "$RUN" KAFKA_PRIV):$KAFKA_PORT"
+    ok "Full stack: projection http://$(kv_get "$RUN" PROJECTION_PUB):$PROJECTION_PORT/actuator/health  aurora-pg $(kv_get "$RUN" AURORA_ENDPOINT):$DB_PORT (ledger/ledger123 db=ledger_view)  kafka $(kv_get "$RUN" KAFKA_PRIV):$KAFKA_PORT"
   fi
   echo "  Run a test:   $0 test --vus $VUS --duration $DURATION"
   echo "  Tear down:    $0 down"
@@ -362,39 +367,68 @@ setup_raft_disk() {
   ok "raft-log disk ready ($DISK)"
 }
 
-# --full: bring up the services tier across THREE dedicated hosts (mysql / kafka / projection),
+# --full: bring up the services tier — 2 EC2 hosts (kafka, projection) + managed Aurora PG,
 # each --network host and addressed by private IP. node_exporter runs on each so the mgmt
 # Prometheus can monitor their CPU/mem (to judge whether the chosen size is enough). Order:
-# mysql + kafka first (parallel), then projection (depends on both), so by the time the ledger
-# nodes start (deploy_cluster, after this) Kafka is ready for required=true publishing.
+# kafka first, then projection (after Aurora is available + schema bootstrapped), so by the time
+# the ledger nodes start (deploy_cluster, after this) Kafka is ready for required=true publishing.
 NODE_EXPORTER_RUN='docker run -d --name node-exporter --restart unless-stopped --network host --pid host \
   -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro \
   prom/node-exporter:latest --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs >/dev/null 2>&1 || true'
+# --- Aurora PostgreSQL lifecycle (managed RDS; replaces the mysql container of the old design) ---
+# Aurora needs a DB subnet group spanning >=2 AZs. We reuse the default per-AZ subnets and place
+# the cluster ENI in the run's SG (intra-SG 5432 lets projection + nodes reach the writer endpoint).
+provision_aurora() {
+  local run=$1; local RD; RD="$(run_dir "$run")"; local cid; cid="$(kv_get "$run" AURORA_CLUSTER)"
+  local SG; SG="$(kv_get "$run" SG)"
+  log "Provisioning Aurora PostgreSQL $cid (async; ~10-15min, overlaps the maven build)..."
+  local subnets; subnets=$("${AWSCLI[@]}" ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query 'Subnets[].SubnetId' --output text)
+  "${AWSCLI[@]}" rds create-db-subnet-group --db-subnet-group-name "$cid" \
+    --db-subnet-group-description "jraft soak $run" --subnet-ids $subnets \
+    --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
+  # latest Aurora PostgreSQL 16 engine version (fall back to newest available)
+  local ver; ver=$("${AWSCLI[@]}" rds describe-db-engine-versions --engine aurora-postgresql \
+    --query 'DBEngineVersions[?starts_with(EngineVersion, `16`)].EngineVersion | [-1]' --output text 2>/dev/null)
+  { [ -z "$ver" ] || [ "$ver" = "None" ]; } && ver=$("${AWSCLI[@]}" rds describe-db-engine-versions --engine aurora-postgresql --query 'DBEngineVersions[-1].EngineVersion' --output text)
+  "${AWSCLI[@]}" rds create-db-cluster --db-cluster-identifier "$cid" \
+    --engine aurora-postgresql --engine-version "$ver" \
+    --master-username ledger --master-user-password ledger123 --database-name ledger_view \
+    --db-subnet-group-name "$cid" --vpc-security-group-ids "$SG" \
+    --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
+  "${AWSCLI[@]}" rds create-db-instance --db-instance-identifier "${cid}-1" \
+    --db-cluster-identifier "$cid" --engine aurora-postgresql --db-instance-class "$AURORA_CLASS" \
+    --publicly-accessible \
+    --tags "Key=Project,Value=$PROJECT_TAG" "Key=Run,Value=$run" >/dev/null
+  ok "Aurora $cid creating (engine $ver, $AURORA_CLASS)"
+}
+wait_aurora() {
+  local run=$1; local RD; RD="$(run_dir "$run")"; local cid; cid="$(kv_get "$run" AURORA_CLUSTER)"
+  log "Waiting for Aurora $cid writer available..."
+  "${AWSCLI[@]}" rds wait db-instance-available --db-instance-identifier "${cid}-1"
+  local ep; ep=$("${AWSCLI[@]}" rds describe-db-clusters --db-cluster-identifier "$cid" --query 'DBClusters[0].Endpoint' --output text)
+  sed -i.bak "s|^AURORA_ENDPOINT=.*|AURORA_ENDPOINT=$ep|" "$RD/run.env" && rm -f "$RD/run.env.bak"
+  ok "Aurora available: $ep"
+}
+teardown_aurora() {  # $1 = cluster id
+  local cid=$1
+  "${AWSCLI[@]}" rds delete-db-instance --db-instance-identifier "${cid}-1" --skip-final-snapshot >/dev/null 2>&1 \
+    && echo "  deleting Aurora instance ${cid}-1" || true
+  "${AWSCLI[@]}" rds wait db-instance-deleted --db-instance-identifier "${cid}-1" 2>/dev/null || true
+  "${AWSCLI[@]}" rds delete-db-cluster --db-cluster-identifier "$cid" --skip-final-snapshot >/dev/null 2>&1 \
+    && echo "  deleting Aurora cluster $cid" || true
+  "${AWSCLI[@]}" rds wait db-cluster-deleted --db-cluster-identifier "$cid" 2>/dev/null || true
+  "${AWSCLI[@]}" rds delete-db-subnet-group --db-subnet-group-name "$cid" >/dev/null 2>&1 \
+    && echo "  deleted Aurora subnet group $cid" || true
+}
+
 deploy_svc() {
   local run=$1; local RD; RD="$(run_dir "$run")"
-  local mysql_pub mysql_priv kafka_pub kafka_priv proj_pub proj_priv
-  mysql_pub=$(awk '$1=="mysql"{print $3}' "$RD/hosts");      mysql_priv=$(awk '$1=="mysql"{print $4}' "$RD/hosts")
+  local kafka_pub kafka_priv proj_pub proj_priv
   kafka_pub=$(awk '$1=="kafka"{print $3}' "$RD/hosts");      kafka_priv=$(awk '$1=="kafka"{print $4}' "$RD/hosts")
   proj_pub=$(awk '$1=="projection"{print $3}' "$RD/hosts");  proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts")
 
-  log "Services tier: starting mysql ($mysql_priv) + kafka ($kafka_priv) in parallel..."
-  # mysql: init.sql from the cloned repo seeds the ledger_view schema.
-  # innodb-flush-log-at-trx-commit=2 + skip-log-bin: the projection is a Kafka-rebuildable read
-  # model (replays on crash), so per-commit durability is unnecessary. Measured 3.75x consume
-  # throughput (800 -> 3000 events/s) vs the durable default — the write path was fsync-bound on
-  # the commit (redo + binlog fsync per commit), not CPU/lock-bound.
-  ( rssh "$run" "$mysql_pub" "
-      $NODE_EXPORTER_RUN
-      docker rm -f ledger-mysql >/dev/null 2>&1 || true
-      docker run -d --name ledger-mysql --restart unless-stopped --network host \
-        -e MYSQL_ROOT_PASSWORD=ledger123 -e MYSQL_DATABASE=ledger_view \
-        -e MYSQL_USER=ledger -e MYSQL_PASSWORD=ledger123 \
-        -v \$HOME/jraft_ledger/init.sql:/docker-entrypoint-initdb.d/init.sql \
-        mysql:8.4 --max-connections=1000 \
-          --innodb-flush-log-at-trx-commit=2 --skip-log-bin >/dev/null && echo 'mysql launched'
-    " | sed 's/^/  /' ) &
-  # kafka: single-node KRaft, advertised on its own private IP so both projection and ledger nodes reach it
-  ( rssh "$run" "$kafka_pub" "
+  log "Services tier: starting kafka ($kafka_priv)..."
+  rssh "$run" "$kafka_pub" "
       $NODE_EXPORTER_RUN
       docker rm -f ledger-kafka >/dev/null 2>&1 || true
       docker run -d --name ledger-kafka --restart unless-stopped --network host \
@@ -406,13 +440,8 @@ deploy_svc() {
         -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@$kafka_priv:9093 \
         -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true -e KAFKA_NUM_PARTITIONS=4 \
         apache/kafka:3.9.0 >/dev/null && echo 'kafka launched'
-    " | sed 's/^/  /' ) &
-  wait
-
-  log "Waiting for mysql healthy + kafka reachable..."
-  rssh "$run" "$mysql_pub" 'for i in $(seq 1 40); do docker exec ledger-mysql mysqladmin ping -h localhost >/dev/null 2>&1 && { echo "  mysql up"; break; }; [ "$i" = 40 ] && echo "  WARN mysql not ready"; sleep 3; done'
+    " | sed 's/^/  /'
   rssh "$run" "$kafka_pub" 'for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/'"$KAFKA_PORT"') >/dev/null 2>&1 && { echo "  kafka up"; break; }; [ "$i" = 30 ] && echo "  WARN kafka not ready"; sleep 3; done'
-  # kafka-exporter: broker-side consumergroup lag (true backlog, survives a dead/slow consumer)
   rssh "$run" "$kafka_pub" "
     docker rm -f kafka-exporter >/dev/null 2>&1 || true
     docker run -d --name kafka-exporter --restart unless-stopped --network host \
@@ -420,15 +449,23 @@ deploy_svc() {
       && echo 'kafka-exporter launched'
   " | sed 's/^/  /'
 
+  # Aurora must be up before projection. It was kicked off in cmd_up; now block on it + bootstrap schema.
+  wait_aurora "$run"
+  local ep; ep="$(kv_get "$run" AURORA_ENDPOINT)"
+  log "Bootstrapping schema into Aurora ($ep) via psql (init.sql)..."
+  rssh "$run" "$proj_pub" "cd jraft_ledger && docker run --rm --network host -e PGPASSWORD=ledger123 \
+      -v \$HOME/jraft_ledger/init.sql:/init.sql:ro postgres:16 \
+      psql -h $ep -p $DB_PORT -U ledger -d ledger_view -v ON_ERROR_STOP=1 -f /init.sql >/dev/null && echo 'schema applied'" | sed 's/^/  /'
+
   log "Building + starting projection on $proj_priv (maven build ~5min)..."
-  # --add-host ledger-mysql:<mysql_priv> so projection's hardcoded sharding jdbc (jdbc:mysql://ledger-mysql:3306) resolves
+  # Projection's ShardingSphere jdbcUrl host is env-overridable ($${env::DB_HOST::...}); point it at Aurora.
   rssh "$run" "$proj_pub" "
     $NODE_EXPORTER_RUN
     cd jraft_ledger && docker build -q -t ledger-projection:latest -f Dockerfile.projection . >/dev/null && echo 'projection built'
     docker rm -f ledger-projection >/dev/null 2>&1 || true
     docker run -d --name ledger-projection --restart unless-stopped --network host \
-      --add-host ledger-mysql:$mysql_priv \
       -e SERVER_PORT=$PROJECTION_PORT \
+      -e DB_HOST=$ep -e DB_PORT=$DB_PORT -e DB_USER=ledger -e DB_PASSWORD=ledger123 \
       -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 \
       -e KAFKA_BOOTSTRAP_SERVERS=$kafka_priv:$KAFKA_PORT -e KAFKA_CONSUMER_CONCURRENCY=4 \
       -e SNOWFLAKE_WORKER_ID=1 \
@@ -436,7 +473,7 @@ deploy_svc() {
       ledger-projection:latest >/dev/null && echo 'projection launched'
   " | sed 's/^/  /'
   rssh "$run" "$proj_pub" 'for i in $(seq 1 40); do curl -s --max-time 3 http://localhost:'"$PROJECTION_PORT"'/actuator/health 2>/dev/null | grep -q "\"status\":\"UP\"" && { echo "  projection UP"; break; }; [ "$i" = 40 ] && echo "  WARN projection not UP"; sleep 6; done'
-  ok "services tier up (mysql=$mysql_priv kafka=$kafka_priv projection=http://$proj_pub:$PROJECTION_PORT)"
+  ok "services tier up (aurora=$ep kafka=$kafka_priv projection=http://$proj_pub:$PROJECTION_PORT)"
 }
 
 deploy_cluster() {
@@ -462,8 +499,13 @@ deploy_cluster() {
   # launch each node: --network host, private-IP raft peers, add-opens, chown 999 data.
   # Kafka: lean mode points at an invalid broker with required=false (graceful degrade);
   # --full points at the svc host's Kafka EXTERNAL listener with required=true (real outbox path).
-  local KAFKA_BOOT="kafka.invalid:9092" KAFKA_REQ="false"
-  if [ "$FULL" = true ]; then KAFKA_BOOT="$(kv_get "$run" KAFKA_PRIV):$KAFKA_PORT"; KAFKA_REQ="true"; fi
+  local KAFKA_BOOT="kafka.invalid:9092" KAFKA_REQ="false" DS_ENV=""
+  if [ "$FULL" = true ]; then
+    KAFKA_BOOT="$(kv_get "$run" KAFKA_PRIV):$KAFKA_PORT"; KAFKA_REQ="true"
+    # ledger read APIs (as-of balance, journal query) read the Aurora PG read model
+    local _ep; _ep="$(kv_get "$run" AURORA_ENDPOINT)"
+    DS_ENV="-e SPRING_DATASOURCE_URL=jdbc:postgresql://$_ep:$DB_PORT/ledger_view -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 -e SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.postgresql.Driver"
+  fi
   # heap fits the default c8gd.xlarge (8 GiB). Override with LEDGER_JAVA_OPTS for smaller nodes.
   local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
   while read -r name id pub priv; do
@@ -479,7 +521,7 @@ deploy_cluster() {
         -e NODE_ID=$priv -e PEER_NODES=$PEERS -e RAFT_SERVER_PORT=$RAFT_PORT \
         -e LEDGER_ADVERTISE_URL=http://$priv:$HTTP_PORT \
         -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=/var/lib/ledger/rocksdb \
-        -e KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOT -e LEDGER_KAFKA_REQUIRED=$KAFKA_REQ \
+        -e KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOT -e LEDGER_KAFKA_REQUIRED=$KAFKA_REQ $DS_ENV \
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=0 \
         -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
@@ -649,6 +691,9 @@ cmd_down() {
   log "Terminating run $run instances: $IDS"
   "${AWSCLI[@]}" ec2 terminate-instances --instance-ids $IDS >/dev/null
   "${AWSCLI[@]}" ec2 wait instance-terminated --instance-ids $IDS
+  # Aurora cluster (must go before the SG delete — Aurora's ENI holds the SG)
+  local AC; AC="$(kv_get "$run" AURORA_CLUSTER)"
+  if [ -n "$AC" ]; then log "Tearing down Aurora $AC (~5-10min)..."; teardown_aurora "$AC"; fi
   # dedicated raft-log io2 volumes (attached separately → not DeleteOnTermination; delete explicitly)
   if [ -s "$RD/volumes" ]; then
     local VOLS; VOLS=$(awk '{print $2}' "$RD/volumes" | tr '\n' ' ')
@@ -677,6 +722,10 @@ cmd_sweep() {
     "${AWSCLI[@]}" ec2 wait instance-terminated --instance-ids $IDS || true   # wait so ENIs free → SG deletable
     ok "instances terminated"
   else ok "no instances"; fi
+  # 1b. Aurora clusters (must be before SGs — Aurora ENIs hold the run SG)
+  local ACS; ACS=$("${AWSCLI[@]}" rds describe-db-clusters \
+    --query "DBClusters[?starts_with(DBClusterIdentifier, '${PROJECT_TAG}-')].DBClusterIdentifier" --output text 2>/dev/null)
+  for ac in $ACS; do echo "  tearing down Aurora $ac"; teardown_aurora "$ac"; done
   # 2. security groups (must be after instance ENIs detach)
   local SGS; SGS=$("${AWSCLI[@]}" ec2 describe-security-groups \
     --filters "Name=tag:Project,Values=$PROJECT_TAG" --query 'SecurityGroups[].GroupId' --output text)
@@ -743,10 +792,11 @@ aws-soak.sh — on-demand jraft_ledger multi-host soak on AWS
          --disk gp3|io2|nvme  raft-log storage arm (default gp3). io2 → dedicated provisioned-IOPS
                               volume (--raft-gb --raft-iops); nvme → instance-store local disk
                               (requires a *d instance type, e.g. --node-type c6id.large).
-         --full              also provision 3 dedicated service hosts (mysql / kafka / projection),
-                             node_exporter on each, and wire ledger nodes to publish to that Kafka
-                             (KAFKA_REQUIRED=true → real outbox→Kafka→projection→MySQL path).
-         --svc-type <type>   instance type for EACH of the 3 --full service hosts (default c7g.large).
+         --full              also provision 2 service hosts (kafka, projection) + a managed RDS
+                             Aurora PostgreSQL cluster, and wire ledger nodes to publish to that Kafka
+                             (KAFKA_REQUIRED=true → real outbox→Kafka→projection→Aurora PG path).
+                             Aurora adds ~10-15min provisioning + teardown; cost while up.
+         --svc-type <type>   instance type for EACH of the 2 --full EC2 service hosts (default c7g.large).
          --ssh-cidr <cidr>   ingress CIDR for ssh/grafana/prometheus/http (default: 0.0.0.0/0, public).
                              Pass your office CIDR to lock it down.
 EOF
