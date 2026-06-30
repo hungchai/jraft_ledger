@@ -478,7 +478,7 @@ deploy_svc() {
   rssh "$run" "$proj_pub" "
     docker rm -f postgres-exporter >/dev/null 2>&1 || true
     docker run -d --name postgres-exporter --restart unless-stopped --network host \
-      -e DATA_SOURCE_NAME='postgresql://ledger:ledger123@$ep:$DB_PORT/ledger_view?sslmode=disable' \
+      -e DATA_SOURCE_NAME='postgresql://ledger:ledger123@$ep:$DB_PORT/ledger_view?sslmode=require' \
       -e PG_EXPORTER_WEB_LISTEN_ADDRESS=':$PG_EXPORTER_PORT' \
       quay.io/prometheuscommunity/postgres-exporter:latest >/dev/null 2>&1 && echo 'postgres-exporter launched'
   " | sed 's/^/  /'
