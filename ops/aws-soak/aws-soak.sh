@@ -378,11 +378,23 @@ deploy_svc() {
   proj_pub=$(awk '$1=="projection"{print $3}' "$RD/hosts");  proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts")
 
   log "Services tier: starting mysql ($mysql_priv) + kafka ($kafka_priv) in parallel..."
-  # mysql: init.sql from the cloned repo seeds the ledger_view schema.
-  # innodb-flush-log-at-trx-commit=2 + skip-log-bin: the projection is a Kafka-rebuildable read
-  # model (replays on crash), so per-commit durability is unnecessary. Measured 3.75x consume
-  # throughput (800 -> 3000 events/s) vs the durable default — the write path was fsync-bound on
-  # the commit (redo + binlog fsync per commit), not CPU/lock-bound.
+  # mysql: init.sql from the cloned repo seeds the ledger_view schema. DURABLE + binlog-ON by
+  # default (innodb_flush_log_at_trx_commit=1, sync_binlog=1, log_bin on) — crash-safe and
+  # REPLICATION-SAFE, since the target deployment is master-slave (binlog is required for replicas,
+  # and crash-safe replication needs both flush=1 and sync_binlog=1).
+  #
+  # Investigation note: the per-commit double fsync (redo + binlog) is the projection write ceiling
+  # (~800 events/s; flipping flush=2 + sync_binlog=0 hit ~3000/s in a single-node A/B). But that
+  # relaxation is UNSAFE under master-slave (skip-log-bin breaks replication; flush=2 desyncs InnoDB
+  # from the binlog on crash), so it is NOT the default. Under master-slave, throughput must come
+  # from app-layer levers (concurrent committers → group commit, bigger batches), faster disk
+  # (io2/NVMe), or a different replication model (Aurora). Opt in ONLY for a single-node throwaway
+  # perf probe via LEDGER_PROJECTION_MYSQL_RELAXED=true.
+  local MYSQL_EXTRA=""
+  if [ "${LEDGER_PROJECTION_MYSQL_RELAXED:-false}" = true ]; then
+    MYSQL_EXTRA="--innodb-flush-log-at-trx-commit=2 --skip-log-bin"   # UNSAFE for replication — single-node only
+    warn "LEDGER_PROJECTION_MYSQL_RELAXED=true → relaxed durability (NOT replication-safe)"
+  fi
   ( rssh "$run" "$mysql_pub" "
       $NODE_EXPORTER_RUN
       docker rm -f ledger-mysql >/dev/null 2>&1 || true
@@ -390,8 +402,7 @@ deploy_svc() {
         -e MYSQL_ROOT_PASSWORD=ledger123 -e MYSQL_DATABASE=ledger_view \
         -e MYSQL_USER=ledger -e MYSQL_PASSWORD=ledger123 \
         -v \$HOME/jraft_ledger/init.sql:/docker-entrypoint-initdb.d/init.sql \
-        mysql:8.4 --max-connections=1000 \
-          --innodb-flush-log-at-trx-commit=2 --skip-log-bin >/dev/null && echo 'mysql launched'
+        mysql:8.4 --max-connections=1000 $MYSQL_EXTRA >/dev/null && echo 'mysql launched'
     " | sed 's/^/  /' ) &
   # kafka: single-node KRaft, advertised on its own private IP so both projection and ledger nodes reach it
   ( rssh "$run" "$kafka_pub" "
