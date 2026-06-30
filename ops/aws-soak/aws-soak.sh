@@ -536,7 +536,7 @@ deploy_cluster() {
         -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=/var/lib/ledger/rocksdb \
         -e KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOT -e LEDGER_KAFKA_REQUIRED=$KAFKA_REQ $DS_ENV \
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
-        -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=0 \
+        -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:-1} \
         -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
         -e JAVA_OPTS='$JOPTS' \
         -v /home/$SSH_USER/ledger-data:/var/lib/ledger -v /mnt/raft:/var/lib/ledger/raft \
