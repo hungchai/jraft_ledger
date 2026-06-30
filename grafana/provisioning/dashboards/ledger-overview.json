@@ -201,8 +201,8 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_raft_is_leader{node_id=~\"$node\"}",
-          "legendFormat": "{{node_id}}",
+          "expr": "ledger_raft_is_leader{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "refId": "A"
         }
       ],
@@ -649,7 +649,7 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{instance}} {{action}}",
+          "legendFormat": "{{node}} {{action}}",
           "expr": "sum by (instance, action) (increase(jvm_gc_pause_seconds_count{job=~\"ledger-nodes|projection\"}[1m]))"
         }
       ]
@@ -708,7 +708,7 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node}}",
           "expr": "max by (instance) (jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000"
         }
       ]
@@ -1105,8 +1105,8 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_sm_journal_sequence{node_id=~\"$node\"}",
-          "legendFormat": "{{node_id}}",
+          "expr": "ledger_sm_journal_sequence{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "refId": "A"
         }
       ],
@@ -1159,8 +1159,8 @@
       "pluginVersion": "12.0.1+security-01",
       "targets": [
         {
-          "expr": "ledger_raft_last_applied_index{node_id=~\"$node\"}",
-          "legendFormat": "{{node_id}}",
+          "expr": "ledger_raft_last_applied_index{node=~\"$node\"}",
+          "legendFormat": "{{node}}",
           "refId": "A"
         }
       ],
@@ -1227,12 +1227,12 @@
       "targets": [
         {
           "expr": "jvm_memory_used_bytes{area=\"heap\"}",
-          "legendFormat": "{{instance}} - Used",
+          "legendFormat": "{{node}} - Used",
           "refId": "A"
         },
         {
           "expr": "jvm_memory_max_bytes{area=\"heap\"}",
-          "legendFormat": "{{instance}} - Max",
+          "legendFormat": "{{node}} - Max",
           "refId": "B"
         }
       ],
@@ -1316,12 +1316,12 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{instance}} process",
+          "legendFormat": "{{node}} process",
           "expr": "process_cpu_usage{job=~\"ledger-nodes|projection\"} * 100"
         },
         {
           "refId": "B",
-          "legendFormat": "{{instance}} system",
+          "legendFormat": "{{node}} system",
           "expr": "system_cpu_usage{job=~\"ledger-nodes|projection\"} * 100"
         }
       ],
@@ -1332,12 +1332,24 @@
       "title": "Ledger Start Time",
       "description": "JVM process start time per ledger node and projection (Spring Boot process_start_time_seconds).",
       "type": "stat",
-      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 56 },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue" }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue"
+              }
+            ]
+          },
           "unit": "dateTimeAsIso"
         },
         "overrides": []
@@ -1347,7 +1359,13 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto",
         "wideLayout": true
       },
@@ -1355,7 +1373,7 @@
         {
           "refId": "A",
           "expr": "process_start_time_seconds{job=~\"ledger-nodes|projection\"} * 1000",
-          "legendFormat": "{{instance}}"
+          "legendFormat": "{{node}}"
         }
       ]
     },
@@ -1364,12 +1382,24 @@
       "title": "Ledger Running Time",
       "description": "JVM uptime since start per ledger node and projection (process_uptime_seconds). Resets on restart.",
       "type": "stat",
-      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 56 },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
       "pluginVersion": "12.0.1+security-01",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          },
           "unit": "dtdurations"
         },
         "overrides": []
@@ -1379,7 +1409,13 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto",
         "wideLayout": true
       },
@@ -1387,7 +1423,340 @@
         {
           "refId": "A",
           "expr": "process_uptime_seconds{job=~\"ledger-nodes|projection\"}",
-          "legendFormat": "{{instance}}"
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 200,
+      "type": "timeseries",
+      "title": "Raft apply-index lag vs leader (entries behind)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 62,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index",
+          "legendFormat": "{{node}} behind"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "ledger_raft_last_applied_index",
+          "legendFormat": "{{node}} applied"
+        }
+      ]
+    },
+    {
+      "id": 201,
+      "type": "timeseries",
+      "title": "Kafka produce vs consume per topic (msgs/s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset{topic=~\"ledger.*\"}[1m]))",
+          "legendFormat": "produce {{topic}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (rate(kafka_consumergroup_current_offset{consumergroup=\"ledger-projection\"}[1m]))",
+          "legendFormat": "consume {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 202,
+      "type": "timeseries",
+      "title": "Projection consume throughput (rows/s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(ledger_projection_events_processed[1m])",
+          "legendFormat": "events consumed"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(ledger_projection_journal_flush_rows[1m])",
+          "legendFormat": "journal rows\u2192mysql"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(ledger_projection_balance_writes[1m])",
+          "legendFormat": "balance upserts\u2192mysql"
+        }
+      ]
+    },
+    {
+      "id": 203,
+      "type": "timeseries",
+      "title": "MySQL upsert mean latency (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 78,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "1000*rate(ledger_projection_balance_upsert_duration_seconds_sum[1m])/clamp_min(rate(ledger_projection_balance_upsert_duration_seconds_count[1m]),1)",
+          "legendFormat": "upsert mean ms"
+        }
+      ]
+    },
+    {
+      "id": 204,
+      "type": "timeseries",
+      "title": "Projection async queue (backpressure)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 78,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(ledger_projection_balance_upsert_queue_depth)",
+          "legendFormat": "queue depth"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(ledger_projection_balance_upsert_rejected)",
+          "legendFormat": "rejected"
+        }
+      ]
+    },
+    {
+      "id": 205,
+      "type": "stat",
+      "title": "Projection stall (s since last event)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 78,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(ledger_projection_seconds_since_last_event_seconds)",
+          "legendFormat": "Projection stall (s since last event)"
         }
       ]
     }
@@ -1410,12 +1779,12 @@
           ]
         },
         "datasource": "Prometheus",
-        "definition": "label_values(ledger_raft_is_leader, node_id)",
+        "definition": "label_values(ledger_raft_is_leader, node)",
         "includeAll": true,
         "multi": true,
         "name": "node",
         "options": [],
-        "query": "label_values(ledger_raft_is_leader, node_id)",
+        "query": "label_values(ledger_raft_is_leader, node)",
         "refresh": 1,
         "sort": 1,
         "type": "query"

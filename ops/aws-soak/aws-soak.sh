@@ -489,24 +489,33 @@ deploy_cluster() {
 deploy_obs() {
   local run=$1; local RD; RD="$(run_dir "$run")"
   local mgmt_pub; mgmt_pub=$(awk '$1=="mgmt"{print $3}' "$RD/hosts")
-  # ledger app metrics: raft nodes only (mysql/kafka/projection run no ledger-node)
-  local targets; targets=$(awk '$1~/^node-/{printf "%s\"%s:'"$HTTP_PORT"'\"",sep,$4; sep=","}' "$RD/hosts")
-  # host-CPU/mem targets: node_exporter runs on every non-mgmt host (ledger nodes AND the 3 svc hosts,
-  # so we can monitor whether the svc instance size is enough), port 9100.
-  local node_targets; node_targets=$(awk '$1!="mgmt"{printf "%s\"%s:9100\"",sep,$4; sep=","}' "$RD/hosts")
-  # --full: scrape the projection service (Micrometer at :8089) too
-  local proj_job=""
+  # Per-target `node` label = the human host name (node-1 / kafka / projection / ...). Prometheus
+  # attaches a target's labels to EVERY metric scraped from it, so even the ledger app's raft
+  # metrics inherit `node` — dashboards can legend by {{node}} instead of an opaque IP.
+  # ledger-nodes: one stanza per raft node (app metrics)
+  local ledger_block="" nodeexp_block=""
+  while read -r name id pub priv; do
+    case "$name" in node-*)
+      ledger_block+="      - targets: ['$priv:$HTTP_PORT']
+        labels: { app: ledger, component: state-machine, node: $name }
+" ;; esac
+    [ "$name" != "mgmt" ] && nodeexp_block+="      - targets: ['$priv:9100']
+        labels: { app: ledger, node: $name }
+"
+  done < "$RD/hosts"
+  # --full: projection (Micrometer) + kafka-exporter jobs, each name-labelled
+  local svc_jobs=""
   if [ "$FULL" = true ]; then
     local proj_priv kafka_priv; proj_priv=$(awk '$1=="projection"{print $4}' "$RD/hosts"); kafka_priv=$(awk '$1=="kafka"{print $4}' "$RD/hosts")
-    proj_job="  - job_name: projection
+    svc_jobs="  - job_name: projection
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ['$proj_priv:$PROJECTION_PORT']
-        labels: { app: ledger, component: projection }
-  - job_name: kafka-exporter
+        labels: { app: ledger, component: projection, node: projection }
+  - job_name: kafka
     static_configs:
       - targets: ['$kafka_priv:$KAFKA_EXPORTER_PORT']
-        labels: { app: ledger, component: kafka }"
+        labels: { app: ledger, component: kafka, node: kafka }"
   fi
   log "Deploying Prometheus + Grafana on mgmt..."
   rssh "$run" "$mgmt_pub" "mkdir -p ~/obs && cat > ~/obs/prometheus.yml <<EOF
@@ -517,13 +526,9 @@ scrape_configs:
   - job_name: ledger-nodes
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: [$targets]
-        labels: { app: ledger, component: state-machine }
-  - job_name: node-exporter            # host CPU per-core, steal, iowait, run-queue
+$ledger_block  - job_name: node-exporter            # host CPU per-core, steal, iowait, run-queue
     static_configs:
-      - targets: [$node_targets]
-        labels: { app: ledger }
-$proj_job
+$nodeexp_block$svc_jobs
   - job_name: prometheus
     static_configs: [{ targets: ['localhost:9090'] }]
 EOF
