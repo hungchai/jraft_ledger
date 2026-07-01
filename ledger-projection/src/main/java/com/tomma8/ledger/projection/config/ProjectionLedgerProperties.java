@@ -32,9 +32,10 @@ public class ProjectionLedgerProperties {
             private int flushIntervalMs = 50;
             private int maxBuffer = 4000;
             // projection_event_log is an audit-only trail (never read on the hot path; real
-            // idempotency = account_balance seq-guard + journal_line_id UNIQUE). Disabling skips
-            // one sharded INSERT per event (~33% fewer inserts) to lift consume throughput.
-            private boolean eventLogEnabled = true;
+            // idempotency = account_balance seq-guard + journal_line_id UNIQUE). Default OFF —
+            // skips one sharded INSERT + UNIQUE-index maintenance per event, the dominant
+            // projection-consume bottleneck. Set true only if the audit table is actually needed.
+            private boolean eventLogEnabled = false;
 
             public int getFlushIntervalMs() { return flushIntervalMs; }
             public void setFlushIntervalMs(int flushIntervalMs) { this.flushIntervalMs = flushIntervalMs; }
