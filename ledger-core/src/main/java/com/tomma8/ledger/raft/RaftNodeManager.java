@@ -168,6 +168,11 @@ public class RaftNodeManager implements ConsensusEngine {
         List<CompletableFuture<CommandResult>> futures = new ArrayList<>(commands.size());
         for (RaftCommand command : commands) {
             CompletableFuture<CommandResult> future = new CompletableFuture<>();
+            // Record submit → apply-complete as the raft-commit stage. In the pipelined path this is
+            // the only place raft.total is captured (blocking submitBatch records it separately); without
+            // this, ledger.raft.total has zero samples under pipelineDepth>1.
+            future.whenComplete((r, e) ->
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(System.nanoTime() - tSubmit));
             pendingCommands.put(command.requestId(), future);
             futures.add(future);
         }
@@ -204,11 +209,10 @@ public class RaftNodeManager implements ConsensusEngine {
             long tWaitEnd = System.nanoTime();
             com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(tWaitEnd - tWaitStart);
             com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(0);
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(System.nanoTime() - tSubmit);
+            // raft.total recorded per-command via whenComplete in submitBatchAsync (avoids double-count).
             return results;
         } catch (Exception e) {
             long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(elapsedMs * 1_000_000L);
             for (RaftCommand command : commands) {
                 pendingCommands.remove(command.requestId());
             }
