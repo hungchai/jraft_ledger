@@ -476,12 +476,13 @@ public class LedgerConfig {
         int maxSize = ledgerProps.getCommandQueue().getMaxSize();
         int batchSize = ledgerProps.getCommandQueue().getBatchSize();
         long batchWaitMs = ledgerProps.getCommandQueue().getBatchWaitMs();
-        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs);
+        int pipelineDepth = ledgerProps.getCommandQueue().getPipelineDepth();
+        CommandQueueManager cqm = new CommandQueueManager(raftNodeManager, maxSize, batchSize, batchWaitMs, pipelineDepth);
         Gauge.builder("ledger.command.queue.depth", cqm::getQueueDepth)
                 .description("Depth of global command ingress queue")
                 .register(meterRegistry);
-        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={}",
-                maxSize, batchSize, batchWaitMs);
+        log.info("CommandQueueManager started maxSize={} batchSize={} batchWaitMs={} pipelineDepth={}",
+                maxSize, batchSize, batchWaitMs, pipelineDepth);
         return cqm;
     }
 

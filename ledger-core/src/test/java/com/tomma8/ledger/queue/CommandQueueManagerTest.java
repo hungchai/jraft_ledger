@@ -104,6 +104,43 @@ class CommandQueueManagerTest {
     }
 
     @Test
+    @DisplayName("Pipelining runs multiple batches in flight (depth>1) and returns correct results")
+    void pipelining_multipleBatchesInFlight() throws Exception {
+        ScheduledExecutorService sched = Executors.newScheduledThreadPool(4);
+        AtomicInteger inFlight = new AtomicInteger();
+        AtomicInteger maxInFlight = new AtomicInteger();
+        // async engine: each batch's futures complete after 60ms (simulates raft commit latency)
+        ConsensusEngine async = new NoopEngine() {
+            @Override
+            public List<CompletableFuture<CommandResult>> submitBatchAsync(
+                    List<com.tomma8.ledger.domain.command.RaftCommand> commands) {
+                int n = inFlight.incrementAndGet();
+                maxInFlight.accumulateAndGet(n, Math::max);
+                List<CompletableFuture<CommandResult>> fs = new ArrayList<>();
+                for (var c : commands) fs.add(new CompletableFuture<>());
+                sched.schedule(() -> {
+                    inFlight.decrementAndGet();
+                    for (int i = 0; i < commands.size(); i++) fs.get(i).complete(CommandResult.completed("JNL-" + i));
+                }, 60, TimeUnit.MILLISECONDS);
+                return fs;
+            }
+        };
+        // batchSize=1 → one command per batch; depth=4 → up to 4 batches pipelined
+        CommandQueueManager pm = new CommandQueueManager(async, 10_000, 1, 0, 4);
+        try {
+            List<CompletableFuture<CommandResult>> futs = new ArrayList<>();
+            for (int i = 0; i < 8; i++) futs.add(pm.submitAsync(posting("pl-" + i, "d")));
+            CompletableFuture.allOf(futs.toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+            assertThat(futs).allSatisfy(f -> assertThat(f.join().status()).isEqualTo(CommandResult.COMPLETED));
+            assertThat(maxInFlight.get()).isGreaterThan(1);   // proved pipelining
+            assertThat(maxInFlight.get()).isLessThanOrEqualTo(4); // capped at depth
+        } finally {
+            pm.close();
+            sched.shutdownNow();
+        }
+    }
+
+    @Test
     @DisplayName("Queue full rejects new commands")
     void queueFull_rejectsNewCommands() {
         CommandQueueManager smallQueue = new CommandQueueManager(
@@ -126,7 +163,7 @@ class CommandQueueManagerTest {
         );
     }
 
-    private static final class NoopEngine implements ConsensusEngine {
+    private static class NoopEngine implements ConsensusEngine {
         @Override public CommandResult submit(com.tomma8.ledger.domain.command.RaftCommand command) {
             return CommandResult.completed("JNL-1");
         }
