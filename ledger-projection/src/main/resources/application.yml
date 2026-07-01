@@ -47,6 +47,10 @@ ledger:
     journal:
       flush-interval-ms: 50
       max-buffer: 4000
+      # projection_event_log audit trail. false skips the sharded event_log INSERT per event
+      # (~33% fewer inserts → higher consume throughput). Idempotency unaffected (account_balance
+      # seq-guard + journal_line_id UNIQUE). Keep true unless the audit table is unused.
+      event-log-enabled: ${PROJECTION_EVENT_LOG_ENABLED:true}
     balance:
       async:
         # Bounded queue for in-flight balance upsert batches. Each batch holds

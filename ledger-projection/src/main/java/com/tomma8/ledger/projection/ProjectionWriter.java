@@ -77,6 +77,7 @@ public class ProjectionWriter {
         this.journalFlushBuffer = new JournalFlushBuffer(
                 sqlSessionFactory, meterRegistry,
                 journal.getFlushIntervalMs(), journal.getMaxBuffer(),
+                journal.isEventLogEnabled(),
                 count -> eventsProcessed.add(count));
 
         Gauge.builder("ledger.projection.seconds.since.last.event", this,

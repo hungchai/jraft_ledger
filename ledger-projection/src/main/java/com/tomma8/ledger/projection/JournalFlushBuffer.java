@@ -40,6 +40,7 @@ public class JournalFlushBuffer implements AutoCloseable {
     private final SqlSessionFactory sqlSessionFactory;
     private final int flushIntervalMs;
     private final int maxBuffer;
+    private final boolean eventLogEnabled;
     private final LongConsumer onFlushedEventCount;
 
     private final List<ConcurrentLinkedQueue<PendingRow>> shardQueues;
@@ -63,10 +64,12 @@ public class JournalFlushBuffer implements AutoCloseable {
                               MeterRegistry meterRegistry,
                               int flushIntervalMs,
                               int maxBuffer,
+                              boolean eventLogEnabled,
                               LongConsumer onFlushedEventCount) {
         this.sqlSessionFactory = sqlSessionFactory;
         this.flushIntervalMs = Math.max(1, flushIntervalMs);
         this.maxBuffer = Math.max(64, maxBuffer);
+        this.eventLogEnabled = eventLogEnabled;
         this.onFlushedEventCount = onFlushedEventCount;
 
         this.shardQueues = new ArrayList<>(ShardRouting.SHARD_COUNT);
@@ -252,15 +255,19 @@ public class JournalFlushBuffer implements AutoCloseable {
         if (pending.isEmpty()) return;
 
         List<JournalMapper.JournalLineBatchRow> journalRows = toJournalLineRows(pending);
-        List<ProjectionEventLogMapper.EventLogBatchRow> eventRows = toEventLogRows(pending);
+        // event_log is audit-only; skip building + inserting when gated off (~33% fewer inserts).
+        List<ProjectionEventLogMapper.EventLogBatchRow> eventRows =
+                eventLogEnabled ? toEventLogRows(pending) : null;
 
         RuntimeException lastError = null;
         for (int attempt = 1; attempt <= DEADLOCK_MAX_RETRIES; attempt++) {
             try (SqlSession session = sqlSessionFactory.openSession()) {
                 JournalMapper jm = session.getMapper(JournalMapper.class);
-                ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
                 jm.batchInsertJournalLines(journalRows);
-                em.batchInsertEvents(eventRows);
+                if (eventLogEnabled) {
+                    ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
+                    em.batchInsertEvents(eventRows);
+                }
                 session.commit();
                 flushBatches.increment();
                 flushRows.add(pending.size());

@@ -31,12 +31,19 @@ public class ProjectionLedgerProperties {
         public static class Journal {
             private int flushIntervalMs = 50;
             private int maxBuffer = 4000;
+            // projection_event_log is an audit-only trail (never read on the hot path; real
+            // idempotency = account_balance seq-guard + journal_line_id UNIQUE). Disabling skips
+            // one sharded INSERT per event (~33% fewer inserts) to lift consume throughput.
+            private boolean eventLogEnabled = true;
 
             public int getFlushIntervalMs() { return flushIntervalMs; }
             public void setFlushIntervalMs(int flushIntervalMs) { this.flushIntervalMs = flushIntervalMs; }
 
             public int getMaxBuffer() { return maxBuffer; }
             public void setMaxBuffer(int maxBuffer) { this.maxBuffer = maxBuffer; }
+
+            public boolean isEventLogEnabled() { return eventLogEnabled; }
+            public void setEventLogEnabled(boolean eventLogEnabled) { this.eventLogEnabled = eventLogEnabled; }
         }
 
         public static class Balance {
