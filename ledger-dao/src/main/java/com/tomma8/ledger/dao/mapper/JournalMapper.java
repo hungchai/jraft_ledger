@@ -33,6 +33,35 @@ public interface JournalMapper {
     @Select("SELECT id FROM journal WHERE journal_id = #{journalId}")
     Long findIdByJournalId(@Param("journalId") String journalId);
 
+    /** Multi-row journal-header insert; conflicting journal_ids are skipped (returns affected count).
+     * Callers chunk to a fixed max row count so the SQL shape space stays bounded (parse-cache friendly). */
+    @Insert("<script>" +
+            "INSERT INTO journal (id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at) VALUES " +
+            "<foreach collection='rows' item='r' separator=','>" +
+            "(#{r.id}, #{r.journalId}, #{r.journalType}, #{r.requestId}, #{r.businessEventType}, #{r.businessEventRef}, #{r.valueDate}, #{r.status}, #{r.crossPeriod}, #{r.createdAt})" +
+            "</foreach> ON CONFLICT DO NOTHING" +
+            "</script>")
+    int batchInsertJournals(@Param("rows") List<JournalBatchRow> rows);
+
+    /** Batch PK lookup for journal_ids whose insert lost an ON CONFLICT race (pre-existing rows). */
+    @Select("<script>" +
+            "SELECT journal_id, id FROM journal WHERE journal_id IN " +
+            "<foreach collection='ids' item='jid' open='(' separator=',' close=')'>#{jid}</foreach>" +
+            "</script>")
+    List<Map<String, Object>> findIdsByJournalIds(@Param("ids") List<String> ids);
+
+    record JournalBatchRow(
+            long id,
+            String journalId,
+            String journalType,
+            String requestId,
+            String businessEventType,
+            String businessEventRef,
+            LocalDate valueDate,
+            String status,
+            boolean crossPeriod,
+            LocalDateTime createdAt) {}
+
     @Select("SELECT id, journal_id, journal_type, request_id, business_event_type, business_event_ref, value_date, status, cross_period, created_at " +
             "FROM journal WHERE journal_id = #{journalId}")
     Map<String, Object> findById(@Param("journalId") String journalId);

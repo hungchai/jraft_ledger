@@ -19,8 +19,11 @@ spring:
       group-id: ledger-projection
       auto-offset-reset: latest
       enable-auto-commit: false
-      # Smaller poll batches keep flushPollBatch under the 30s latch timeout.
-      max-poll-records: 500
+      # Bigger polls amortize the poll→flush→commit round-trip (the measured consume
+      # bottleneck) and conflate more balance rows per upsert. 2000 rows / 4 shards =
+      # ≤500 rows per shard flush (chunked into ≤128-row INSERTs) — well under the 30s
+      # flushPollBatch latch. Env-overridable for A/B (KAFKA_MAX_POLL_RECORDS=500 restores old).
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:2000}
       fetch-min-size: 1048576
       fetch-max-wait: 200ms
     listener:

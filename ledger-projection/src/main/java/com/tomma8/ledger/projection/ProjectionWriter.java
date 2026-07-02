@@ -1,5 +1,6 @@
 package com.tomma8.ledger.projection;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.tomma8.ledger.dao.mapper.AccountMapper;
 import com.tomma8.ledger.dao.mapper.JournalMapper;
 import com.tomma8.ledger.utils.SnowflakeIdGenerator;
@@ -17,11 +18,14 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -40,10 +44,22 @@ public class ProjectionWriter {
     private final SnowflakeIdGenerator idGenerator;
     private final BalanceUpsertExecutor balanceUpsertExecutor;
 
-    // accountId → surrogate PK
+    // accountId → surrogate PK. Unbounded is fine: cardinality = #accounts (small, stable).
     private final ConcurrentHashMap<String, Long> accountIdCache = new ConcurrentHashMap<>();
-    // journalId → surrogate PK (INSERT IGNORE makes this optional but saves a SELECT)
-    private final ConcurrentHashMap<String, Long> journalPkCache = new ConcurrentHashMap<>();
+    // journalId → surrogate PK. Journal cardinality grows with EVERY posting, so an unbounded
+    // map is a slow heap leak (millions of entries on a long run) and old-gen GC pressure.
+    // Bounded Caffeine (asMap view keeps ConcurrentMap call sites): a journal's events arrive in
+    // the same or adjacent polls, so 100k entries is minutes of headroom; on the rare eviction
+    // resolveJournalPks simply re-resolves (INSERT ON CONFLICT DO NOTHING + SELECT).
+    private final ConcurrentMap<String, Long> journalPkCache =
+            Caffeine.newBuilder().maximumSize(100_000).<String, Long>build().asMap();
+    // Max rows per journal-header multi-row INSERT — bounds <foreach> SQL shapes (parse cache).
+    private static final int JOURNAL_INSERT_CHUNK = 128;
+    // Hoisted per Effective Java Item 6 — was rebuilt (3 comparators + method refs) per poll batch.
+    private static final Comparator<BalanceUpdate> BALANCE_UPSERT_ORDER =
+            Comparator.comparing(BalanceUpdate::accountId)
+                    .thenComparing(BalanceUpdate::balanceType)
+                    .thenComparing(BalanceUpdate::currency);
 
     private final JournalFlushBuffer journalFlushBuffer;
 
@@ -134,7 +150,11 @@ public class ProjectionWriter {
         }
 
         resolveAccountPks(parsed);
-        resolveJournalPks(parsed);
+        // Authoritative for THIS batch. journalPkCache is a bounded Caffeine accelerator whose
+        // TinyLFU admission may evict a freshly-put entry immediately once the cache is full —
+        // "put then get" is NOT guaranteed to hit. Correctness must never depend on cache policy,
+        // so resolveJournalPks returns every resolved PK in a plain local map.
+        Map<String, Long> batchJournalPks = resolveJournalPks(parsed);
 
         LocalDateTime now = LocalDateTime.now();
         var conflated = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
@@ -143,7 +163,7 @@ public class ProjectionWriter {
 
         for (BalanceEvent pe : parsed) {
             Long accountPk = accountIdCache.get(pe.accountId());
-            Long journalPk = journalPkCache.get(pe.journalId());
+            Long journalPk = batchJournalPks.get(pe.journalId());
             if (accountPk == null || journalPk == null) {
                 throw new IllegalStateException("Missing surrogate PK for account=" + pe.accountId()
                         + " or journal=" + pe.journalId()
@@ -178,10 +198,7 @@ public class ProjectionWriter {
     private CompletableFuture<Void> submitBalanceUpsert(LinkedHashMap<BalanceUpdate, BalanceUpdate> conflated) {
         if (conflated.isEmpty()) return CompletableFuture.completedFuture(null);
         var sorted = new ArrayList<>(conflated.values());
-        sorted.sort(Comparator
-                .comparing(BalanceUpdate::accountId)
-                .thenComparing(BalanceUpdate::balanceType)
-                .thenComparing(BalanceUpdate::currency));
+        sorted.sort(BALANCE_UPSERT_ORDER);
         CompletableFuture<Void> f = balanceUpsertExecutor.submit(sorted);
         balanceWrites.add(conflated.size());
         return f;
@@ -214,33 +231,73 @@ public class ProjectionWriter {
 
     /**
      * Resolve journal surrogate PKs for the batch; only cache misses hit the DB,
-     * in one session. INSERT IGNORE + SELECT yields a stable PK whether the
-     * journal was newly inserted or already existed.
+     * in one session. Returns a plain per-batch map holding EVERY journalId in
+     * {@code parsed} — the caller must read PKs from this map, never back out of
+     * {@code journalPkCache}: the bounded cache's TinyLFU admission may evict a
+     * freshly-put entry at once when full, so put-then-get is not guaranteed to
+     * hit. The cache is only a cross-batch accelerator.
      */
-    private void resolveJournalPks(List<BalanceEvent> parsed) {
+    private Map<String, Long> resolveJournalPks(List<BalanceEvent> parsed) {
+        HashMap<String, Long> batch = new HashMap<>();
         LinkedHashMap<String, BalanceEvent> missing = null;
         for (BalanceEvent pe : parsed) {
-            if (!journalPkCache.containsKey(pe.journalId())) {
+            String journalId = pe.journalId();
+            if (batch.containsKey(journalId)) continue;
+            Long cached = journalPkCache.get(journalId);
+            if (cached != null) {
+                batch.put(journalId, cached);
+            } else {
                 if (missing == null) missing = new LinkedHashMap<>();
-                missing.putIfAbsent(pe.journalId(), pe);
+                missing.putIfAbsent(journalId, pe);
             }
         }
-        if (missing == null) return;
+        if (missing == null) return batch;
+        // Multi-row chunked insert replaces the old per-journal INSERT(+SELECT) loop — the poll
+        // cycle's dominant serial cost (~1 statement per journal, all round-trips). Chunks of
+        // ≤JOURNAL_INSERT_CHUNK keep the <foreach> SQL shape space bounded (parse-cache friendly).
+        LocalDateTime now = LocalDateTime.now();
+        ArrayList<JournalMapper.JournalBatchRow> rows = new ArrayList<>(missing.size());
+        for (var entry : missing.entrySet()) {
+            BalanceEvent pe = entry.getValue();
+            long journalPk = idGenerator.nextId();
+            rows.add(new JournalMapper.JournalBatchRow(
+                    journalPk, entry.getKey(),
+                    "REVERSAL".equals(pe.commandType()) ? "REVERSAL" : "NORMAL",
+                    pe.requestId(), pe.commandType(), pe.businessRef(),
+                    pe.valueDate(), "CONFIRMED", false, now));
+            batch.put(entry.getKey(), journalPk);   // optimistic: our generated PK
+        }
         try (SqlSession session = sqlSessionFactory.openSession()) {
             JournalMapper jm = session.getMapper(JournalMapper.class);
-            for (var entry : missing.entrySet()) {
-                String journalId = entry.getKey();
-                BalanceEvent pe = entry.getValue();
-                long journalPk = idGenerator.nextId();
-                jm.insertJournal(journalPk, journalId,
-                        "REVERSAL".equals(pe.commandType()) ? "REVERSAL" : "NORMAL",
-                        pe.requestId(), pe.commandType(), pe.businessRef(),
-                        pe.valueDate(), "CONFIRMED", false, LocalDateTime.now());
-                Long actual = jm.findIdByJournalId(journalId);
-                journalPkCache.put(journalId, actual != null ? actual : journalPk);
+            ArrayList<String> conflicted = null;
+            for (int from = 0; from < rows.size(); from += JOURNAL_INSERT_CHUNK) {
+                List<JournalMapper.JournalBatchRow> chunk =
+                        rows.subList(from, Math.min(from + JOURNAL_INSERT_CHUNK, rows.size()));
+                int affected = jm.batchInsertJournals(chunk);
+                if (affected != chunk.size()) {
+                    // Some rows lost an ON CONFLICT race (redelivery / concurrent instance): the
+                    // pre-existing PKs differ from our optimistic ones. Collect the chunk's ids
+                    // for a batch lookup; overwriting all of them is correct either way.
+                    if (conflicted == null) conflicted = new ArrayList<>();
+                    for (JournalMapper.JournalBatchRow r : chunk) conflicted.add(r.journalId());
+                }
+            }
+            if (conflicted != null) {
+                for (int from = 0; from < conflicted.size(); from += JOURNAL_INSERT_CHUNK) {
+                    List<String> idChunk =
+                            conflicted.subList(from, Math.min(from + JOURNAL_INSERT_CHUNK, conflicted.size()));
+                    for (Map<String, Object> row : jm.findIdsByJournalIds(idChunk)) {
+                        batch.put((String) row.get("journal_id"), ((Number) row.get("id")).longValue());
+                    }
+                }
             }
             session.commit();
         }
+        // Refresh the cross-batch accelerator AFTER conflict correction (best-effort only).
+        for (String journalId : missing.keySet()) {
+            journalPkCache.put(journalId, batch.get(journalId));
+        }
+        return batch;
     }
 
     @jakarta.annotation.PreDestroy
