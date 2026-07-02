@@ -40,8 +40,10 @@ NODES=3
 NODE_TYPE="c8gd.xlarge"
 MGMT_TYPE="c7g.large"            # mgmt is just the driver/observability host — small ARM is fine
 ROOT_GB=30
-# Raft-log storage arm (controls ONLY where /var/lib/ledger/raft lives; state RocksDB
-# stays on the root gp3 so the raft disk can be measured in isolation by fio/iostat):
+# Raft-log storage arm (controls where /var/lib/ledger/raft lives. NOTE: on the nvme arm the
+# state RocksDB ALSO moves onto the NVMe — the gp3 root's ~125MB/s cap causes RocksDB write
+# stalls → apply blocks → election storms under sustained load. gp3/io2 arms keep RocksDB on
+# root so the dedicated raft disk can still be measured in isolation by fio/iostat):
 #   gp3  — raft log on root gp3 (baseline; no extra volume)
 #   io2  — raft log on a dedicated provisioned-IOPS io2 volume (low-latency, durable)
 #   nvme — raft log on the instance-store local NVMe (needs an *d instance type, e.g. c6id.large)
@@ -521,6 +523,14 @@ deploy_cluster() {
   fi
   # heap fits the default c8gd.xlarge (8 GiB). Override with LEDGER_JAVA_OPTS for smaller nodes.
   local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
+  # RocksDB state placement. MUST live on the NVMe arm (inside the /mnt/raft mount) when DISK=nvme:
+  # on the 30GB gp3 root (~125 MB/s cap) sustained 50VU load drives RocksDB flush/compaction into
+  # write stalls up to 7.7s → FSM apply blocks → raft heartbeats starve → leader-election storm
+  # (measured: 64 flips + 17.8% request failures per 10min). On NVMe: 0 flips, 0 failures.
+  # gp3/io2 arms keep the old path (root disk) — io2 stays a dedicated raft-log-only volume so
+  # the raft disk can still be measured in isolation.
+  local ROCKS_PATH="/var/lib/ledger/rocksdb"
+  [ "$DISK" = "nvme" ] && ROCKS_PATH="/var/lib/ledger/raft/rocksdb"
   while read -r name id pub priv; do
     case "$name" in node-*) ;; *) continue;; esac   # launch ledger-node only on ledger nodes
     rssh "$run" "$pub" "
@@ -533,7 +543,7 @@ deploy_cluster() {
       docker run -d --name ledger-node --restart unless-stopped --network host \
         -e NODE_ID=$priv -e PEER_NODES=$PEERS -e RAFT_SERVER_PORT=$RAFT_PORT \
         -e LEDGER_ADVERTISE_URL=http://$priv:$HTTP_PORT \
-        -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=/var/lib/ledger/rocksdb \
+        -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=$ROCKS_PATH \
         -e KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOT -e LEDGER_KAFKA_REQUIRED=$KAFKA_REQ $DS_ENV \
         -e LEDGER_ROCKSDB_FSYNC=false -e LEDGER_RAFT_LOG_FSYNC=true \
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:-1} \
