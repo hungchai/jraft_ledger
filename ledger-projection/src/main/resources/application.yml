@@ -25,12 +25,9 @@ spring:
       fetch-max-wait: 200ms
     listener:
       type: single
-      # Applied explicitly by ProjectionConfig.{single,batch}Factory via setConcurrency()
-      # (hand-built factory beans don't inherit this key automatically). Effective concurrency
-      # is capped at the topic partition count — raise ledger.balance.change.v1 partitions to
-      # scale past it. ack-mode/sync-commit also set programmatically in those factories.
-      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
       ack-mode: manual
+      # NOTE: hand-built factories don't inherit this key; effective concurrency is set from
+      # ledger.projection.kafka.concurrency below (ProjectionConfig.setConcurrency).
 
 mybatis:
   configuration:
@@ -50,6 +47,10 @@ ledger:
       # unaffected (account_balance seq-guard + journal_line_id UNIQUE). Set true only if the
       # audit table is actually consumed by something.
       event-log-enabled: ${PROJECTION_EVENT_LOG_ENABLED:false}
+    kafka:
+      # Listener concurrency applied by ProjectionConfig to the hand-built factories.
+      # Capped at the topic partition count — raise ledger.balance.change.v1 partitions to scale past it.
+      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
     balance:
       async:
         # Bounded queue for in-flight balance upsert batches. Each batch holds

@@ -1,7 +1,7 @@
 package com.tomma8.ledger.projection;
 
 import com.tomma8.ledger.dao.mapper.BalanceTypeMapper;
-import org.springframework.beans.factory.annotation.Value;
+import com.tomma8.ledger.projection.config.ProjectionLedgerProperties;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,11 +16,14 @@ public class ProjectionConfig {
 
     // Hand-built factory beans do NOT inherit spring.kafka.listener.concurrency (that only applies
     // to Spring Boot's auto-configured factory). Without setConcurrency() each listener runs a single
-    // consumer thread, so all partitions of a topic serialize onto one thread. Bind the same key
-    // (env KAFKA_CONSUMER_CONCURRENCY) and apply it explicitly. Spring caps effective concurrency at
-    // the partition count, so a value ≥ partitions just leaves spare threads idle.
-    @Value("${spring.kafka.listener.concurrency:6}")
-    private int listenerConcurrency;
+    // consumer thread, so all partitions of a topic serialize onto one thread. Bound via
+    // ProjectionLedgerProperties (env KAFKA_CONSUMER_CONCURRENCY) and applied explicitly. Spring caps
+    // effective concurrency at the partition count, so a value ≥ partitions leaves spare threads idle.
+    private final int listenerConcurrency;
+
+    ProjectionConfig(ProjectionLedgerProperties props) {
+        this.listenerConcurrency = props.getProjection().getKafka().getConcurrency();
+    }
 
     /**
      * Single-record listener factory for account-created events.

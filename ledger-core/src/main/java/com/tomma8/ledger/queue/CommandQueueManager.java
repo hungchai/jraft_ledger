@@ -169,6 +169,8 @@ public class CommandQueueManager implements AutoCloseable {
                 });
             }
         }
+        // orTimeout above returns the SAME futures (it arms a timeout on `this`), so every element of
+        // `results` is guaranteed to complete within 10s — allOf can't hang and the permit can't leak.
         CompletableFuture.allOf(results.toArray(new CompletableFuture[0]))
                 .whenComplete((r, e) -> inflight.release());
     }
