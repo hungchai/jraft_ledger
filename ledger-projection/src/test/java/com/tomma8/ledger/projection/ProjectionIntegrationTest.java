@@ -15,7 +15,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -33,7 +33,8 @@ import static org.assertj.core.api.Assertions.*;
 class ProjectionIntegrationTest {
 
     @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4")
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16")
+            .withInitScript("init.sql")
             .withDatabaseName("ledger_view")
             .withUsername("ledger")
             .withPassword("ledger123");
@@ -44,10 +45,10 @@ class ProjectionIntegrationTest {
 
     @DynamicPropertySource
     static void dbProps(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", mysql::getJdbcUrl);
-        registry.add("spring.datasource.username", mysql::getUsername);
-        registry.add("spring.datasource.password", mysql::getPassword);
-        registry.add("spring.datasource.driver-class-name", () -> "com.mysql.cj.jdbc.Driver");
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+        registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
     }
 
     @Autowired private JournalMapper journalMapper;
@@ -55,8 +56,8 @@ class ProjectionIntegrationTest {
             .registerModule(new JavaTimeModule());
 
     @Test
-    @DisplayName("TC-PROJ-01 Kafka produces event and MySQL stores journal")
-    void kafkaEvent_mysqlJournalCreated() throws Exception {
+    @DisplayName("TC-PROJ-01 Kafka produces event and Postgres stores journal")
+    void kafkaEvent_postgresJournalCreated() throws Exception {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers());
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
@@ -83,10 +84,10 @@ class ProjectionIntegrationTest {
                     "ACC_001:AVAILABLE_BALANCE:USD", json)).get();
         }
 
-        assertThat(mysql.isRunning()).isTrue();
+        assertThat(postgres.isRunning()).isTrue();
         assertThat(kafka.isRunning()).isTrue();
 
-        // Direct MySQL insert and verify (use surrogate IDs — no FK constraints)
+        // Direct Postgres insert and verify (use surrogate IDs — no FK constraints)
         long journalPk = System.currentTimeMillis();
         long accountPk = 1L;
         long balancePk = 1L;

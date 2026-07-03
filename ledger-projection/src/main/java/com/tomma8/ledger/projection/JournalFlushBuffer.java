@@ -36,10 +36,18 @@ public class JournalFlushBuffer implements AutoCloseable {
 
     private static final int DEADLOCK_MAX_RETRIES = 3;
     private static final long DEADLOCK_RETRY_BASE_MS = 20;
+    // Max rows per multi-row INSERT statement. Bounds the number of distinct <foreach> SQL
+    // shapes to ≤128 so ShardingSphere's parse cache converges (see flushRowsDirect).
+    private static final int INSERT_CHUNK = 128;
+    // Hoisted per Effective Java Item 6 — was rebuilt (2 comparators + method refs) per flush.
+    private static final Comparator<JournalMapper.JournalLineBatchRow> LINE_INSERT_ORDER =
+            Comparator.comparing(JournalMapper.JournalLineBatchRow::accountAccountId)
+                    .thenComparing(JournalMapper.JournalLineBatchRow::journalLineId);
 
     private final SqlSessionFactory sqlSessionFactory;
     private final int flushIntervalMs;
     private final int maxBuffer;
+    private final boolean eventLogEnabled;
     private final LongConsumer onFlushedEventCount;
 
     private final List<ConcurrentLinkedQueue<PendingRow>> shardQueues;
@@ -63,10 +71,12 @@ public class JournalFlushBuffer implements AutoCloseable {
                               MeterRegistry meterRegistry,
                               int flushIntervalMs,
                               int maxBuffer,
+                              boolean eventLogEnabled,
                               LongConsumer onFlushedEventCount) {
         this.sqlSessionFactory = sqlSessionFactory;
         this.flushIntervalMs = Math.max(1, flushIntervalMs);
         this.maxBuffer = Math.max(64, maxBuffer);
+        this.eventLogEnabled = eventLogEnabled;
         this.onFlushedEventCount = onFlushedEventCount;
 
         this.shardQueues = new ArrayList<>(ShardRouting.SHARD_COUNT);
@@ -252,15 +262,31 @@ public class JournalFlushBuffer implements AutoCloseable {
         if (pending.isEmpty()) return;
 
         List<JournalMapper.JournalLineBatchRow> journalRows = toJournalLineRows(pending);
-        List<ProjectionEventLogMapper.EventLogBatchRow> eventRows = toEventLogRows(pending);
+        // event_log is audit-only; skip building + inserting when gated off (~33% fewer inserts).
+        List<ProjectionEventLogMapper.EventLogBatchRow> eventRows =
+                eventLogEnabled ? toEventLogRows(pending) : null;
 
         RuntimeException lastError = null;
         for (int attempt = 1; attempt <= DEADLOCK_MAX_RETRIES; attempt++) {
             try (SqlSession session = sqlSessionFactory.openSession()) {
                 JournalMapper jm = session.getMapper(JournalMapper.class);
-                ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
-                jm.batchInsertJournalLines(journalRows);
-                em.batchInsertEvents(eventRows);
+                // Chunk to a bounded set of SQL shapes: the <foreach> insert emits a distinct
+                // statement text per row count, and ShardingSphere re-parses (ANTLR) every text it
+                // hasn't seen — with poll-sized batches (row count varies 1..maxPoll) the parse cache
+                // never converges and parsing dominates allocation. Capping rows-per-statement bounds
+                // the shape space to ≤INSERT_CHUNK variants, all cache hits after warmup. All chunks
+                // stay in this ONE session/commit, so per-shard-batch atomicity is unchanged.
+                for (int from = 0; from < journalRows.size(); from += INSERT_CHUNK) {
+                    jm.batchInsertJournalLines(
+                            journalRows.subList(from, Math.min(from + INSERT_CHUNK, journalRows.size())));
+                }
+                if (eventLogEnabled) {
+                    ProjectionEventLogMapper em = session.getMapper(ProjectionEventLogMapper.class);
+                    for (int from = 0; from < eventRows.size(); from += INSERT_CHUNK) {
+                        em.batchInsertEvents(
+                                eventRows.subList(from, Math.min(from + INSERT_CHUNK, eventRows.size())));
+                    }
+                }
                 session.commit();
                 flushBatches.increment();
                 flushRows.add(pending.size());
@@ -314,9 +340,7 @@ public class JournalFlushBuffer implements AutoCloseable {
                     pe.currency(), pe.entryType(), pe.amount(), pe.preBalance(),
                     pe.postBalance(), pe.configVersion(), p.createdAt()));
         }
-        out.sort(Comparator
-                .comparing(JournalMapper.JournalLineBatchRow::accountAccountId)
-                .thenComparing(JournalMapper.JournalLineBatchRow::journalLineId));
+        out.sort(LINE_INSERT_ORDER);
         return out;
     }
 

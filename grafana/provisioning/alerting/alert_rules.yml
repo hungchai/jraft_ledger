@@ -164,7 +164,7 @@ groups:
           severity: critical
         annotations:
           summary: "Projection consumer lag > 30 seconds"
-          description: "Last event processed {{ $value }}s ago. MySQL view layer is >30s behind State Machine."
+          description: "Last event processed {{ $value }}s ago. Postgres view layer is >30s behind State Machine."
         data:
           - refId: A
             relativeTimeRange:

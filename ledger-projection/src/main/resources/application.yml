@@ -19,20 +19,18 @@ spring:
       group-id: ledger-projection
       auto-offset-reset: latest
       enable-auto-commit: false
-      # Smaller poll batches keep flushPollBatch under the 30s latch timeout.
-      max-poll-records: 500
+      # Bigger polls amortize the poll→flush→commit round-trip (the measured consume
+      # bottleneck) and conflate more balance rows per upsert. 2000 rows / 4 shards =
+      # ≤500 rows per shard flush (chunked into ≤128-row INSERTs) — well under the 30s
+      # flushPollBatch latch. Env-overridable for A/B (KAFKA_MAX_POLL_RECORDS=500 restores old).
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:2000}
       fetch-min-size: 1048576
       fetch-max-wait: 200ms
     listener:
       type: single
-      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
-      # MANUAL with async commits — the effective settings live in
-      # ProjectionConfig.{single,batch}Factory (programmatic setAckMode +
-      # setSyncCommits(false)). This yml key is overridden by every
-      # @KafkaListener that names a containerFactory, so it's effectively
-      # dead code; kept here only so Spring still binds the consumer
-      # factory even when a listener picks a non-default factory.
       ack-mode: manual
+      # NOTE: hand-built factories don't inherit this key; effective concurrency is set from
+      # ledger.projection.kafka.concurrency below (ProjectionConfig.setConcurrency).
 
 mybatis:
   configuration:
@@ -47,6 +45,15 @@ ledger:
     journal:
       flush-interval-ms: 50
       max-buffer: 4000
+      # projection_event_log audit trail. Default OFF — skips the sharded event_log INSERT +
+      # UNIQUE-index maintenance per event (the dominant consume bottleneck). Idempotency
+      # unaffected (account_balance seq-guard + journal_line_id UNIQUE). Set true only if the
+      # audit table is actually consumed by something.
+      event-log-enabled: ${PROJECTION_EVENT_LOG_ENABLED:false}
+    kafka:
+      # Listener concurrency applied by ProjectionConfig to the hand-built factories.
+      # Capped at the topic partition count — raise ledger.balance.change.v1 partitions to scale past it.
+      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
     balance:
       async:
         # Bounded queue for in-flight balance upsert batches. Each batch holds

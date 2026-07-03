@@ -1,6 +1,7 @@
 package com.tomma8.ledger.projection;
 
 import com.tomma8.ledger.dao.mapper.BalanceTypeMapper;
+import com.tomma8.ledger.projection.config.ProjectionLedgerProperties;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,6 +14,17 @@ import java.time.LocalDateTime;
 @Configuration
 public class ProjectionConfig {
 
+    // Hand-built factory beans do NOT inherit spring.kafka.listener.concurrency (that only applies
+    // to Spring Boot's auto-configured factory). Without setConcurrency() each listener runs a single
+    // consumer thread, so all partitions of a topic serialize onto one thread. Bound via
+    // ProjectionLedgerProperties (env KAFKA_CONSUMER_CONCURRENCY) and applied explicitly. Spring caps
+    // effective concurrency at the partition count, so a value ≥ partitions leaves spare threads idle.
+    private final int listenerConcurrency;
+
+    ProjectionConfig(ProjectionLedgerProperties props) {
+        this.listenerConcurrency = props.getProjection().getKafka().getConcurrency();
+    }
+
     /**
      * Single-record listener factory for account-created events.
      */
@@ -21,6 +33,7 @@ public class ProjectionConfig {
             ConsumerFactory<String, String> consumerFactory) {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(consumerFactory);
+        factory.setConcurrency(listenerConcurrency);
         // MANUAL + async commit for the same rebalance-tolerance reason as
         // batchFactory below. Account-created events are idempotent
         // (upsert by accountId), so a duplicate delivery after rebalance
@@ -40,6 +53,7 @@ public class ProjectionConfig {
             ConsumerFactory<String, String> consumerFactory) {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(consumerFactory);
+        factory.setConcurrency(listenerConcurrency);
         factory.setBatchListener(true);
         // MANUAL_IMMEDIATE = sync commit on ack. After rebalance, the old
         // generation's commitSync throws CommitFailedException which Spring

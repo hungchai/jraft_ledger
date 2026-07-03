@@ -8,8 +8,8 @@
 dataSources:
   ds_0:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
-    driverClassName: com.mysql.cj.jdbc.Driver
-    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false&rewriteBatchedStatements=true&cachePrepStmts=true&useServerPrepStmts=true&prepStmtCacheSize=250&prepStmtCacheSqlLimit=2048
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://ledger-postgres:5432/ledger_view?reWriteBatchedInserts=true&prepareThreshold=1
     username: ledger
     password: ledger123
     maximum-pool-size: 30

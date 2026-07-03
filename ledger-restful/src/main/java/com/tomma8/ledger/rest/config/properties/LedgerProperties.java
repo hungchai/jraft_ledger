@@ -119,6 +119,9 @@ public class LedgerProperties {
         private int maxSize = 50_000;
         private int batchSize = 16;
         private long batchWaitMs = 1L;
+        // Raft pipeline depth: max batches in flight to Raft before the worker blocks. 1 = the
+        // original blocking behaviour (no pipelining). >1 pipelines under load (load-adaptive).
+        private int pipelineDepth = 1;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -131,6 +134,9 @@ public class LedgerProperties {
 
         public long getBatchWaitMs() { return batchWaitMs; }
         public void setBatchWaitMs(long batchWaitMs) { this.batchWaitMs = batchWaitMs; }
+
+        public int getPipelineDepth() { return pipelineDepth; }
+        public void setPipelineDepth(int pipelineDepth) { this.pipelineDepth = pipelineDepth; }
     }
 
     public static class Posting {

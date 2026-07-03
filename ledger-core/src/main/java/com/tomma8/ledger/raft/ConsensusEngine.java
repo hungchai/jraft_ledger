@@ -4,7 +4,9 @@ import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.RaftCommand;
 import com.tomma8.ledger.statemachine.LedgerStateMachine;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Consensus engine abstraction over the underlying Raft implementation.
@@ -31,6 +33,18 @@ public interface ConsensusEngine extends AutoCloseable {
      */
     default List<CommandResult> submitBatch(List<RaftCommand> commands) {
         return commands.stream().map(this::submit).toList();
+    }
+
+    /**
+     * Non-blocking batch submit for pipelining: returns per-command futures that complete on apply,
+     * without waiting for quorum commit. Default falls back to the blocking path (no pipelining).
+     */
+    default List<CompletableFuture<CommandResult>> submitBatchAsync(List<RaftCommand> commands) {
+        List<CompletableFuture<CommandResult>> fs = new ArrayList<>(commands.size());
+        for (CommandResult r : submitBatch(commands)) {
+            fs.add(CompletableFuture.completedFuture(r));
+        }
+        return fs;
     }
 
     /** True if this node is the current Raft leader (writes only accepted here). */
