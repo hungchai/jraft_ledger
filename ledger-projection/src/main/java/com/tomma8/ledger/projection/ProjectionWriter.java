@@ -74,6 +74,18 @@ public class ProjectionWriter {
     private static final ThreadLocal<ArrayList<JournalFlushBuffer.PendingRow>> JOURNAL_ROW_SCRATCH =
             ThreadLocal.withInitial(() -> new ArrayList<>(1024));
 
+    // Per-poll container scratch (Layer 2 reuse): writeBalanceBatch + resolveJournalPks run
+    // serially on one Kafka consumer thread, fully consuming these before the next poll. Clear at
+    // entry, never retain refs across polls — backing arrays stay warm on the thread's young gen.
+    private static final ThreadLocal<LinkedHashMap<BalanceUpdate, BalanceUpdate>> CONFLATED_SCRATCH =
+            ThreadLocal.withInitial(() -> new LinkedHashMap<>(1024));
+    private static final ThreadLocal<HashMap<String, Long>> JOURNAL_PK_BATCH_SCRATCH =
+            ThreadLocal.withInitial(() -> new HashMap<>(1024));
+    private static final ThreadLocal<LinkedHashMap<String, ProjectionWriter.BalanceEvent>> MISSING_JOURNAL_SCRATCH =
+            ThreadLocal.withInitial(() -> new LinkedHashMap<>(256));
+    private static final ThreadLocal<ArrayList<JournalMapper.JournalBatchRow>> JOURNAL_BATCH_ROW_SCRATCH =
+            ThreadLocal.withInitial(() -> new ArrayList<>(256));
+
     public ProjectionWriter(SqlSessionFactory sqlSessionFactory,
                             MeterRegistry meterRegistry,
                             ProjectionLedgerProperties ledgerProps) {
@@ -157,7 +169,8 @@ public class ProjectionWriter {
         Map<String, Long> batchJournalPks = resolveJournalPks(parsed);
 
         LocalDateTime now = LocalDateTime.now();
-        var conflated = new LinkedHashMap<BalanceUpdate, BalanceUpdate>();
+        var conflated = CONFLATED_SCRATCH.get();
+        conflated.clear();
         ArrayList<JournalFlushBuffer.PendingRow> journalRows = JOURNAL_ROW_SCRATCH.get();
         journalRows.clear();
 
@@ -185,6 +198,7 @@ public class ProjectionWriter {
         CompletableFuture<Void> balanceFuture = submitBalanceUpsert(conflated);
         journalFlushBuffer.flushPollBatch(journalRows);
         journalRows.clear();   // release refs for next poll batch on the same thread
+        conflated.clear();     // release the BalanceUpdate keys/values (DTOs) for next poll
 
         lastEventTimestamp.set(System.currentTimeMillis());
         return balanceFuture;
@@ -238,8 +252,10 @@ public class ProjectionWriter {
      * hit. The cache is only a cross-batch accelerator.
      */
     private Map<String, Long> resolveJournalPks(List<BalanceEvent> parsed) {
-        HashMap<String, Long> batch = new HashMap<>();
-        LinkedHashMap<String, BalanceEvent> missing = null;
+        HashMap<String, Long> batch = JOURNAL_PK_BATCH_SCRATCH.get();
+        batch.clear();
+        LinkedHashMap<String, BalanceEvent> missing = MISSING_JOURNAL_SCRATCH.get();
+        missing.clear();
         for (BalanceEvent pe : parsed) {
             String journalId = pe.journalId();
             if (batch.containsKey(journalId)) continue;
@@ -247,16 +263,17 @@ public class ProjectionWriter {
             if (cached != null) {
                 batch.put(journalId, cached);
             } else {
-                if (missing == null) missing = new LinkedHashMap<>();
                 missing.putIfAbsent(journalId, pe);
             }
         }
-        if (missing == null) return batch;
+        if (missing.isEmpty()) return batch;
         // Multi-row chunked insert replaces the old per-journal INSERT(+SELECT) loop — the poll
         // cycle's dominant serial cost (~1 statement per journal, all round-trips). Chunks of
         // ≤JOURNAL_INSERT_CHUNK keep the <foreach> SQL shape space bounded (parse-cache friendly).
         LocalDateTime now = LocalDateTime.now();
-        ArrayList<JournalMapper.JournalBatchRow> rows = new ArrayList<>(missing.size());
+        ArrayList<JournalMapper.JournalBatchRow> rows = JOURNAL_BATCH_ROW_SCRATCH.get();
+        rows.clear();
+        rows.ensureCapacity(missing.size());
         for (var entry : missing.entrySet()) {
             BalanceEvent pe = entry.getValue();
             long journalPk = idGenerator.nextId();

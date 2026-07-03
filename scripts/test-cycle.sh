@@ -444,7 +444,7 @@ reseed_watcher_loop() {
 }
 
 mysql_query() {
-  docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -sN -e "$1" 2>/dev/null
+  docker exec ledger-postgres psql -U ledger -d ledger_view -t -A -c "$1" 2>/dev/null | tr -d '\r'
 }
 
 # Normalize numeric strings: strip trailing zeros, then trailing dot.
@@ -508,7 +508,7 @@ ensure_leader() {
 if $FLUSH && ! $RECON_ONLY; then
   echo "=== Step 1: Flush data ==="
   docker compose $COMPOSE_FILES down 2>/dev/null || true
-  rm -rf "$PROJECT_DIR/jraft_ledger/mysql" \
+  rm -rf "$PROJECT_DIR/jraft_ledger/postgres" \
          "$PROJECT_DIR/jraft_ledger/node1/rocksdb" "$PROJECT_DIR/jraft_ledger/node1/raft" \
          "$PROJECT_DIR/jraft_ledger/node2/rocksdb" "$PROJECT_DIR/jraft_ledger/node2/raft" \
          "$PROJECT_DIR/jraft_ledger/node3/rocksdb" "$PROJECT_DIR/jraft_ledger/node3/raft" \
@@ -1223,8 +1223,8 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   # --- MySQL state ---
   echo ""
   echo "--- MySQL: $HOTSPOT_ACC (full) ---"
-  docker exec ledger-mysql mysql -u ledger -pledger123 ledger_view -t \
-    -e "SELECT account_account_id, currency, amount, account_seq, updated_at FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
+  docker exec ledger-postgres psql -U ledger -d ledger_view \
+    -c "SELECT account_account_id, currency, amount, account_seq, updated_at FROM account_balance WHERE account_account_id='$HOTSPOT_ACC';" 2>/dev/null
 
   echo ""
   echo "--- MySQL: Counts ---"

@@ -476,7 +476,7 @@ deploy_svc() {
       -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 \
       -e KAFKA_BOOTSTRAP_SERVERS=$kafka_priv:$KAFKA_PORT -e KAFKA_CONSUMER_CONCURRENCY=4 \
       -e SNOWFLAKE_WORKER_ID=1 \
-      -e JAVA_OPTS='-Xms2g -Xmx2g -XX:+UseZGC -XX:+ZGenerational -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true' \
+      -e JAVA_OPTS='-Xms3g -Xmx3g -XX:+UseG1GC -XX:MaxGCPauseMillis=10 -XX:InitiatingHeapOccupancyPercent=35 -XX:G1ReservePercent=15 -XX:G1MixedGCCountTarget=8 -XX:+DisableExplicitGC -XX:+UseStringDeduplication -XX:StringDeduplicationAgeThreshold=3 -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true' \
       ledger-projection:latest >/dev/null && echo 'projection launched'
   " | sed 's/^/  /'
   rssh "$run" "$proj_pub" 'for i in $(seq 1 40); do curl -s --max-time 3 http://localhost:'"$PROJECTION_PORT"'/actuator/health 2>/dev/null | grep -q "\"status\":\"UP\"" && { echo "  projection UP"; break; }; [ "$i" = 40 ] && echo "  WARN projection not UP"; sleep 6; done'

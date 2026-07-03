@@ -112,6 +112,27 @@ groups:
               refId: A
               expr: max(jvm_gc_pause_seconds_max) > 0.01
 
+      - uid: projection-gc-p99-high
+        title: "Projection GC p99 pause > 10ms (G1 budget breach — revert to ZGC)"
+        condition: A
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Projection GC p99 > 10ms sustained for 5 minutes"
+          description: "p99(jvm.gc.pause) on projection = {{ $value | humanizeDuration }}. G1 budget breach per NFR §13.1 projection exception — flip JAVA_OPTS back to -XX:+UseZGC -XX:+ZGenerational and re-soak."
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: histogram_quantile(0.99, sum by (le) (rate(jvm_gc_pause_seconds_bucket{application="ledger-projection"}[5m]))) * 1000 > 10
+
       - uid: outbox-backlog
         title: "Outbox pending events > 10,000"
         condition: A

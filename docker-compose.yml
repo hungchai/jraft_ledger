@@ -302,8 +302,14 @@ services:
       JAVA_OPTS: >-
         -Xms3g
         -Xmx3g
-        -XX:+UseZGC
-        -XX:+ZGenerational
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=10
+        -XX:InitiatingHeapOccupancyPercent=35
+        -XX:G1ReservePercent=15
+        -XX:G1MixedGCCountTarget=8
+        -XX:+DisableExplicitGC
+        -XX:+UseStringDeduplication
+        -XX:StringDeduplicationAgeThreshold=3
 
         -XX:+HeapDumpOnOutOfMemoryError
         -XX:HeapDumpPath=/var/lib/projection/
@@ -311,6 +317,7 @@ services:
         -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
         -Dmanagement.metrics.export.prometheus.enabled=true
         -Dserver.shutdown.grace-period=30s
+        -Xlog:gc*,safepoint:file=/var/lib/projection/gc.log:time,uptime,tags:filecount=10,filesize=50m
     volumes:
       - ./jraft_ledger/projection:/var/lib/projection
     depends_on:
