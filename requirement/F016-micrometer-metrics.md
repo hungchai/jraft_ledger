@@ -168,7 +168,7 @@ management:
 
 ## 5. Grafana Dashboard 規格
 
-### 5.1 Dashboard: Ledger Overview（ID: ledger-overview）
+### 5.1 Dashboard: Ledger — Main（ID: ledger-main）
 
 | Row | Panel | 指標 | 類型 |
 |---|---|---|---|

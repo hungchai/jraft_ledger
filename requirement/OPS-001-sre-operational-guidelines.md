@@ -509,7 +509,7 @@ curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job:
 
 ### 4.3 Grafana Dashboard
 
-預設 dashboard（`grafana/provisioning/dashboards/ledger-overview.json`）包含以下 panel：
+預設 dashboard（`grafana/provisioning/dashboards/ledger-main.json`）包含以下 panel：
 
 | Panel | Metrics | NFR 目標 |
 |---|---|---|
@@ -520,7 +520,7 @@ curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job:
 | GC Pause time | `jvm_gc_pause_seconds_max` | < 5ms |
 | Kafka consumer lag | `kafka_consumer_lag` | < 1000 |
 
-Dashboard JSON 配置見 `grafana/provisioning/dashboards/ledger-overview.json`。
+Dashboard JSON 配置見 `grafana/provisioning/dashboards/ledger-main.json`。
 
 ### 4.4 常用 PromQL 查詢
 
