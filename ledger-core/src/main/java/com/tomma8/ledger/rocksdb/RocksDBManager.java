@@ -9,10 +9,22 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class RocksDBManager implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(RocksDBManager.class);
+
+    // CFs on the sustained write path get the configured (large) memtable; the rest stay
+    // small so total memtable RSS stays bounded (memtables are per-CF: budget =
+    // writeBufferMb x maxWriteBufferNumber x |hot CFs| + 16MB x 2 x |cold CFs|).
+    private static final Set<String> HOT_WRITE_CFS = Set.of(
+            ColumnFamilyRegistry.CF_JOURNAL,
+            ColumnFamilyRegistry.CF_JOURNAL_LINE,
+            ColumnFamilyRegistry.CF_BALANCE,
+            ColumnFamilyRegistry.CF_IDEMPOTENCY,
+            ColumnFamilyRegistry.CF_OUTBOX);
+    private static final long COLD_WRITE_BUF_BYTES = 16L * 1024 * 1024;
 
     private final String dbPath;
     private final int cacheMb;
@@ -40,7 +52,12 @@ public class RocksDBManager implements AutoCloseable {
         this.fsync = fsync;
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
+                .setCreateMissingColumnFamilies(true)
+                // Sustained-write soak (5k TPS) showed compaction debt accumulating with the
+                // default 2 background jobs: L0 files pile up until write stalls (persist max
+                // 1.5s+) and effective throughput decays monotonically. 4 jobs lets flush +
+                // compaction run in parallel on the 4-vCPU nodes.
+                .setMaxBackgroundJobs(4);
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
@@ -84,15 +101,15 @@ public class RocksDBManager implements AutoCloseable {
                 .setCacheIndexAndFilterBlocks(true)                 // count index/filter against the cache (bounded)
                 .setPinL0FilterAndIndexBlocksInCache(true);
 
-        // Default CF must be first
+        // Default CF must be first (cold: nothing hot-path lives in it)
         cfDescriptors.add(new ColumnFamilyDescriptor(
-                RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions(tableConfig, writeBufBytes)));
+                RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions(tableConfig, COLD_WRITE_BUF_BYTES)));
 
-        // Named column families
+        // Named column families: hot write-path CFs get the configured buffer, others stay small
         for (String cfName : ColumnFamilyRegistry.allColumnFamilies()) {
             if (cfName.equals(ColumnFamilyRegistry.CF_DEFAULT)) continue;
-            cfDescriptors.add(new ColumnFamilyDescriptor(
-                    cfName.getBytes(), cfOptions(tableConfig, writeBufBytes)));
+            long bufBytes = HOT_WRITE_CFS.contains(cfName) ? writeBufBytes : COLD_WRITE_BUF_BYTES;
+            cfDescriptors.add(new ColumnFamilyDescriptor(cfName.getBytes(), cfOptions(tableConfig, bufBytes)));
         }
 
         List<ColumnFamilyHandle> handles = new ArrayList<>();

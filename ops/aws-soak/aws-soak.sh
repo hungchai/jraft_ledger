@@ -68,7 +68,10 @@ SVC_TYPE="c7g.large"             # each services EC2 host (kafka, projection): 2
 KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the kafka host's private IP)
 KAFKA_EXPORTER_PORT=9308         # kafka-exporter: authoritative consumergroup lag (true backlog)
 DB_PORT=5432                     # Aurora PostgreSQL port
-AURORA_CLASS="db.t4g.medium"     # Aurora PG instance class (Graviton; cheapest that fits a soak)
+# Aurora PG instance class. Burstable (t4g) is ONLY valid for short benchmarks: CPU credits
+# drain under sustained load and consume throughput collapses (measured 2026-07-04: t4g.medium
+# credit-starved 1.9k ev/s vs r8g.xlarge 6.3k ev/s). Soaks must use a fixed-performance class.
+AURORA_CLASS="${AURORA_CLASS:-db.r8g.xlarge}"
 PG_EXPORTER_PORT=9187            # postgres_exporter (on projection host → Aurora) for pg_* metrics
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
