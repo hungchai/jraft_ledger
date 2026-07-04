@@ -511,7 +511,7 @@ If target status is `down`, check:
 
 ### 4.3 Grafana Dashboard
 
-Default dashboard (`grafana/provisioning/dashboards/ledger-overview.json`) contains the following panels:
+Default dashboard (`grafana/provisioning/dashboards/ledger-main.json`) contains the following panels:
 
 | Panel | Metrics | NFR Target |
 |---|---|---|
@@ -522,7 +522,7 @@ Default dashboard (`grafana/provisioning/dashboards/ledger-overview.json`) conta
 | GC Pause time | `jvm_gc_pause_seconds_max` | < 5ms |
 | Kafka consumer lag | `kafka_consumer_lag` | < 1000 |
 
-Dashboard JSON configuration: `grafana/provisioning/dashboards/ledger-overview.json`.
+Dashboard JSON configuration: `grafana/provisioning/dashboards/ledger-main.json`.
 
 ### 4.4 Common PromQL Queries
 
