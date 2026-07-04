@@ -1,8 +1,8 @@
 package com.tomma8.ledger.rest.controller;
 
-import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.raft.ConsensusEngine;
 import com.tomma8.ledger.raft.NodeRole;
+import com.tomma8.ledger.rest.config.properties.LedgerProperties;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -19,13 +19,14 @@ public class ClusterController {
 
     private final NodeRole nodeRole;
     private final String nodeId;
-    private final ConfigService configService;
+    private final LedgerProperties ledgerProps;
     private final ConsensusEngine raftNodeManager;
 
-    public ClusterController(NodeRole nodeRole, ConsensusEngine raftNodeManager, ConfigService configService) {
+    public ClusterController(NodeRole nodeRole, ConsensusEngine raftNodeManager, LedgerProperties ledgerProps) {
         this.nodeRole = nodeRole;
-        this.configService = configService;
-        this.nodeId = configService.get("NODE_ID", "standalone");
+        this.ledgerProps = ledgerProps;
+        String id = ledgerProps.getNode().getId();
+        this.nodeId = (id != null && !id.isBlank()) ? id : "standalone";
         this.raftNodeManager = raftNodeManager;
     }
 
@@ -47,8 +48,8 @@ public class ClusterController {
 
     @GetMapping("/nodes")
     public ResponseEntity<?> nodes() {
-        String peers = configService.get("PEER_NODES", null);
-        List<String> peerList = peers != null
+        String peers = ledgerProps.getRaft().getPeers();
+        List<String> peerList = (peers != null && !peers.isBlank())
                 ? Arrays.asList(peers.split(","))
                 : List.of(nodeId + ":8080");
 
@@ -86,8 +87,8 @@ public class ClusterController {
         status.put("smBalanceCount", smBalanceCount);
         status.put("smConfigCount", smConfigCount);
 
-        String peersEnv = configService.get("PEER_NODES", null);
-        List<String> peers = peersEnv != null
+        String peersEnv = ledgerProps.getRaft().getPeers();
+        List<String> peers = (peersEnv != null && !peersEnv.isBlank())
                 ? Arrays.asList(peersEnv.split(","))
                 : List.of(nodeId + ":28080");
         status.put("peers", peers);

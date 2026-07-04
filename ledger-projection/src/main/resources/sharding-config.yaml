@@ -8,10 +8,16 @@
 dataSources:
   ds_0:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
-    driverClassName: com.mysql.cj.jdbc.Driver
-    jdbcUrl: jdbc:mysql://ledger-mysql:3306/ledger_view?allowPublicKeyRetrieval=true&useSSL=false
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://ledger-postgres:5432/ledger_view?reWriteBatchedInserts=true&prepareThreshold=1
     username: ledger
     password: ledger123
+    maximum-pool-size: 30
+    minimum-idle: 10
+    connection-timeout: 5000
+    idle-timeout: 600000
+    max-lifetime: 1800000
+    pool-name: ledger-projection-hikari-0
 
 rules:
 - !SINGLE

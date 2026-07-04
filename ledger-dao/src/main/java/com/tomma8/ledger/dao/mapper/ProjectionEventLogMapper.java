@@ -12,8 +12,8 @@ public interface ProjectionEventLogMapper {
      * rejects exact Kafka duplicates. Stale events (lower account_seq) are caught by
      * the account_balance seq guard, not here.
      */
-    @Insert("INSERT IGNORE INTO projection_event_log (account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status) " +
-            "VALUES (#{accountAccountId}, #{balanceType}, #{currency}, #{accountSeq}, #{journalLineId}, #{journalJournalId}, #{eventId}, #{status})")
+    @Insert("INSERT INTO projection_event_log (account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status) " +
+            "VALUES (#{accountAccountId}, #{balanceType}, #{currency}, #{accountSeq}, #{journalLineId}, #{journalJournalId}, #{eventId}, #{status}) ON CONFLICT DO NOTHING")
     int insertEvent(@Param("accountAccountId") String accountAccountId,
                     @Param("balanceType") String balanceType,
                     @Param("currency") String currency,
@@ -42,13 +42,13 @@ public interface ProjectionEventLogMapper {
                        @Param("currency") String currency);
 
     @Insert("<script>" +
-            "INSERT IGNORE INTO projection_event_log (" +
+            "INSERT INTO projection_event_log (" +
             "  account_account_id, balance_type, currency, account_seq, journal_line_id, journal_journal_id, event_id, status" +
             ") VALUES " +
             "<foreach collection='rows' item='r' separator=','>" +
             "(#{r.accountAccountId}, #{r.balanceType}, #{r.currency}, #{r.accountSeq}, " +
             " #{r.journalLineId}, #{r.journalJournalId}, #{r.eventId}, 'APPLIED')" +
-            "</foreach>" +
+            "</foreach> ON CONFLICT DO NOTHING" +
             "</script>")
     int batchInsertEvents(@Param("rows") List<EventLogBatchRow> rows);
 

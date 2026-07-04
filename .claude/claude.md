@@ -197,6 +197,39 @@ Rules:
 | Journal Query | ≤ 30 ms | Reject PR |
 | Reconciliation Report | ≤ 2 min | Reject PR |
 
+### 2.11 Spring Boot Configuration (Mandatory)
+
+**Do not** read config in application code via `Environment.getProperty(...)`, `System.getenv(...)`, or scattered `@Value` on `@Configuration` beans.
+
+| Do | Don't |
+|---|---|
+| Define keys in `application.yml` / `application-{profile}.yml` | Hard-code defaults in Java |
+| Bind with `@ConfigurationProperties` classes under `...config.properties` | `env.getProperty("ledger.*")` in `@Bean` methods |
+| Inject `LedgerProperties` / `OutboxProperties` into `@Configuration` | `System.getenv("NODE_ID")` in controllers or config |
+| Keep legacy env names only as `${ENV:default}` in yml | Duplicate property paths in Java strings |
+| Use `SpringConfigService` only for `ConfigService` bridge (ledger-core) | New code depending on `ConfigService` when a properties bean exists |
+
+**Pattern:**
+
+```yaml
+# application.yml
+ledger:
+  kafka:
+    required: ${LEDGER_KAFKA_REQUIRED:false}
+```
+
+```java
+@ConfigurationProperties(prefix = "ledger")
+public class LedgerProperties { ... }
+
+@Bean
+KafkaEventPublisher kafka(Kafka kafka = ledgerProps.getKafka()) { ... }
+```
+
+Enable via `@EnableConfigurationProperties` in `LedgerPropertiesConfiguration`.
+
+**Env vars:** allowed in yml as `${VAR:default}` — Spring resolves them into the properties bean at startup. Java code reads the bean, not the OS env.
+
 ## 3. After Every Code Change — Mandatory Updates
 
 Complete after any code change.

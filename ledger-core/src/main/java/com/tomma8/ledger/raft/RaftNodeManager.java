@@ -153,26 +153,34 @@ public class RaftNodeManager implements ConsensusEngine {
         }
     }
 
-    @Override
-    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+    /**
+     * Non-blocking submit: append ONE Raft log entry for the batch and return per-command futures
+     * that complete on apply (via onApply → pendingCommands). Does NOT wait for quorum commit, so
+     * the caller can keep multiple batches in flight (pipelining). Raft still totally orders entries
+     * (node.apply calls are sequential from the single command-queue worker); results are matched
+     * back by requestId, so out-of-order completion is safe.
+     */
+    public List<CompletableFuture<CommandResult>> submitBatchAsync(List<RaftCommand> commands) {
         if (commands == null || commands.isEmpty()) {
             throw new IllegalArgumentException("commands must not be empty");
         }
-        if (commands.size() == 1) {
-            return List.of(submit(commands.get(0)));
-        }
-
         long tSubmit = System.nanoTime();
         List<CompletableFuture<CommandResult>> futures = new ArrayList<>(commands.size());
         for (RaftCommand command : commands) {
             CompletableFuture<CommandResult> future = new CompletableFuture<>();
+            // Record submit → apply-complete as the raft-commit stage. In the pipelined path this is
+            // the only place raft.total is captured (blocking submitBatch records it separately); without
+            // this, ledger.raft.total has zero samples under pipelineDepth>1.
+            future.whenComplete((r, e) ->
+                    com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(System.nanoTime() - tSubmit));
             pendingCommands.put(command.requestId(), future);
             futures.add(future);
         }
-
-        BatchRaftCommand batch = BatchRaftCommand.of(commands);
-        // One leader-stamped apply time for the whole batch (all sub-commands commit together).
-        byte[] data = CommandSerializer.serialize(batch, System.currentTimeMillis());
+        // size==1 keeps the single-command wire format (matches the onApply single path);
+        // size>1 uses BatchRaftCommand. One leader-stamped apply time for the whole entry.
+        byte[] data = commands.size() == 1
+                ? CommandSerializer.serialize(commands.get(0), System.currentTimeMillis())
+                : CommandSerializer.serialize(BatchRaftCommand.of(commands), System.currentTimeMillis());
         Task task = new Task(ByteBuffer.wrap(data), status -> {
             if (!status.isOk()) {
                 RuntimeException ex = new RuntimeException("Raft batch apply failed: " + status);
@@ -182,27 +190,29 @@ public class RaftNodeManager implements ConsensusEngine {
                 }
             }
         });
-
         this.node.apply(task);
-        long tApplied = System.nanoTime();
-        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftEnqueue(tApplied - tSubmit);
+        com.tomma8.ledger.metrics.LedgerMetrics.recordRaftEnqueue(System.nanoTime() - tSubmit);
         com.tomma8.ledger.metrics.LedgerMetrics.recordRaftBatchSize(commands.size());
+        return futures;
+    }
 
+    @Override
+    public List<CommandResult> submitBatch(List<RaftCommand> commands) {
+        long tSubmit = System.nanoTime();
+        List<CompletableFuture<CommandResult>> futures = submitBatchAsync(commands);
         try {
             long tWaitStart = System.nanoTime();
             List<CommandResult> results = new ArrayList<>(commands.size());
-            for (int i = 0; i < futures.size(); i++) {
-                results.add(futures.get(i).get(10, TimeUnit.SECONDS));
+            for (CompletableFuture<CommandResult> f : futures) {
+                results.add(f.get(10, TimeUnit.SECONDS));
             }
             long tWaitEnd = System.nanoTime();
             com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWaitApply(tWaitEnd - tWaitStart);
-            long tReturn = System.nanoTime();
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(tReturn - tWaitEnd);
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(tReturn - tSubmit);
+            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftWakeup(0);
+            // raft.total recorded per-command via whenComplete in submitBatchAsync (avoids double-count).
             return results;
         } catch (Exception e) {
             long elapsedMs = (System.nanoTime() - tSubmit) / 1_000_000;
-            com.tomma8.ledger.metrics.LedgerMetrics.recordRaftTotal(elapsedMs * 1_000_000L);
             for (RaftCommand command : commands) {
                 pendingCommands.remove(command.requestId());
             }

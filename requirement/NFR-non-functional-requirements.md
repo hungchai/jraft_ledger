@@ -172,6 +172,7 @@ P95 ≤ 3ms 的目標在 10,000 TPS 下，GC pause 是主要的不可控延遲�
 | 推薦選擇 | **ZGC**（Java 21 Production-ready，concurrent，pause < 1ms） |
 | 備選 | Shenandoah（pause 特性相近，適合較小 heap） |
 | **禁止** | G1GC（默認）、ParallelGC — pause 不可預測，無法保證 P99 ≤ 10ms |
+| **例外：Projection** | Projection 節點可使用 G1GC（`-XX:+UseG1GC -XX:MaxGCPauseMillis=10`），**條件**：(1) 驗證 `p99(jvm.gc.pause) ≤ 10ms` 在 production-shaped load 下持續 ≥ 24h；(2) Grafana alert `projection-gc-p99-high` 啟用，違反時自動告警並回退 ZGC。理由：Projection 為非 Posting 熱路徑（view layer），ZGC 的 concurrent barrier + 持續 mark/refine threads 在 4 vCPU 主機上耗 ~10–20% CPU；G1 在低 alloc rate（~700 KB/s）下 cycles 罕見，可回收 CPU。 |
 
 ### 13.2 JVM 啟動參數（State Machine / Raft Leader 節點）
 

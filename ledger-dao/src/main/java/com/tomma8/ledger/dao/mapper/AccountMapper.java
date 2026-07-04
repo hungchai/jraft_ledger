@@ -9,11 +9,11 @@ public interface AccountMapper {
 
     @Insert("INSERT INTO account (account_id, account_type, display_name, owner_id, status, created_at) " +
             "VALUES (#{accountId}, #{accountType}, #{displayName}, #{ownerId}, #{status}, #{createdAt}) " +
-            "ON DUPLICATE KEY UPDATE " +
-            "  account_type = VALUES(account_type), " +
-            "  status = VALUES(status), " +
-            "  display_name = VALUES(display_name), " +
-            "  id = LAST_INSERT_ID(id)")
+            "ON CONFLICT (account_id) DO UPDATE SET " +
+            "  account_type = EXCLUDED.account_type, " +
+            "  status = EXCLUDED.status, " +
+            "  display_name = EXCLUDED.display_name, " +
+            "  updated_at = CURRENT_TIMESTAMP")
     int upsertAccount(@Param("accountId") String accountId,
                       @Param("accountType") String accountType,
                       @Param("displayName") String displayName,

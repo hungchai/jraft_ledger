@@ -25,19 +25,37 @@ public class CommandQueueManager implements AutoCloseable {
     private final ConsensusEngine consensusEngine;
     private final int batchSize;
     private final long batchWaitMs;
+    // Pipelining: cap batches in flight to Raft. Naturally load-adaptive — at low load a batch
+    // commits before the next arrives (depth 1, no added latency); under backlog up to N batches
+    // pipeline so the worker no longer blocks a full commit cycle per batch (kills queue-wait).
+    private final int pipelineDepth;
+    private final Semaphore inflight;
     private final ExecutorService worker;
     private volatile boolean running = true;
 
     public CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs) {
-        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, true);
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, 1, true);
+    }
+
+    public CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
+                               int pipelineDepth) {
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, pipelineDepth, true);
+    }
+
+    // retained for existing tests (pipelineDepth=1)
+    CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
+                        boolean startWorker) {
+        this(consensusEngine, maxQueueSize, batchSize, batchWaitMs, 1, startWorker);
     }
 
     CommandQueueManager(ConsensusEngine consensusEngine, int maxQueueSize, int batchSize, long batchWaitMs,
-                        boolean startWorker) {
+                        int pipelineDepth, boolean startWorker) {
         this.consensusEngine = consensusEngine;
         this.queue = new LinkedBlockingQueue<>(maxQueueSize);
         this.batchSize = Math.max(1, batchSize);
         this.batchWaitMs = Math.max(0, batchWaitMs);
+        this.pipelineDepth = Math.max(1, pipelineDepth);
+        this.inflight = new Semaphore(this.pipelineDepth);
         this.worker = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "command-queue-worker");
             t.setDaemon(true);
@@ -84,7 +102,13 @@ public class CommandQueueManager implements AutoCloseable {
                 if (batch.isEmpty()) {
                     continue;
                 }
-                dispatchBatch(batch);
+                inflight.acquire();          // cap batches in flight (pipelineDepth); backpressure
+                try {
+                    dispatchBatch(batch);    // non-blocking; releases the permit on batch completion
+                } catch (RuntimeException e) {
+                    inflight.release();      // synchronous dispatch failure → release now
+                    throw e;
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -123,21 +147,32 @@ public class CommandQueueManager implements AutoCloseable {
             com.tomma8.ledger.metrics.LedgerMetrics.recordQueueWait(picked - q.enqueueNanos());
         }
         List<RaftCommand> commands = batch.stream().map(QueuedCommand::command).toList();
+        List<CompletableFuture<CommandResult>> results;
         try {
-            List<CommandResult> results = consensusEngine.submitBatch(commands);
-            for (int i = 0; i < batch.size(); i++) {
-                CompletableFuture<CommandResult> caller = batch.get(i).resultFuture();
-                if (caller != null) {
-                    caller.complete(results.get(i));
-                }
-            }
+            // non-blocking: append the Raft entry, get per-command futures back immediately.
+            results = consensusEngine.submitBatchAsync(commands);
         } catch (Exception e) {
             for (QueuedCommand task : batch) {
-                if (task.resultFuture() != null) {
-                    task.resultFuture().completeExceptionally(e);
-                }
+                if (task.resultFuture() != null) task.resultFuture().completeExceptionally(e);
+            }
+            inflight.release();
+            return;
+        }
+        for (int i = 0; i < batch.size(); i++) {
+            CompletableFuture<CommandResult> caller = batch.get(i).resultFuture();
+            // 10s cap mirrors the old blocking get(); prevents a stuck future from leaking a permit.
+            CompletableFuture<CommandResult> res = results.get(i).orTimeout(10, TimeUnit.SECONDS);
+            if (caller != null) {
+                res.whenComplete((r, e) -> {
+                    if (e != null) caller.completeExceptionally(e);
+                    else caller.complete(r);
+                });
             }
         }
+        // orTimeout above returns the SAME futures (it arms a timeout on `this`), so every element of
+        // `results` is guaranteed to complete within 10s — allOf can't hang and the permit can't leak.
+        CompletableFuture.allOf(results.toArray(new CompletableFuture[0]))
+                .whenComplete((r, e) -> inflight.release());
     }
 
     @Override

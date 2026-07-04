@@ -1,6 +1,5 @@
 package com.tomma8.ledger.rest.controller;
 
-import com.tomma8.ledger.config.ConfigService;
 import com.tomma8.ledger.domain.command.CommandResult;
 import com.tomma8.ledger.domain.command.PostingCommand;
 import com.tomma8.ledger.domain.model.EntryType;
@@ -9,6 +8,7 @@ import com.tomma8.ledger.queue.AccountQueueManager;
 import com.tomma8.ledger.queue.CommandQueueManager;
 import com.tomma8.ledger.raft.NodeRole;
 import com.tomma8.ledger.raft.ConsensusEngine;
+import com.tomma8.ledger.rest.config.properties.LedgerProperties;
 import com.tomma8.ledger.service.PostingService;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -55,16 +55,17 @@ public class PostingController {
                               @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
                               NodeRole nodeRole,
                               MeterRegistry meterRegistry,
-                              ConfigService cs) {
+                              LedgerProperties ledgerProps) {
         this.postingService = postingService;
         this.raftNodeManager = raftNodeManager;
         this.commandQueueManager = commandQueueManager;
         this.accountQueueManager = accountQueueManager;
         this.nodeRole = nodeRole;
         this.meterRegistry = meterRegistry;
-        int maxInflight = cs.getInt("LEDGER_MAX_INFLIGHT_POSTINGS", 256);
-        this.acquireTimeoutMs = cs.getInt("LEDGER_INFLIGHT_ACQUIRE_MS", 100);
-        this.traceSampleN = cs.getInt("LEDGER_POSTING_TRACE_SAMPLE", 0);
+        var posting = ledgerProps.getPosting();
+        int maxInflight = posting.getMaxInflight();
+        this.acquireTimeoutMs = (int) posting.getInflightAcquireMs();
+        this.traceSampleN = posting.getTraceSampleN();
         this.inflight = new Semaphore(maxInflight, true);
         Gauge.builder("ledger.posting.inflight.available", inflight::availablePermits)
                 .description("Available posting admission-control permits (0 = saturated, shedding)")
