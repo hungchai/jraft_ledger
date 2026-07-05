@@ -1,0 +1,662 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "k6 Test Cycle",
+      "type": "link",
+      "url": "/d/k6-test-cycle/k6-test-cycle-test-cycle-sh",
+      "icon": "dashboard",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Performance (priority)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Posting Throughput (TPS)",
+      "description": "Server-side posting rate. NFR target: >= 10,000 TPS peak.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 12 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ledger_posting_duration_seconds_count{businessEventType=~\"$businessEventType\"}[1m]))",
+          "legendFormat": "posting TPS"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(ledger_raft_last_applied_index[1m]))",
+          "legendFormat": "raft apply/s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(ledger_projection_events_processed[1m]))",
+          "legendFormat": "projection/s"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Posting Latency P50 / P95 / P99",
+      "description": "Posting API latency percentiles (ms). NFR: P95 <= 3ms.",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "P50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "P95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "P99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_posting_duration_seconds_bucket{businessEventType=~\"$businessEventType\"}[5m]))) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "SM Journal Sequence",
+      "description": "State machine journal sequence per node. Compare with MySQL journal count for projection lag.",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 8 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ledger_sm_journal_sequence{node=~\"$node\"}",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Kafka Consumer Lag",
+      "description": "Consumer group lag per topic/partition. Warning > 100, critical > 1000.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 12 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{consumergroup}} {{topic}} p{{partition}}",
+          "expr": "sum by (consumergroup, topic, partition) (kafka_consumergroup_lag{job=\"kafka\"})"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total lag",
+          "expr": "sum(kafka_consumergroup_lag{job=\"kafka\"})"
+        }
+      ]
+    },
+
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Raft & Pipeline",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Raft Last Applied Index",
+      "description": "Raft last applied log index per node (includes config/no-op entries).",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 8 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ledger_raft_last_applied_index{node=~\"$node\"}",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Raft apply-index lag vs leader",
+      "description": "Entries each follower is behind the leader.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 12 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(ledger_raft_last_applied_index) - ledger_raft_last_applied_index",
+          "legendFormat": "{{node}} behind"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Kafka produce vs consume (msgs/s)",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset{topic=~\"ledger.*\"}[1m]))",
+          "legendFormat": "produce {{topic}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (topic) (rate(kafka_consumergroup_current_offset{consumergroup=\"ledger-projection\"}[1m]))",
+          "legendFormat": "consume {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Projection throughput (rows/s)",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(ledger_projection_events_processed[1m])",
+          "legendFormat": "events consumed"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(ledger_projection_journal_flush_rows[1m])",
+          "legendFormat": "journal rows->db"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(ledger_projection_balance_writes[1m])",
+          "legendFormat": "balance upserts->db"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Outbox & projection backpressure",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "stall (s)" },
+            "properties": [{ "id": "unit", "value": "s" }, { "id": "custom.axisPlacement", "value": "right" }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(ledger_outbox_pending)",
+          "legendFormat": "outbox pending"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(ledger_projection_balance_upsert_queue_depth)",
+          "legendFormat": "balance queue"
+        },
+        {
+          "refId": "C",
+          "expr": "max(ledger_projection_seconds_since_last_event_seconds)",
+          "legendFormat": "stall (s)"
+        }
+      ]
+    },
+
+    {
+      "id": 300,
+      "type": "row",
+      "title": "JVM",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "JVM heap (used / committed / max)",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance)(jvm_memory_used_bytes{area=\"heap\",job=~\"ledger-nodes|projection\"})",
+          "legendFormat": "{{instance}} used"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (instance)(jvm_memory_committed_bytes{area=\"heap\",job=~\"ledger-nodes|projection\"})",
+          "legendFormat": "{{instance}} committed"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (instance)(jvm_memory_max_bytes{area=\"heap\",job=~\"ledger-nodes|projection\"})",
+          "legendFormat": "{{instance}} max"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "GC pause (rate / max ms)",
+      "description": "ZGC target: sub-ms pauses on ledger nodes.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "min": 0, "custom": { "lineWidth": 2 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/max/" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance)(rate(jvm_gc_pause_seconds_sum{job=~\"ledger-nodes|projection\"}[30s]))",
+          "legendFormat": "{{instance}} gc pause/s"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (instance)(jvm_gc_pause_seconds_max{job=~\"ledger-nodes|projection\"}) * 1000",
+          "legendFormat": "{{instance}} gc max ms"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "JVM CPU & live threads",
+      "description": "Process/system CPU is cgroup-scoped inside Docker.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "min": 0, "custom": { "lineWidth": 2 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/cpu|system|process/" },
+            "properties": [{ "id": "unit", "value": "percent" }, { "id": "max", "value": 100 }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "/threads/" },
+            "properties": [{ "id": "custom.axisPlacement", "value": "right" }, { "id": "unit", "value": "short" }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_cpu_usage{job=~\"ledger-nodes|projection\"} * 100",
+          "legendFormat": "{{node}} process cpu"
+        },
+        {
+          "refId": "B",
+          "expr": "system_cpu_usage{job=~\"ledger-nodes|projection\"} * 100",
+          "legendFormat": "{{node}} system cpu"
+        },
+        {
+          "refId": "C",
+          "expr": "jvm_threads_live_threads{job=~\"ledger-nodes|projection\"}",
+          "legendFormat": "{{node}} threads"
+        }
+      ]
+    },
+
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Host CPU",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Host CPU busy % (per core)",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "lineWidth": 1, "fillOpacity": 8 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 - (rate(node_cpu_seconds_total{mode=\"idle\"}[30s]) * 100)",
+          "legendFormat": "{{instance}} cpu{{cpu}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Host CPU by mode",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (mode) (rate(node_cpu_seconds_total{mode=~\"steal|iowait|system|user|nice|irq|softirq\"}[30s])) * 100",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Load avg & run-queue",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_load1",
+          "legendFormat": "{{instance}} load1"
+        },
+        {
+          "refId": "B",
+          "expr": "node_procs_running",
+          "legendFormat": "{{instance}} runnable"
+        }
+      ]
+    },
+
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Operations",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "collapsed": false
+    },
+    {
+      "id": 16,
+      "type": "table",
+      "title": "Uptime by node",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "align": "auto" } },
+        "overrides": []
+      },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "expr": "process_uptime_seconds{job=~\"ledger-nodes|projection\"}",
+          "legendFormat": "{{node}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": { "mode": "columns", "keepLabels": ["node"] }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": { "node": "Node", "Value": "Uptime" }
+          }
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Per-stage avg latency (ms)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ledger_posting_duration_seconds_sum[30s]))/sum(rate(ledger_posting_duration_seconds_count[30s]))*1000",
+          "legendFormat": "posting e2e"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(ledger_command_queue_wait_seconds_sum[30s]))/sum(rate(ledger_command_queue_wait_seconds_count[30s]))*1000",
+          "legendFormat": "queue wait"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(ledger_raft_wait_apply_seconds_sum[30s]))/sum(rate(ledger_raft_wait_apply_seconds_count[30s]))*1000",
+          "legendFormat": "raft commit"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(ledger_apply_total_seconds_sum[30s]))/sum(rate(ledger_apply_total_seconds_count[30s]))*1000",
+          "legendFormat": "fsm apply"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Command queue & rejections",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "min": 0, "custom": { "lineWidth": 2 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/QUEUE_FULL|NOT_LEADER|rejected/" },
+            "properties": [{ "id": "unit", "value": "reqps" }, { "id": "custom.axisPlacement", "value": "right" }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(ledger_command_queue_depth)",
+          "legendFormat": "queue depth"
+        },
+        {
+          "refId": "B",
+          "expr": "max(ledger_posting_inflight_available)",
+          "legendFormat": "inflight permits avail"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (errorCode)(rate(ledger_posting_rejected_count_total[30s]))",
+          "legendFormat": "{{errorCode}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["ledger", "perf", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": { "text": "All", "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(ledger_raft_is_leader, node)",
+        "includeAll": true,
+        "multi": true,
+        "name": "node",
+        "query": "label_values(ledger_raft_is_leader, node)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
+        "includeAll": true,
+        "multi": true,
+        "name": "businessEventType",
+        "query": "label_values(ledger_posting_duration_seconds_count, businessEventType)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ledger Performance Overview",
+  "uid": "ledger-overview",
+  "version": 1
+}

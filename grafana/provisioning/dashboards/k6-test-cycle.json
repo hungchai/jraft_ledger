@@ -20,9 +20,9 @@
   "graphTooltip": 1,
   "links": [
     {
-      "title": "Ledger Overview (server-side)",
+      "title": "Ledger Performance Overview",
       "type": "link",
-      "url": "/d/ledger-overview/ledger-platform-overview",
+      "url": "/d/ledger-overview/ledger-performance-overview",
       "icon": "dashboard",
       "targetBlank": false
     }
