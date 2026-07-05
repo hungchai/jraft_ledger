@@ -65,6 +65,14 @@ public class RaftNodeManager implements ConsensusEngine {
         nodeOptions.setInitialConf(conf);
         nodeOptions.setDisableCli(false);
         nodeOptions.setSnapshotIntervalSecs(600);
+        // Throttle snapshot disk IO. The snapshot save streams the full journal history
+        // (grows without bound) onto the same NVMe as the raft-log fsync; unthrottled it
+        // saturates the device (~470MB/s bursts, w_await up to 5.9s) and starves the
+        // fsync path — measured as SLOW_APPLY (persist max 3.7s), latency decay from
+        // the first snapshot (~T+20min) onward, and leader elections under load.
+        // 64MB/s keeps the device responsive; the snapshot just takes proportionally longer.
+        nodeOptions.setSnapshotThrottle(new com.alipay.sofa.jraft.storage.snapshot.ThroughputSnapshotThrottle(
+                64L * 1024 * 1024, 10));
         nodeOptions.setLogUri(dataPath + File.separator + "log");
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
