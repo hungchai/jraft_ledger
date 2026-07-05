@@ -168,7 +168,7 @@ management:
 
 ## 5. Grafana Dashboard Specifications
 
-### 5.1 Dashboard: Ledger Overview (ID: ledger-overview)
+### 5.1 Dashboard: Ledger — Main (ID: ledger-main)
 
 | Row | Panel | Metric | Type |
 |---|---|---|---|
