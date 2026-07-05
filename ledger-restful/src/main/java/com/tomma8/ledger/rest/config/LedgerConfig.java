@@ -126,7 +126,8 @@ public class LedgerConfig {
         com.tomma8.ledger.metrics.LedgerMetrics.init(meterRegistry);
         var rocks = ledgerProps.getRocksdb();
         RocksDBManager mgr = new RocksDBManager(
-                rocks.getPath(), rocks.getCacheMb(), rocks.getWriteBufferMb(), rocks.isFsync());
+                rocks.getPath(), rocks.getCacheMb(), rocks.getWriteBufferMb(), rocks.isFsync(),
+                rocks.isDisableWal(), rocks.getRateLimitMbps());
         try {
             mgr.open();
             log.info("RocksDB opened at {}", rocks.getPath());

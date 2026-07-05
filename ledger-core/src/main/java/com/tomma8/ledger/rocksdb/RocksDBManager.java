@@ -35,6 +35,8 @@ public class RocksDBManager implements AutoCloseable {
     private RocksDB rocksDB;
     private WriteOptions writeOptionsInstance;
     private Cache sharedCache;
+    private final boolean disableWal;
+    private RateLimiter rateLimiter;
     private final List<ColumnFamilyOptions> cfOptionsList = new ArrayList<>();
 
     public RocksDBManager(String dbPath) {
@@ -46,10 +48,26 @@ public class RocksDBManager implements AutoCloseable {
     }
 
     public RocksDBManager(String dbPath, int cacheMb, int writeBufferMb, boolean fsync) {
+        this(dbPath, cacheMb, writeBufferMb, fsync, false, 0);
+    }
+
+    /**
+     * @param disableWal   skip the RocksDB WAL entirely. ONLY safe when an external durable
+     *                     log (the Raft WAL) is the authoritative record and RocksDB is a
+     *                     deterministic-replay cache: on crash, state replays from the last
+     *                     snapshot + raft log. Halves write IO on the data disk.
+     * @param rateLimitMbps cap background flush/compaction IO (0 = unlimited). Sustained-write
+     *                     forensics: unthrottled flush+compaction bursts (~470MB/s) saturate the
+     *                     shared NVMe, device w_await spikes to seconds, and the co-located raft
+     *                     log fsync + WriteBatch stall (SLOW_APPLY, elections).
+     */
+    public RocksDBManager(String dbPath, int cacheMb, int writeBufferMb, boolean fsync,
+                          boolean disableWal, int rateLimitMbps) {
         this.dbPath = dbPath;
         this.cacheMb = cacheMb;
         this.writeBufferMb = writeBufferMb;
         this.fsync = fsync;
+        this.disableWal = disableWal;
         this.dbOptions = new DBOptions()
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true)
@@ -57,7 +75,16 @@ public class RocksDBManager implements AutoCloseable {
                 // default 2 background jobs: L0 files pile up until write stalls (persist max
                 // 1.5s+) and effective throughput decays monotonically. 4 jobs lets flush +
                 // compaction run in parallel on the 4-vCPU nodes.
-                .setMaxBackgroundJobs(4);
+                .setMaxBackgroundJobs(4)
+                // Incremental writeback: without this, flushed SST bytes sit dirty in the page
+                // cache and the kernel writes them back in giant bursts that block co-located
+                // latency-critical writes (raft log fsync).
+                .setBytesPerSync(1024 * 1024)
+                .setWalBytesPerSync(1024 * 1024);
+        if (rateLimitMbps > 0) {
+            this.rateLimiter = new RateLimiter((long) rateLimitMbps * 1024 * 1024);
+            this.dbOptions.setRateLimiter(rateLimiter);
+        }
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
@@ -87,8 +114,8 @@ public class RocksDBManager implements AutoCloseable {
         // fsync=false is safe for dev / read-after-write-replay scenarios where the
         // authoritative log is the Raft WAL (LogStorage) — RocksDB becomes a
         // deterministic-replay cache only. Production MUST keep this true.
-        writeOptionsInstance = new WriteOptions().setSync(fsync);
-        log.info("RocksDB WriteOptions.setSync = {}", fsync);
+        writeOptionsInstance = new WriteOptions().setSync(fsync).setDisableWAL(disableWal);
+        log.info("RocksDB WriteOptions.setSync = {}, disableWAL = {}", fsync, disableWal);
 
         List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
 
@@ -206,6 +233,7 @@ public class RocksDBManager implements AutoCloseable {
         cfOptionsList.forEach(ColumnFamilyOptions::close);
         cfOptionsList.clear();
         if (sharedCache != null) sharedCache.close();
+        if (rateLimiter != null) rateLimiter.close();
         dbOptions.close();
     }
 }
