@@ -58,6 +58,59 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     // capturing partial state (e.g. one balance updated but not the other).
     private final ReentrantReadWriteLock snapshotLock = new ReentrantReadWriteLock();
 
+    // Cap on the local snapshot journal-stream write rate (bytes/sec). See onSnapshotSave.
+    private static final long SNAPSHOT_WRITE_BYTES_PER_SEC = 48L * 1024 * 1024;
+
+    /** OutputStream wrapper that paces writes to a byte-per-second budget (token-bucket
+     *  over 100ms slices). Used only by the background snapshot save thread. */
+    static final class ThrottledOutputStream extends java.io.FilterOutputStream {
+        private final long bytesPerSlice;
+        private long sliceStartNanos = System.nanoTime();
+        private long writtenInSlice = 0;
+
+        ThrottledOutputStream(java.io.OutputStream out, long bytesPerSec) {
+            super(out);
+            this.bytesPerSlice = Math.max(1, bytesPerSec / 10);
+        }
+
+        @Override
+        public void write(int b) throws java.io.IOException {
+            pace(1);
+            out.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws java.io.IOException {
+            int pos = off, remaining = len;
+            while (remaining > 0) {
+                int chunk = (int) Math.min(remaining, bytesPerSlice);
+                pace(chunk);
+                out.write(b, pos, chunk);
+                pos += chunk;
+                remaining -= chunk;
+            }
+        }
+
+        private void pace(int bytes) throws java.io.IOException {
+            if (writtenInSlice + bytes > bytesPerSlice) {
+                long elapsed = System.nanoTime() - sliceStartNanos;
+                long sliceNanos = 100_000_000L;
+                if (elapsed < sliceNanos) {
+                    try {
+                        Thread.sleep((sliceNanos - elapsed) / 1_000_000L,
+                                (int) ((sliceNanos - elapsed) % 1_000_000L));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new java.io.InterruptedIOException("snapshot write throttled sleep interrupted");
+                    }
+                }
+                sliceStartNanos = System.nanoTime();
+                writtenInSlice = 0;
+            }
+            writtenInSlice += bytes;
+        }
+    }
+
     // Reusable deserialization buffer to avoid per-command byte[] allocation on hot path
     private static final int DESER_BUFFER_SIZE = 16384;
     private static final ThreadLocal<byte[]> DESER_BUFFER =
@@ -348,7 +401,14 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
                 // journal CF without the leader materializing all journals in heap.
                 String journalsPath = writer.getPath() + File.separator + "journals.dat";
-                try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
+                // Throttle the journal stream: it re-writes the FULL journal history (grows
+                // without bound) and unthrottled it saturates the NVMe shared with the
+                // raft-log fsync (~470MB/s bursts, device w_await up to 5.9s → SLOW_APPLY,
+                // TPS decay from the first snapshot onward, leader elections). jraft's
+                // SnapshotThrottle only governs follower install copies, not this local save.
+                try (var os = new ThrottledOutputStream(
+                        java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath)),
+                        SNAPSHOT_WRITE_BYTES_PER_SEC)) {
                     ledgerStateMachine.streamJournalsTo(os);
                 }
                 writer.addFile("journals.dat");
