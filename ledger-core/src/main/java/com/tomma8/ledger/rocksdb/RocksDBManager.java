@@ -61,11 +61,14 @@ public class RocksDBManager implements AutoCloseable {
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
-    private ColumnFamilyOptions cfOptions(BlockBasedTableConfig tableConfig, long writeBufBytes) {
+    private ColumnFamilyOptions cfOptions(BlockBasedTableConfig tableConfig, long writeBufBytes, int maxWriteBufferNumber) {
         ColumnFamilyOptions o = new ColumnFamilyOptions()
                 .setTableFormatConfig(tableConfig)
                 .setWriteBufferSize(writeBufBytes)
-                .setMaxWriteBufferNumber(2);
+                // Hot CFs need >2: with only 1 active + 1 immutable, any flush lag hard-STOPS all
+                // writes ("Stopping writes because we have N immutable memtables") — measured 87
+                // stalls/40min on [journal] at 3k TPS sustained. 4 lets up to 3 flushes queue.
+                .setMaxWriteBufferNumber(maxWriteBufferNumber);
         cfOptionsList.add(o);
         return o;
     }
@@ -103,13 +106,15 @@ public class RocksDBManager implements AutoCloseable {
 
         // Default CF must be first (cold: nothing hot-path lives in it)
         cfDescriptors.add(new ColumnFamilyDescriptor(
-                RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions(tableConfig, COLD_WRITE_BUF_BYTES)));
+                RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions(tableConfig, COLD_WRITE_BUF_BYTES, 2)));
 
-        // Named column families: hot write-path CFs get the configured buffer, others stay small
+        // Named column families: hot write-path CFs get the configured buffer + deeper flush
+        // queue, others stay small (memtable RSS budget = size x number x |hot CFs|)
         for (String cfName : ColumnFamilyRegistry.allColumnFamilies()) {
             if (cfName.equals(ColumnFamilyRegistry.CF_DEFAULT)) continue;
-            long bufBytes = HOT_WRITE_CFS.contains(cfName) ? writeBufBytes : COLD_WRITE_BUF_BYTES;
-            cfDescriptors.add(new ColumnFamilyDescriptor(cfName.getBytes(), cfOptions(tableConfig, bufBytes)));
+            boolean hot = HOT_WRITE_CFS.contains(cfName);
+            cfDescriptors.add(new ColumnFamilyDescriptor(cfName.getBytes(),
+                    cfOptions(tableConfig, hot ? writeBufBytes : COLD_WRITE_BUF_BYTES, hot ? 4 : 2)));
         }
 
         List<ColumnFamilyHandle> handles = new ArrayList<>();
