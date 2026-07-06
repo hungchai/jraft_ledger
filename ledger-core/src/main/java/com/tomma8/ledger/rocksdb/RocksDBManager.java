@@ -80,7 +80,11 @@ public class RocksDBManager implements AutoCloseable {
                 // cache and the kernel writes them back in giant bursts that block co-located
                 // latency-critical writes (raft log fsync).
                 .setBytesPerSync(1024 * 1024)
-                .setWalBytesPerSync(1024 * 1024);
+                .setWalBytesPerSync(1024 * 1024)
+                // Bound table-reader native memory. Default -1 keeps a reader (index/filter/
+                // metadata) open for EVERY SST file forever — measured 476 SSTs after 100min at
+                // 3k TPS with container RSS climbing ~20MB/min until the cgroup OOM limit.
+                .setMaxOpenFiles(256);
         if (rateLimitMbps > 0) {
             this.rateLimiter = new RateLimiter((long) rateLimitMbps * 1024 * 1024);
             this.dbOptions.setRateLimiter(rateLimiter);
