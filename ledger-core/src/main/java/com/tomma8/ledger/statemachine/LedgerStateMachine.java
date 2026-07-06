@@ -351,6 +351,23 @@ public class LedgerStateMachine {
     // Stream the RocksDB `journal` CF to/from a file without materializing all
     // journals in heap. Format: repeated [int keyLen][key bytes][int valLen][val bytes].
 
+    /** O(1) whole-DB checkpoint (hardlinked SSTs) for raft snapshots. Replaces the
+     *  O(total-history) journal re-stream. No-op without RocksDB (standalone/tests). */
+    public void checkpointTo(java.nio.file.Path dir) throws Exception {
+        if (rocksDB == null) return;
+        rocksDB.checkpointTo(dir);
+    }
+
+    /** Restore the whole DB from checkpoint files (snapshot install / restart). */
+    public void restoreDbFromCheckpoint(java.nio.file.Path dir) throws Exception {
+        if (rocksDB == null) return;
+        rocksDB.restoreFromCheckpoint(dir);
+    }
+
+    public boolean hasRocksDb() {
+        return rocksDB != null;
+    }
+
     public void streamJournalsTo(java.io.OutputStream os) throws Exception {
         if (rocksDB == null) return;
         try (var out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(os))) {

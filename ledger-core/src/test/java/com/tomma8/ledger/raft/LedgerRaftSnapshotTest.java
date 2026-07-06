@@ -108,26 +108,34 @@ class LedgerRaftSnapshotTest {
         assertThat(saved.await(10, TimeUnit.SECONDS)).as("save completed").isTrue();
 
         assertThat(status.get().isOk()).isTrue();
-        assertThat(writer.files).contains("state_machine_snapshot", "journals.dat");
+        // Checkpoint format: the state blob + cp_-prefixed hardlinked RocksDB files
+        assertThat(writer.files).contains("state_machine_snapshot");
+        assertThat(writer.files.stream().anyMatch(f -> f.startsWith("cp_"))).as("checkpoint files registered").isTrue();
         assertThat(Files.exists(snapDir.resolve("state_machine_snapshot"))).isTrue();
-        assertThat(Files.exists(snapDir.resolve("journals.dat"))).isTrue();
+        assertThat(Files.exists(snapDir.resolve("journals.dat"))).as("journal stream replaced by checkpoint").isFalse();
 
-        // Restore into a fresh state machine (fresh stores + fresh RocksDB) and verify.
+        // Restore into a fresh state machine (fresh stores + fresh RocksDB) and verify —
+        // same steps as LedgerRaftStateMachine.onSnapshotLoad's checkpoint branch.
+        Path restoreDir = Files.createDirectory(tempDir.resolve("cp_restore"));
+        try (var files = Files.list(snapDir)) {
+            for (Path p : (Iterable<Path>) files::iterator) {
+                String name = p.getFileName().toString();
+                if (name.startsWith("cp_")) Files.createLink(restoreDir.resolve(name.substring(3)), p);
+            }
+        }
         RocksDBManager rocks2 = new RocksDBManager(tempDir.resolve("db2").toString());
         rocks2.open();
         try {
+            rocks2.restoreFromCheckpoint(restoreDir);
             balanceStore = new BalanceStore();
             accountMetaStore = new AccountMetaStore();
             configStore = new BalanceTypeConfigStore();
             LedgerStateMachine sm2 = newSm(rocks2);
             sm2.restoreFromBytes(Files.readAllBytes(snapDir.resolve("state_machine_snapshot")));
-            try (var is = Files.newInputStream(snapDir.resolve("journals.dat"))) {
-                sm2.ingestJournalsFrom(is);
-            }
             assertThat(sm2.getJournalSequence()).isEqualTo(journalsBefore);
             assertThat(balanceStore.get(new AccountBalanceKey("CLIENT", "AVAILABLE_BALANCE", "CURRENT", "USD"))
                     .orElseThrow().amount()).isEqualByComparingTo(clientBefore);
-            // journals.dat carried all 20 journals into the fresh journal CF
+            // the checkpoint carried all 20 journals into the restored journal CF
             int[] count = {0};
             rocks2.forEach("journal", (k, v) -> count[0]++);
             assertThat(count[0]).isEqualTo(20);
@@ -141,13 +149,13 @@ class LedgerRaftSnapshotTest {
     void onSnapshotSave_offloadsHeavyWorkOffCallingThread() throws Exception {
         CountDownLatch streaming = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        // SM whose journal stream blocks, simulating a large/slow O(n) stream.
+        // SM whose checkpoint blocks, simulating a slow flush+checkpoint.
         LedgerStateMachine sm = new LedgerStateMachine(balanceStore, accountMetaStore, configStore) {
             @Override
-            public void streamJournalsTo(OutputStream os) throws Exception {
-                streaming.countDown();          // signal: background save reached the heavy stream
+            public void checkpointTo(java.nio.file.Path dir) throws Exception {
+                streaming.countDown();          // signal: background save reached the heavy step
                 release.await(5, TimeUnit.SECONDS);
-                super.streamJournalsTo(os);
+                super.checkpointTo(dir);
             }
         };
         sm.setRocksDB(rocks);

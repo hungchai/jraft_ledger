@@ -58,58 +58,6 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     // capturing partial state (e.g. one balance updated but not the other).
     private final ReentrantReadWriteLock snapshotLock = new ReentrantReadWriteLock();
 
-    // Cap on the local snapshot journal-stream write rate (bytes/sec). See onSnapshotSave.
-    private static final long SNAPSHOT_WRITE_BYTES_PER_SEC = 48L * 1024 * 1024;
-
-    /** OutputStream wrapper that paces writes to a byte-per-second budget (token-bucket
-     *  over 100ms slices). Used only by the background snapshot save thread. */
-    static final class ThrottledOutputStream extends java.io.FilterOutputStream {
-        private final long bytesPerSlice;
-        private long sliceStartNanos = System.nanoTime();
-        private long writtenInSlice = 0;
-
-        ThrottledOutputStream(java.io.OutputStream out, long bytesPerSec) {
-            super(out);
-            this.bytesPerSlice = Math.max(1, bytesPerSec / 10);
-        }
-
-        @Override
-        public void write(int b) throws java.io.IOException {
-            pace(1);
-            out.write(b);
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws java.io.IOException {
-            int pos = off, remaining = len;
-            while (remaining > 0) {
-                int chunk = (int) Math.min(remaining, bytesPerSlice);
-                pace(chunk);
-                out.write(b, pos, chunk);
-                pos += chunk;
-                remaining -= chunk;
-            }
-        }
-
-        private void pace(int bytes) throws java.io.IOException {
-            if (writtenInSlice + bytes > bytesPerSlice) {
-                long elapsed = System.nanoTime() - sliceStartNanos;
-                long sliceNanos = 100_000_000L;
-                if (elapsed < sliceNanos) {
-                    try {
-                        Thread.sleep((sliceNanos - elapsed) / 1_000_000L,
-                                (int) ((sliceNanos - elapsed) % 1_000_000L));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new java.io.InterruptedIOException("snapshot write throttled sleep interrupted");
-                    }
-                }
-                sliceStartNanos = System.nanoTime();
-                writtenInSlice = 0;
-            }
-            writtenInSlice += bytes;
-        }
-    }
 
     // Reusable deserialization buffer to avoid per-command byte[] allocation on hot path
     private static final int DESER_BUFFER_SIZE = 16384;
@@ -400,18 +348,30 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 // Journals streamed to a separate file (not in the blob — would OOM at
                 // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
                 // journal CF without the leader materializing all journals in heap.
-                String journalsPath = writer.getPath() + File.separator + "journals.dat";
-                // Throttle the journal stream: it re-writes the FULL journal history (grows
-                // without bound) and unthrottled it saturates the NVMe shared with the
-                // raft-log fsync (~470MB/s bursts, device w_await up to 5.9s → SLOW_APPLY,
-                // TPS decay from the first snapshot onward, leader elections). jraft's
-                // SnapshotThrottle only governs follower install copies, not this local save.
-                try (var os = new ThrottledOutputStream(
-                        java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath)),
-                        SNAPSHOT_WRITE_BYTES_PER_SEC)) {
-                    ledgerStateMachine.streamJournalsTo(os);
+                // RocksDB checkpoint instead of re-streaming the journal history: SSTs are
+                // HARDLINKED into the snapshot dir (same filesystem) so the save is O(1) in
+                // IO regardless of DB size. The previous stream grew with total history
+                // (13GB written every 600s at 3k TPS — sustained-throughput killer, even
+                // throttled). Files are registered flat with a cp_ prefix because jraft's
+                // snapshot copier does not create subdirectories on the receiving side.
+                if (ledgerStateMachine.hasRocksDb()) {
+                    java.nio.file.Path root = java.nio.file.Paths.get(writer.getPath());
+                    java.nio.file.Path cpDir = root.resolve("rocksdb_cp_tmp");
+                    ledgerStateMachine.checkpointTo(cpDir);
+                    try (var files = java.nio.file.Files.list(cpDir)) {
+                        for (java.nio.file.Path src : (Iterable<java.nio.file.Path>) files::iterator) {
+                            String flat = "cp_" + src.getFileName();
+                            java.nio.file.Files.createLink(root.resolve(flat), src);
+                            writer.addFile(flat);
+                        }
+                    }
+                    try (var files = java.nio.file.Files.list(cpDir)) {
+                        for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                            java.nio.file.Files.delete(p);
+                        }
+                    }
+                    java.nio.file.Files.delete(cpDir);
                 }
-                writer.addFile("journals.dat");
                 // Reuse the captured blob for the local sm_snapshot CF instead of re-reading
                 // the (off-thread, lock-free) mutable state, which would risk a torn snapshot.
                 ledgerStateMachine.persistSnapshotBlob(smData);
@@ -430,10 +390,36 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             if (reader.listFiles() != null && !reader.listFiles().isEmpty()) {
                 String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
                 byte[] data = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath));
+                // Checkpoint-format snapshot (cp_-prefixed RocksDB files): rebuild the whole
+                // DB from the checkpoint FIRST, then restore the in-memory blob on top.
+                java.nio.file.Path root = java.nio.file.Paths.get(reader.getPath());
+                java.nio.file.Path restoreDir = root.resolve("rocksdb_cp_restore");
+                boolean checkpointFormat = false;
+                try (var files = java.nio.file.Files.list(root)) {
+                    for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                        String name = p.getFileName().toString();
+                        if (name.startsWith("cp_")) {
+                            if (!checkpointFormat) {
+                                java.nio.file.Files.createDirectories(restoreDir);
+                                checkpointFormat = true;
+                            }
+                            java.nio.file.Files.createLink(restoreDir.resolve(name.substring(3)), p);
+                        }
+                    }
+                }
+                if (checkpointFormat) {
+                    ledgerStateMachine.restoreDbFromCheckpoint(restoreDir);
+                    try (var files = java.nio.file.Files.list(restoreDir)) {
+                        for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                            java.nio.file.Files.delete(p);
+                        }
+                    }
+                    java.nio.file.Files.delete(restoreDir);
+                }
                 ledgerStateMachine.restoreFromBytes(data);
-                // Restore journals (streamed separately) into the RocksDB journal CF.
+                // Legacy-format snapshot: journals streamed into journals.dat (pre-checkpoint).
                 java.nio.file.Path jp = java.nio.file.Paths.get(reader.getPath() + File.separator + "journals.dat");
-                if (java.nio.file.Files.exists(jp)) {
+                if (!checkpointFormat && java.nio.file.Files.exists(jp)) {
                     try (var is = java.nio.file.Files.newInputStream(jp)) {
                         ledgerStateMachine.ingestJournalsFrom(is);
                     }

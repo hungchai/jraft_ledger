@@ -30,7 +30,8 @@ public class RocksDBManager implements AutoCloseable {
     private final int cacheMb;
     private final int writeBufferMb;
     private final boolean fsync;
-    private final DBOptions dbOptions;
+    private final int rateLimitMbps;
+    private DBOptions dbOptions;               // rebuilt on restoreFromCheckpoint reopen
     private final Map<String, ColumnFamilyHandle> columnFamilyHandles = new HashMap<>();
     private RocksDB rocksDB;
     private WriteOptions writeOptionsInstance;
@@ -68,7 +69,12 @@ public class RocksDBManager implements AutoCloseable {
         this.writeBufferMb = writeBufferMb;
         this.fsync = fsync;
         this.disableWal = disableWal;
-        this.dbOptions = new DBOptions()
+        this.rateLimitMbps = rateLimitMbps;
+        this.dbOptions = buildDbOptions();
+    }
+
+    private DBOptions buildDbOptions() {
+        DBOptions o = new DBOptions()
                 .setCreateIfMissing(true)
                 .setCreateMissingColumnFamilies(true)
                 // Sustained-write soak (5k TPS) showed compaction debt accumulating with the
@@ -87,8 +93,9 @@ public class RocksDBManager implements AutoCloseable {
                 .setMaxOpenFiles(256);
         if (rateLimitMbps > 0) {
             this.rateLimiter = new RateLimiter((long) rateLimitMbps * 1024 * 1024);
-            this.dbOptions.setRateLimiter(rateLimiter);
+            o.setRateLimiter(rateLimiter);
         }
+        return o;
     }
 
     /** Per-CF options sharing one bounded block cache + bounded memtable memory. */
@@ -223,6 +230,59 @@ public class RocksDBManager implements AutoCloseable {
 
     public RocksDB getRocksDB() {
         return rocksDB;
+    }
+
+    /** Flush all memtables to SSTs. Required before {@link #checkpointTo}: with the WAL
+     *  disabled a checkpoint only captures flushed data — unflushed memtable contents
+     *  would silently miss from the snapshot. */
+    public void flushAll() throws Exception {
+        try (FlushOptions fo = new FlushOptions().setWaitForFlush(true)) {
+            rocksDB.flush(fo, new ArrayList<>(columnFamilyHandles.values()));
+        }
+    }
+
+    /**
+     * Native RocksDB checkpoint into {@code dir} (must not exist): SSTs are HARDLINKED
+     * (same filesystem, O(1) IO) + small metadata files copied. Replaces the O(N)
+     * journal re-stream that made raft snapshots grow with total history (13GB streams
+     * every 600s measured — the sustained-TPS killer).
+     */
+    public void checkpointTo(java.nio.file.Path dir) throws Exception {
+        flushAll();
+        try (Checkpoint cp = Checkpoint.create(rocksDB)) {
+            cp.createCheckpoint(dir.toString());
+        }
+    }
+
+    /**
+     * Replace the entire DB with a checkpoint's contents: close, wipe the db dir,
+     * hardlink the checkpoint files in (fallback to copy across filesystems), reopen.
+     * Only called from snapshot load (follower bootstrap / node restart) — never hot path.
+     */
+    public void restoreFromCheckpoint(java.nio.file.Path checkpointDir) throws Exception {
+        close();
+        java.nio.file.Path db = java.nio.file.Path.of(dbPath);
+        if (java.nio.file.Files.exists(db)) {
+            try (var walk = java.nio.file.Files.walk(db)) {
+                walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
+        java.nio.file.Files.createDirectories(db);
+        try (var files = java.nio.file.Files.list(checkpointDir)) {
+            for (java.nio.file.Path src : (Iterable<java.nio.file.Path>) files::iterator) {
+                java.nio.file.Path dst = db.resolve(src.getFileName());
+                try {
+                    java.nio.file.Files.createLink(dst, src);
+                } catch (Exception linkFail) {
+                    java.nio.file.Files.copy(src, dst);
+                }
+            }
+        }
+        // close() released the option/cache/limiter handles — rebuild before reopening
+        this.rateLimiter = null;
+        this.dbOptions = buildDbOptions();
+        open();
+        log.info("RocksDB restored from checkpoint {} and reopened at {}", checkpointDir, dbPath);
     }
 
     @Override
