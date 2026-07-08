@@ -49,6 +49,12 @@ ledger:
     # and RocksDB is treated as a deterministic-replay cache. Disabling is faster but
     # a crash between Raft commit and RocksDB write loses the in-flight journal.
     fsync: ${LEDGER_ROCKSDB_FSYNC:true}
+    # disable-wal=true skips the RocksDB WAL (halves data-disk write IO). Same safety
+    # precondition as fsync=false: the Raft log must be the durable record.
+    disable-wal: ${LEDGER_ROCKSDB_DISABLE_WAL:false}
+    # Cap background flush/compaction IO in MB/s (0 = unlimited). Prevents burst
+    # saturation of a disk shared with the latency-critical raft-log fsync.
+    rate-limit-mbps: ${LEDGER_ROCKSDB_RATE_LIMIT_MBPS:0}
   raft:
     group-id: ledger-group-1
     data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}

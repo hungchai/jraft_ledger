@@ -62,6 +62,8 @@ public class LedgerProperties {
         private int cacheMb = 256;
         private int writeBufferMb = 32;
         private boolean fsync = true;
+        private boolean disableWal = false;
+        private int rateLimitMbps = 0;
 
         public String getPath() { return path; }
         public void setPath(String path) { this.path = path; }
@@ -74,6 +76,12 @@ public class LedgerProperties {
 
         public boolean isFsync() { return fsync; }
         public void setFsync(boolean fsync) { this.fsync = fsync; }
+
+        public boolean isDisableWal() { return disableWal; }
+        public void setDisableWal(boolean disableWal) { this.disableWal = disableWal; }
+
+        public int getRateLimitMbps() { return rateLimitMbps; }
+        public void setRateLimitMbps(int rateLimitMbps) { this.rateLimitMbps = rateLimitMbps; }
     }
 
     public static class Raft {

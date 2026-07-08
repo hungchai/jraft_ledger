@@ -58,6 +58,7 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
     // capturing partial state (e.g. one balance updated but not the other).
     private final ReentrantReadWriteLock snapshotLock = new ReentrantReadWriteLock();
 
+
     // Reusable deserialization buffer to avoid per-command byte[] allocation on hot path
     private static final int DESER_BUFFER_SIZE = 16384;
     private static final ThreadLocal<byte[]> DESER_BUFFER =
@@ -347,11 +348,30 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
                 // Journals streamed to a separate file (not in the blob — would OOM at
                 // scale). Lets an InstallSnapshot-bootstrapped follower reconstruct the
                 // journal CF without the leader materializing all journals in heap.
-                String journalsPath = writer.getPath() + File.separator + "journals.dat";
-                try (var os = java.nio.file.Files.newOutputStream(java.nio.file.Paths.get(journalsPath))) {
-                    ledgerStateMachine.streamJournalsTo(os);
+                // RocksDB checkpoint instead of re-streaming the journal history: SSTs are
+                // HARDLINKED into the snapshot dir (same filesystem) so the save is O(1) in
+                // IO regardless of DB size. The previous stream grew with total history
+                // (13GB written every 600s at 3k TPS — sustained-throughput killer, even
+                // throttled). Files are registered flat with a cp_ prefix because jraft's
+                // snapshot copier does not create subdirectories on the receiving side.
+                if (ledgerStateMachine.hasRocksDb()) {
+                    java.nio.file.Path root = java.nio.file.Paths.get(writer.getPath());
+                    java.nio.file.Path cpDir = root.resolve("rocksdb_cp_tmp");
+                    ledgerStateMachine.checkpointTo(cpDir);
+                    try (var files = java.nio.file.Files.list(cpDir)) {
+                        for (java.nio.file.Path src : (Iterable<java.nio.file.Path>) files::iterator) {
+                            String flat = "cp_" + src.getFileName();
+                            java.nio.file.Files.createLink(root.resolve(flat), src);
+                            writer.addFile(flat);
+                        }
+                    }
+                    try (var files = java.nio.file.Files.list(cpDir)) {
+                        for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                            java.nio.file.Files.delete(p);
+                        }
+                    }
+                    java.nio.file.Files.delete(cpDir);
                 }
-                writer.addFile("journals.dat");
                 // Reuse the captured blob for the local sm_snapshot CF instead of re-reading
                 // the (off-thread, lock-free) mutable state, which would risk a torn snapshot.
                 ledgerStateMachine.persistSnapshotBlob(smData);
@@ -370,10 +390,36 @@ public class LedgerRaftStateMachine extends StateMachineAdapter {
             if (reader.listFiles() != null && !reader.listFiles().isEmpty()) {
                 String filePath = reader.getPath() + File.separator + "state_machine_snapshot";
                 byte[] data = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath));
+                // Checkpoint-format snapshot (cp_-prefixed RocksDB files): rebuild the whole
+                // DB from the checkpoint FIRST, then restore the in-memory blob on top.
+                java.nio.file.Path root = java.nio.file.Paths.get(reader.getPath());
+                java.nio.file.Path restoreDir = root.resolve("rocksdb_cp_restore");
+                boolean checkpointFormat = false;
+                try (var files = java.nio.file.Files.list(root)) {
+                    for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                        String name = p.getFileName().toString();
+                        if (name.startsWith("cp_")) {
+                            if (!checkpointFormat) {
+                                java.nio.file.Files.createDirectories(restoreDir);
+                                checkpointFormat = true;
+                            }
+                            java.nio.file.Files.createLink(restoreDir.resolve(name.substring(3)), p);
+                        }
+                    }
+                }
+                if (checkpointFormat) {
+                    ledgerStateMachine.restoreDbFromCheckpoint(restoreDir);
+                    try (var files = java.nio.file.Files.list(restoreDir)) {
+                        for (java.nio.file.Path p : (Iterable<java.nio.file.Path>) files::iterator) {
+                            java.nio.file.Files.delete(p);
+                        }
+                    }
+                    java.nio.file.Files.delete(restoreDir);
+                }
                 ledgerStateMachine.restoreFromBytes(data);
-                // Restore journals (streamed separately) into the RocksDB journal CF.
+                // Legacy-format snapshot: journals streamed into journals.dat (pre-checkpoint).
                 java.nio.file.Path jp = java.nio.file.Paths.get(reader.getPath() + File.separator + "journals.dat");
-                if (java.nio.file.Files.exists(jp)) {
+                if (!checkpointFormat && java.nio.file.Files.exists(jp)) {
                     try (var is = java.nio.file.Files.newInputStream(jp)) {
                         ledgerStateMachine.ingestJournalsFrom(is);
                     }

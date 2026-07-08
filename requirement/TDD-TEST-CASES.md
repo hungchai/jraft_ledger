@@ -7,6 +7,8 @@
 
 > **v0.13 變更摘要**：(1) F-015 Config Abstraction 強化 — 所有配置皆可由 `application.yml` 設定；`SpringConfigService` 27 個 legacy env → property 對照表；Controller 改注入 `ConfigService`。補齊既有 TC-F015-02/03 對 `${ENV:default}` 形式與 env override 的覆蓋。(2) Module 20 追加 TC-F015-06~07 雙層 fsync 切換測試：Raft log fsync 切換生效（`LEDGER_RAFT_LOG_FSYNC` → `RaftOptions.setSync`）、RocksDB fsync 切換生效（`LEDGER_ROCKSDB_FSYNC` → `WriteOptions.setSync`）。
 
+> **v0.19 變更摘要**：Snapshot 改為 **RocksDB Checkpoint（硬鏈結）**，取代 O(全史) journal 串流。背景：24h@3k 壓測揭示串流版 snapshot 隨 journal 累積線性變大（3h 即 13GB / 每 600s 重寫一次），縱使限速仍導致 persist 秒級停頓與選舉；數學上 snapshot 時長終將超過間隔。新契約：save = flushAll + `Checkpoint.createCheckpoint`（SST 硬鏈結，IO O(1)），檔案以 `cp_` 前綴平鋪註冊；load = 偵測 `cp_` 檔案 → 關庫→硬鏈結還原→重開（舊 `journals.dat` 格式保留向後相容讀取路徑）。**TC-RAFT-30/31 契約更新**：30 改驗 checkpoint 檔案 round-trip（不再產出 journals.dat）；31 改以 `checkpointTo` 為重活模擬點。另：`maxOpenFiles` 於 state store 與 jraft log store 雙實例設上限（native 記憶體洩漏根因）、hot CF `maxWriteBufferNumber=4`、`disableWAL`/`rateLimitMbps` 配置化。24h 驗證：259M 筆、P99 8.96ms、零選舉、Σ借貸=0。
+
 > **v0.18 變更摘要**：修復 snapshot-save 凍結 apply 缺陷。根因：`onSnapshotSave` 在**單一 FSM apply 執行緒**上同步串流全量 journal CF（O(journal 數)），每 600s snapshot 凍結 apply 數秒；240m soak 實測 p99→10s、TPS→0、~500 客戶端 `.get()` 逾時，對齊 600s cadence。修法：FSM 執行緒僅做亞毫秒記憶體態捕捉，重活（journal 串流＋檔案寫入＋blob 落地）以 `Utils.runInThread` 卸載至背景執行緒，FSM 立即返回續 apply，背景完成呼叫 `done.run()`。（註：先前只縮小 write lock 範圍的版本經 2.5M-journal verify soak 證實無效 —— 瓶頸是 FSM 執行緒被佔，非鎖。）新增 TC-RAFT-30/31，對應 ADR-001 §6.1 v0.6。
 
 > **v0.17 變更摘要**：(1) 修正 Raft apply 決定性缺陷 — apply 路徑內的 `Instant.now()` 與隨機 `FastIdGenerator.nextId()` 在每節點各自產生不同值，導致 Journal/JournalLine/BalanceEntry 時間戳、idempotency createdAt 與 BalanceChangeEvent eventId 跨節點分歧。改為由 leader 於提交時戳記**真實** apply time（real wall-clock），經 `RaftApplyContext` 隨 log entry 複製（`CommandSerializer` 8-byte header；jraft + Ratis + batch 路徑）；eventId 改由 `journalLineId` 決定性衍生（`"EVT-"+journalLineId`、`"EVT-ACC-"+accountId`）。注意：本修復取代先前 `deterministicNowFromRaftIndex`（合成時戳 2024-epoch+index，非真實時間）以保 createdAt 可審計。新增 Module 23（TC-DET-01~03）。(2) 同步 Module 22 文件至現行碼：SnowflakeIdGenerator 時鐘回退已（於 v3-fix）改為 spin-wait（`waitNextMillis`，永不拋錯；drift > 2s 僅記 WARN），TC-SNOW-03/04 對應。
@@ -1006,20 +1008,21 @@ TC-RAFT-02  cluster_survivesFollowerRestart
             When:  follower 關閉後重啟
             Then:  follower 重新加入 cluster，無錯誤
 
-TC-RAFT-30  onSnapshotSave_producesRestorableState
+TC-RAFT-30  onSnapshotSave_producesRestorableState  (v0.19: checkpoint 契約)
             Given: LedgerRaftStateMachine wrapping a RocksDB-backed SM with 20 postings
-            When:  onSnapshotSave(writer) → restore state_machine_snapshot + journals.dat
-                   into a fresh SM/RocksDB
-            Then:  journalSequence、CLIENT balance、20 journals 全部還原一致
+            When:  onSnapshotSave(writer) → snapshot 目錄含 state_machine_snapshot + cp_ 前綴
+                   RocksDB checkpoint 檔（硬鏈結）；以 checkpoint 檔還原全新 RocksDB + restoreFromBytes
+            Then:  journalSequence、CLIENT balance、20 journals 全部還原一致；
+                   不再產出 journals.dat（O(全史) 串流已移除）
             (impl: LedgerRaftSnapshotTest — passing, no docker)
 
-TC-RAFT-31  onSnapshotSave_offloadsHeavyWorkOffCallingThread
-            Given: SM whose streamJournalsTo blocks (simulates large O(n) stream)
+TC-RAFT-31  onSnapshotSave_offloadsHeavyWorkOffCallingThread  (v0.19: checkpoint 契約)
+            Given: SM whose checkpointTo blocks (simulates slow flush+checkpoint)
             When:  呼叫 onSnapshotSave（模擬 FSM apply 執行緒）
-            Then:  onSnapshotSave 在重串流尚未完成時即返回（done 未觸發、stream 已於背景執行緒啟動）
-                   → FSM 執行緒不被阻塞，apply 可續行；同步版（舊碼）會卡住呼叫端令此斷言失敗
-            Why:   240m soak 每 600s snapshot 期間 apply 凍結 ~10s（p99→10s、TPS→0、~500 .get() 逾時）。
-                   修正：重活以 Utils.runInThread 卸載至背景執行緒，done.run() 於完成後回呼 JRaft。
+            Then:  onSnapshotSave 在 checkpoint 尚未完成時即返回（done 未觸發、checkpoint 已於背景執行緒啟動）
+                   → FSM 執行緒不被阻塞，apply 可續行
+            Why:   v0.18 解掉 FSM 執行緒佔用；v0.19 再解掉磁碟 IO 本身 —— 串流版每 600s 重寫全史
+                   （24h@3k 實測 3h 即 13GB/次，persist 秒級停頓+選舉），checkpoint 硬鏈結後 IO O(1)。
             (impl: LedgerRaftSnapshotTest — passing, no docker)
 ```
 

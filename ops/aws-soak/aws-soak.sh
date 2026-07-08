@@ -68,7 +68,10 @@ SVC_TYPE="c7g.large"             # each services EC2 host (kafka, projection): 2
 KAFKA_PORT=9092                  # Kafka PLAINTEXT listener (advertised on the kafka host's private IP)
 KAFKA_EXPORTER_PORT=9308         # kafka-exporter: authoritative consumergroup lag (true backlog)
 DB_PORT=5432                     # Aurora PostgreSQL port
-AURORA_CLASS="db.t4g.medium"     # Aurora PG instance class (Graviton; cheapest that fits a soak)
+# Aurora PG instance class. Burstable (t4g) is ONLY valid for short benchmarks: CPU credits
+# drain under sustained load and consume throughput collapses (measured 2026-07-04: t4g.medium
+# credit-starved 1.9k ev/s vs r8g.xlarge 6.3k ev/s). Soaks must use a fixed-performance class.
+AURORA_CLASS="${AURORA_CLASS:-db.r8g.xlarge}"
 PG_EXPORTER_PORT=9187            # postgres_exporter (on projection host → Aurora) for pg_* metrics
 PROJECTION_PORT=8089
 STATE_ROOT="$(cd "$(dirname "$0")" && pwd)/.aws-soak"
@@ -522,7 +525,11 @@ deploy_cluster() {
     DS_ENV="-e SPRING_DATASOURCE_URL=jdbc:postgresql://$_ep:$DB_PORT/ledger_view -e SPRING_DATASOURCE_USERNAME=ledger -e SPRING_DATASOURCE_PASSWORD=ledger123 -e SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.postgresql.Driver"
   fi
   # heap fits the default c8gd.xlarge (8 GiB). Override with LEDGER_JAVA_OPTS for smaller nodes.
-  local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
+  # NMT + heap-dump-on-OOME are forensics for the measured native-memory creep (~7MB/min
+  # under sustained load, host-wedged nodes on 2026-07-06): NMT lets `jcmd 1 VM.native_memory`
+  # attribute native growth; the docker --memory cap turns host wedges into container
+  # OOM-restarts that node-exporter survives to record.
+  local JOPTS="${LEDGER_JAVA_OPTS:--Xms4g -Xmx4g -XX:+UseZGC} -XX:NativeMemoryTracking=summary -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/lib/ledger/ -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info -Dmanagement.metrics.export.prometheus.enabled=true --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
   # RocksDB state placement. MUST live on the NVMe arm (inside the /mnt/raft mount) when DISK=nvme:
   # on the 30GB gp3 root (~125 MB/s cap) sustained 50VU load drives RocksDB flush/compaction into
   # write stalls up to 7.7s → FSM apply blocks → raft heartbeats starve → leader-election storm
@@ -541,6 +548,7 @@ deploy_cluster() {
         -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro \
         prom/node-exporter:latest --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs >/dev/null 2>&1 || true
       docker run -d --name ledger-node --restart unless-stopped --network host \
+        --memory=7g --memory-swap=7g \
         -e NODE_ID=$priv -e PEER_NODES=$PEERS -e RAFT_SERVER_PORT=$RAFT_PORT \
         -e LEDGER_ADVERTISE_URL=http://$priv:$HTTP_PORT \
         -e LEDGER_RAFT_DATA_PATH=/var/lib/ledger/raft -e LEDGER_ROCKSDB_PATH=$ROCKS_PATH \
@@ -549,6 +557,8 @@ deploy_cluster() {
         -e LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS=${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:-1} \
         -e LEDGER_COMMAND_QUEUE_BATCH_SIZE=${LEDGER_COMMAND_QUEUE_BATCH_SIZE:-16} \
         -e LEDGER_RAFT_PIPELINE_DEPTH=${LEDGER_RAFT_PIPELINE_DEPTH:-1} \
+        -e LEDGER_ROCKSDB_WRITE_BUFFER_MB=${LEDGER_ROCKSDB_WRITE_BUFFER_MB:-64} \
+        -e LEDGER_IDEMPOTENCY_TTL=${LEDGER_IDEMPOTENCY_TTL:-30m} \
         -e LEDGER_POSTING_TRACE_SAMPLE=${LEDGER_POSTING_TRACE_SAMPLE:-0} \
         -e JAVA_OPTS='$JOPTS' \
         -v /home/$SSH_USER/ledger-data:/var/lib/ledger -v /mnt/raft:/var/lib/ledger/raft \

@@ -61,15 +61,51 @@ public class RaftNodeManager implements ConsensusEngine {
         RaftOptions raftOptions = new RaftOptions();
         raftOptions.setSync(raftLogSync);
         nodeOptions.setRaftOptions(raftOptions);
+        registerBoundedLogStorageOptions();
         nodeOptions.setElectionTimeoutMs(3000);
         nodeOptions.setInitialConf(conf);
         nodeOptions.setDisableCli(false);
         nodeOptions.setSnapshotIntervalSecs(600);
+        // Throttle snapshot disk IO. The snapshot save streams the full journal history
+        // (grows without bound) onto the same NVMe as the raft-log fsync; unthrottled it
+        // saturates the device (~470MB/s bursts, w_await up to 5.9s) and starves the
+        // fsync path — measured as SLOW_APPLY (persist max 3.7s), latency decay from
+        // the first snapshot (~T+20min) onward, and leader elections under load.
+        // 64MB/s keeps the device responsive; the snapshot just takes proportionally longer.
+        nodeOptions.setSnapshotThrottle(new com.alipay.sofa.jraft.storage.snapshot.ThroughputSnapshotThrottle(
+                64L * 1024 * 1024, 10));
         nodeOptions.setLogUri(dataPath + File.separator + "log");
         nodeOptions.setRaftMetaUri(dataPath + File.separator + "raft_meta");
         nodeOptions.setSnapshotUri(dataPath + File.separator + "snapshot");
         nodeOptions.setFsm(this.stateMachine);
         log.info("Raft log fsync (NodeOptions.setSync) = {}", raftLogSync);
+    }
+
+    // StorageOptionsFactory registration is process-global and throws on re-register;
+    // guard so multi-node tests (several RaftNodeManagers per JVM) register once.
+    private static final java.util.concurrent.atomic.AtomicBoolean LOG_STORE_OPTS_REGISTERED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * Bound the native memory of jraft's OWN RocksDB (the log store). Its stock options
+     * leave max_open_files unlimited and keep index/filter blocks outside any cache
+     * budget, so table-reader memory grows with SST count until the container OOMs
+     * (part of the ~20MB/min native creep measured under 3k TPS sustained).
+     */
+    private static void registerBoundedLogStorageOptions() {
+        if (!LOG_STORE_OPTS_REGISTERED.compareAndSet(false, true)) return;
+        org.rocksdb.DBOptions logDbOpts = com.alipay.sofa.jraft.util.StorageOptionsFactory
+                .getDefaultRocksDBOptions();
+        logDbOpts.setMaxOpenFiles(128);
+        com.alipay.sofa.jraft.util.StorageOptionsFactory.registerRocksDBOptions(
+                com.alipay.sofa.jraft.storage.impl.RocksDBLogStorage.class, logDbOpts);
+        org.rocksdb.BlockBasedTableConfig logTableConfig = com.alipay.sofa.jraft.util.StorageOptionsFactory
+                .getDefaultRocksDBTableConfig()
+                .setBlockCache(new org.rocksdb.LRUCache(64L * 1024 * 1024))
+                .setCacheIndexAndFilterBlocks(true)
+                .setPinL0FilterAndIndexBlocksInCache(true);
+        com.alipay.sofa.jraft.util.StorageOptionsFactory.registerRocksDBTableFormatConfig(
+                com.alipay.sofa.jraft.storage.impl.RocksDBLogStorage.class, logTableConfig);
     }
 
     public boolean init() {
