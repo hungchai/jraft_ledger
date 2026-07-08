@@ -40,6 +40,17 @@ public class RocksDBManager implements AutoCloseable {
     private RateLimiter rateLimiter;
     private final List<ColumnFamilyOptions> cfOptionsList = new ArrayList<>();
 
+    // Guards every handle access (get/put/delete/forEach/count/getHandle/direct iterators)
+    // against restoreFromCheckpoint's close-wipe-relink-reopen cycle. onApply vs
+    // onSnapshotSave/Load are already serialised by LedgerRaftStateMachine.snapshotLock, but
+    // that lock is invisible to REST query threads (JournalQueryService -> readJournal/
+    // forEachJournal) and the async outbox publisher/drain thread (OutboxStore) — both call
+    // into this manager directly. Without this lock, restoreFromCheckpoint can close and
+    // free native ColumnFamilyHandle/RocksDB objects while one of those threads is mid-call,
+    // which is a JNI use-after-free, not just a catchable exception.
+    private final java.util.concurrent.locks.ReentrantReadWriteLock stateLock =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
+
     public RocksDBManager(String dbPath) {
         this(dbPath, 256, 32, true);
     }
@@ -181,15 +192,30 @@ public class RocksDBManager implements AutoCloseable {
     }
 
     public void put(String cfName, byte[] key, byte[] value) throws Exception {
-        rocksDB.put(getHandle(cfName), key, value);
+        stateLock.readLock().lock();
+        try {
+            rocksDB.put(getHandle(cfName), key, value);
+        } finally {
+            stateLock.readLock().unlock();
+        }
     }
 
     public byte[] get(String cfName, byte[] key) throws Exception {
-        return rocksDB.get(getHandle(cfName), key);
+        stateLock.readLock().lock();
+        try {
+            return rocksDB.get(getHandle(cfName), key);
+        } finally {
+            stateLock.readLock().unlock();
+        }
     }
 
     public void delete(String cfName, byte[] key) throws Exception {
-        rocksDB.delete(getHandle(cfName), key);
+        stateLock.readLock().lock();
+        try {
+            rocksDB.delete(getHandle(cfName), key);
+        } finally {
+            stateLock.readLock().unlock();
+        }
     }
 
     /**
@@ -198,20 +224,41 @@ public class RocksDBManager implements AutoCloseable {
      * and idempotency entries without holding the whole CF in heap.
      */
     public void forEach(String cfName, java.util.function.BiConsumer<byte[], byte[]> consumer) {
+        stateLock.readLock().lock();
         try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
             for (it.seekToFirst(); it.isValid(); it.next()) {
                 consumer.accept(it.key(), it.value());
             }
+        } finally {
+            stateLock.readLock().unlock();
         }
     }
 
     /** Count keys in a column family (CF scan; used for F-006 counts). */
     public long count(String cfName) {
-        long n = 0;
+        stateLock.readLock().lock();
         try (RocksIterator it = rocksDB.newIterator(getHandle(cfName))) {
+            long n = 0;
             for (it.seekToFirst(); it.isValid(); it.next()) n++;
+            return n;
+        } finally {
+            stateLock.readLock().unlock();
         }
-        return n;
+    }
+
+    /**
+     * Run {@code action} under the manager's read lock — for callers that need direct
+     * {@link #getRocksDB()}/{@link #getHandle} access (e.g. prefix-seek iterators) to stay
+     * consistent with {@link #restoreFromCheckpoint}, which holds the write lock for its
+     * whole close/wipe/relink/reopen cycle.
+     */
+    public <T> T readLocked(java.util.function.Supplier<T> action) {
+        stateLock.readLock().lock();
+        try {
+            return action.get();
+        } finally {
+            stateLock.readLock().unlock();
+        }
     }
 
     /**
@@ -221,9 +268,11 @@ public class RocksDBManager implements AutoCloseable {
      */
     public void write(WriteBatch batch) throws Exception {
         long t0 = System.nanoTime();
+        stateLock.readLock().lock();
         try {
             rocksDB.write(writeOptionsInstance, batch);
         } finally {
+            stateLock.readLock().unlock();
             com.tomma8.ledger.metrics.LedgerMetrics.recordRocksWrite(System.nanoTime() - t0);
         }
     }
@@ -260,44 +309,54 @@ public class RocksDBManager implements AutoCloseable {
      * Only called from snapshot load (follower bootstrap / node restart) — never hot path.
      */
     public void restoreFromCheckpoint(java.nio.file.Path checkpointDir) throws Exception {
-        close();
-        java.nio.file.Path db = java.nio.file.Path.of(dbPath);
-        if (java.nio.file.Files.exists(db)) {
-            try (var walk = java.nio.file.Files.walk(db)) {
-                walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-            }
-        }
-        java.nio.file.Files.createDirectories(db);
-        try (var files = java.nio.file.Files.list(checkpointDir)) {
-            for (java.nio.file.Path src : (Iterable<java.nio.file.Path>) files::iterator) {
-                java.nio.file.Path dst = db.resolve(src.getFileName());
-                try {
-                    java.nio.file.Files.createLink(dst, src);
-                } catch (Exception linkFail) {
-                    java.nio.file.Files.copy(src, dst);
+        stateLock.writeLock().lock();
+        try {
+            close();
+            java.nio.file.Path db = java.nio.file.Path.of(dbPath);
+            if (java.nio.file.Files.exists(db)) {
+                try (var walk = java.nio.file.Files.walk(db)) {
+                    walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
                 }
             }
+            java.nio.file.Files.createDirectories(db);
+            try (var files = java.nio.file.Files.list(checkpointDir)) {
+                for (java.nio.file.Path src : (Iterable<java.nio.file.Path>) files::iterator) {
+                    java.nio.file.Path dst = db.resolve(src.getFileName());
+                    try {
+                        java.nio.file.Files.createLink(dst, src);
+                    } catch (Exception linkFail) {
+                        java.nio.file.Files.copy(src, dst);
+                    }
+                }
+            }
+            // close() released the option/cache/limiter handles — rebuild before reopening
+            this.rateLimiter = null;
+            this.dbOptions = buildDbOptions();
+            open();
+            log.info("RocksDB restored from checkpoint {} and reopened at {}", checkpointDir, dbPath);
+        } finally {
+            stateLock.writeLock().unlock();
         }
-        // close() released the option/cache/limiter handles — rebuild before reopening
-        this.rateLimiter = null;
-        this.dbOptions = buildDbOptions();
-        open();
-        log.info("RocksDB restored from checkpoint {} and reopened at {}", checkpointDir, dbPath);
     }
 
     @Override
     public void close() {
-        for (ColumnFamilyHandle handle : columnFamilyHandles.values()) {
-            handle.close();
+        stateLock.writeLock().lock();
+        try {
+            for (ColumnFamilyHandle handle : columnFamilyHandles.values()) {
+                handle.close();
+            }
+            columnFamilyHandles.clear();
+            if (rocksDB != null) {
+                rocksDB.close();
+            }
+            cfOptionsList.forEach(ColumnFamilyOptions::close);
+            cfOptionsList.clear();
+            if (sharedCache != null) sharedCache.close();
+            if (rateLimiter != null) rateLimiter.close();
+            dbOptions.close();
+        } finally {
+            stateLock.writeLock().unlock();
         }
-        columnFamilyHandles.clear();
-        if (rocksDB != null) {
-            rocksDB.close();
-        }
-        cfOptionsList.forEach(ColumnFamilyOptions::close);
-        cfOptionsList.clear();
-        if (sharedCache != null) sharedCache.close();
-        if (rateLimiter != null) rateLimiter.close();
-        dbOptions.close();
     }
 }
