@@ -62,13 +62,11 @@ function findLeader() {
       if (res.status === 200) {
         const body = JSON.parse(res.body);
         if (body.role === 'LEADER') {
-          console.log(`Leader found: ${url} (term ${body.term})`);
           return url;
         }
       }
     } catch (e) { /* try next */ }
   }
-  console.log(`No leader found, falling back to ${NODE_URLS[0]}`);
   return NODE_URLS[0];
 }
 
@@ -97,7 +95,13 @@ function refreshLeader() {
 
 let setupFailures = 0;
 
+// Recorded to k6 log; test-cycle extracts COMMAND_LEDGER lines (hidden from terminal).
+function recordCommandLedger(payloadJson) {
+  console.log(`COMMAND_LEDGER:${payloadJson}`);
+}
+
 function setupPost(path, payload, label) {
+  recordCommandLedger(payload);
   const res = http.post(`${getLeaderUrl()}${path}`, payload, {
     headers: { 'Content-Type': 'application/json' },
     timeout: '30s',
@@ -324,6 +328,9 @@ export default function () {
     });
   }
 
+  // Log intent before POST so lost responses (timeout after server apply) stay in the oracle.
+  recordCommandLedger(payload);
+
   // Retry with backoff for transient errors
   let res = null;
   let lastStatus = 0;
@@ -358,6 +365,7 @@ export default function () {
     'status is 200': (r) => r.status === 200,
     'outcome COMPLETED': (r) => r.json('status') === 'COMPLETED',
   });
+
   // Think-time per iteration. Default 50ms (caps each VU's rate). Set SLEEP_MS=0 to remove the
   // cap and drive the server toward saturation (find the real TPS ceiling).
   const sleepMs = __ENV.SLEEP_MS !== undefined ? Number(__ENV.SLEEP_MS) : 50;

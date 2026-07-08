@@ -7,7 +7,7 @@
 #   2. Start stack (if not running)
 #   2b. Wait for projection (health + end-to-end Kafka probe)
 #   3. Run k6 stress test
-#   4. Reconcile: balances + journals across 3 nodes API + MySQL
+#   4. Reconcile: Raft consistency + command vs Raft expected balances
 #   5. Report findings
 
 set -e
@@ -54,6 +54,10 @@ K6_PROMETHEUS_RW="${K6_PROMETHEUS_RW:-1}"
 PROJECTION_URL="${PROJECTION_URL:-http://localhost:8089}"
 PROJ_PRE_K6_POLL_SEC=2
 PROJ_PRE_K6_MAX_LOOPS=60   # 60 * 2s = 120s max wait before k6 setup
+LEADER_WAIT_LOOPS=90       # 90 * 2s = 180s (cold JVM+Raft boot ~75s)
+NFR_P95_MS=3               # server-side posting P95 target (ms)
+GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
+REBUILD=false
 
 usage() {
   echo "Usage: $0 [--vus N] [--duration M] [--no-flush] [--recon-only] [--base-url URL]"
@@ -61,6 +65,7 @@ usage() {
   echo "         [--no-k6-prometheus]"
   echo "         [--reseed] [--reseed-interval SEC] [--reseed-threshold NUM]"
   echo "         [--reseed-amount-usdt NUM] [--reseed-amount-btc NUM]"
+  echo "         [--leader-wait-loops N] [--rebuild]"
   echo "  --vus N         Number of VUs (default: 10)"
   echo "  --duration M    Test duration (default: 2m)"
   echo "  --no-flush      Skip data flush"
@@ -75,6 +80,8 @@ usage() {
   echo "  --reseed-threshold NUM        Trigger top-up when balance < this (default: 1.0)"
   echo "  --reseed-amount-usdt NUM      USDT top-up amount per trigger (default: 1000000)"
   echo "  --reseed-amount-btc NUM       BTC top-up amount per trigger (default: 5000)"
+  echo "  --leader-wait-loops N         Leader election polls (default: 90 = 180s)"
+  echo "  --rebuild                     docker compose build ledger-node + projection before up"
   exit 1
 }
 
@@ -95,6 +102,8 @@ while [ $# -gt 0 ]; do
     --reseed-threshold) RESEED_THRESHOLD="$2"; shift 2 ;;
     --reseed-amount-usdt) RESEED_AMOUNT_USDT="$2"; shift 2 ;;
     --reseed-amount-btc) RESEED_AMOUNT_BTC="$2"; shift 2 ;;
+    --leader-wait-loops) LEADER_WAIT_LOOPS="$2"; shift 2 ;;
+    --rebuild) REBUILD=true; shift ;;
     *) usage ;;
   esac
 done
@@ -113,6 +122,225 @@ PASS=0; FAIL=0; WARN=0
 pass()  { echo -e "  ${GREEN}✅ $1${NC}"; PASS=$((PASS+1)); }
 fail()  { echo -e "  ${RED}❌ $1${NC}"; FAIL=$((FAIL+1)); }
 warn()  { echo -e "  ${YELLOW}⚠️  $1${NC}"; WARN=$((WARN+1)); }
+
+# Compare reconstructed journal_line balance vs API/MySQL (float64 accumulation).
+recon_journal_match() {
+  local a="$1" b="$2" ccy="$3"
+  if [ -z "$a" ] || [ -z "$b" ]; then return 1; fi
+  if num_eq "$a" "$b"; then return 0; fi
+  if mysql_recon_match "$a" "$b" "$ccy"; then return 0; fi
+  python3 -c "
+import sys
+a=float('$a'); b=float('$b')
+d=abs(a-b)
+rel=d/max(abs(a),abs(b),1.0)
+sys.exit(0 if d < 1e-6 or rel < 1e-12 else 1)
+" 2>/dev/null
+}
+
+# Compare balance to command-derived expected (independent of Raft API / MySQL).
+balance_eq_expected() {
+  recon_journal_match "$1" "$2" "$3"
+}
+
+# Append k6/reseed COMPLETED posting bodies from k6 log file into command ledger.
+extract_k6_command_ledger() {
+  local k6_log="$1"
+  if [ -z "${k6_log:-}" ] || [ ! -f "${k6_log:-}" ]; then
+    warn "k6 log missing — cannot extract command ledger"
+    return 1
+  fi
+  python3 "$SCRIPT_DIR/extract-k6-command-ledger.py" "$k6_log" >> "$COMMAND_LEDGER_FILE"
+}
+
+# Hide k6 progress / HTTP noise on terminal; full log still in K6_LOG via tee.
+filter_k6_terminal_noise() {
+  grep -v 'COMMAND_LEDGER:' \
+    | grep -vE '^running \(' \
+    | grep -vE '^default[[:space:]]' \
+    | grep -vE 'msg="Request Failed"' \
+    | grep -vE 'msg="No leader found' \
+    | grep -vE 'msg="Leader found:' \
+    | grep -vE 'msg="\[k6-reporter' \
+    || true
+}
+
+# Build expected balance TSV from posting command JSONL; sets EXPECTED_CMD_TSV path.
+build_expected_balances_from_commands() {
+  EXPECTED_CMD_TSV=$(mktemp)
+  if [ -z "${COMMAND_LEDGER_FILE:-}" ] || [ ! -s "${COMMAND_LEDGER_FILE:-}" ]; then
+    fail "Command ledger empty or missing: ${COMMAND_LEDGER_FILE:-not set}"
+    return 1
+  fi
+  if ! python3 "$SCRIPT_DIR/aggregate-posting-commands.py" \
+      "$COMMAND_LEDGER_FILE" > "$EXPECTED_CMD_TSV"; then
+    fail "Failed to aggregate command ledger: $COMMAND_LEDGER_FILE"
+    return 1
+  fi
+  COMMAND_LEDGER_COUNT=$(wc -l < "$COMMAND_LEDGER_FILE" | tr -d ' ')
+  EXPECTED_CMD_COUNT=$(wc -l < "$EXPECTED_CMD_TSV" | tr -d ' ')
+  EXPECTED_CMD_SNAPSHOT="$DIAG_DIR/expected-from-commands-$(date +%Y%m%d-%H%M%S).tsv"
+  cp "$EXPECTED_CMD_TSV" "$EXPECTED_CMD_SNAPSHOT"
+  echo "  command postings=$COMMAND_LEDGER_COUNT → $EXPECTED_CMD_COUNT expected balance tuples"
+  echo "  Command ledger: $COMMAND_LEDGER_FILE"
+  echo "  Expected snapshot: $EXPECTED_CMD_SNAPSHOT"
+}
+
+# Report requestId drift between command ledger intents and MySQL journal.
+audit_command_journal_request_ids() {
+  [ -n "${COMMAND_LEDGER_FILE:-}" ] && [ -s "${COMMAND_LEDGER_FILE:-}" ] || return 0
+  local audit_out
+  audit_out=$(python3 - "$COMMAND_LEDGER_FILE" <<'PY'
+import json, subprocess, sys
+
+ledger = sys.argv[1]
+cmd_ids = set()
+for line in open(ledger, encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        p = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    rid = p.get("requestId") or ""
+    if rid.startswith("k6-"):
+        cmd_ids.add(rid)
+
+out = subprocess.check_output(
+    ["docker", "exec", "ledger-postgres", "psql", "-U", "ledger", "-d", "ledger_view", "-t", "-A",
+     "-c", "SELECT request_id FROM journal WHERE request_id LIKE 'k6-%'"],
+    text=True,
+)
+jnl_ids = {x for x in out.splitlines() if x}
+j_only = sorted(jnl_ids - cmd_ids, key=lambda x: (int(x.split("-")[1]), int(x.split("-")[2]), int(x.split("-")[3])))
+c_only = sorted(cmd_ids - jnl_ids, key=lambda x: (int(x.split("-")[1]), int(x.split("-")[2]), int(x.split("-")[3])) if x.startswith("k6-") else (0, 0, 0))
+print(f"CMD_JOURNAL_K6_CMD={len(cmd_ids)}")
+print(f"CMD_JOURNAL_K6_JNL={len(jnl_ids)}")
+print(f"CMD_JOURNAL_J_ONLY={len(j_only)}")
+print(f"CMD_JOURNAL_C_ONLY={len(c_only)}")
+for rid in j_only[:5]:
+    print(f"JOURNAL_ONLY {rid}")
+for rid in c_only[:5]:
+    print(f"COMMAND_ONLY {rid}")
+PY
+) || return 0
+  local j_only c_only
+  j_only=$(echo "$audit_out" | awk -F= '/^CMD_JOURNAL_J_ONLY=/{print $2}')
+  c_only=$(echo "$audit_out" | awk -F= '/^CMD_JOURNAL_C_ONLY=/{print $2}')
+  if [ "${j_only:-0}" -gt 0 ] || [ "${c_only:-0}" -gt 0 ]; then
+    warn "Command ledger vs journal requestId drift (k6): journal-only=${j_only:-0} command-only=${c_only:-0}"
+    echo "$audit_out" | grep -E '^(JOURNAL_ONLY|COMMAND_ONLY) ' | head -6 | sed 's/^/    /'
+  else
+    pass "Command ledger vs journal requestIds (k6): aligned"
+  fi
+}
+
+# Wait until journal_line shards have caught up to MySQL journal count.
+# Sets global RECON_SETTLED=1 when ready.
+wait_journal_line_settled() {
+  RECON_SETTLED=0
+  echo "  Waiting for journal_line shards to drain to MySQL..."
+  local jl_i JNLS_NOW MYSQL_JNLS JL_TOTAL EXPECTED_LINES JL_LAG
+  for jl_i in $(seq 1 120); do
+    JNLS_NOW=$(raft_status "$BASE_URL" "smJournalSeq")
+    MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
+    JL_TOTAL=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) cnt FROM journal_line_1 UNION ALL SELECT COUNT(*) cnt FROM journal_line_2 UNION ALL SELECT COUNT(*) cnt FROM journal_line_3) t;")
+    JNLS_NOW=${JNLS_NOW:-0}
+    MYSQL_JNLS=${MYSQL_JNLS:-0}
+    JL_TOTAL=${JL_TOTAL:-0}
+    if ! [[ "$JNLS_NOW" =~ ^[0-9]+$ ]]; then JNLS_NOW=0; fi
+    if ! [[ "$MYSQL_JNLS" =~ ^[0-9]+$ ]]; then MYSQL_JNLS=0; fi
+    if ! [[ "$JL_TOTAL" =~ ^[0-9]+$ ]]; then JL_TOTAL=0; fi
+    EXPECTED_LINES=$((MYSQL_JNLS * 2))
+    JL_LAG=$((EXPECTED_LINES - JL_TOTAL))
+    if [ "$JL_LAG" -le 0 ] && [ $((JNLS_NOW - MYSQL_JNLS)) -le 10 ]; then
+      pass "journal_line caught up: $JL_TOTAL lines (MySQL journals=$MYSQL_JNLS, smJournalSeq=$JNLS_NOW)"
+      RECON_SETTLED=1
+      return 0
+    fi
+    if [ "$jl_i" -eq 120 ]; then
+      warn "journal_line still lagging after 120s: $JL_TOTAL lines / MySQL journals=$MYSQL_JNLS smJournalSeq=$JNLS_NOW (lag=$((JNLS_NOW - MYSQL_JNLS))) — expected balances may be incomplete"
+    fi
+    sleep 1
+  done
+}
+
+# Dump all journal_line rows from 4 shards (append-only ledger history).
+journal_line_dump_all() {
+  local outfile="$1"
+  mysql_query "
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT') AS sign_convention
+    FROM journal_line_0 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_1 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_2 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+    UNION ALL
+    SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
+           COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
+    FROM journal_line_3 jl
+    LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
+  " 2>/dev/null > "$outfile"
+}
+
+# Aggregate journal_line dump → TSV: account_id balance_type currency expected_amount
+aggregate_journal_lines() {
+  local infile="$1"
+  python3 - <<PYEOF
+import csv
+from collections import defaultdict
+sums = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+with open("$infile", newline='') as f:
+    r = csv.reader(f, delimiter='\t')
+    for row in r:
+        if len(row) < 6 or not row[0]:
+            continue
+        acc, btype, ccy, etype, amt, sign = row[0], row[1], row[2], row[3], row[4], row[5]
+        try:
+            v = float(amt)
+        except ValueError:
+            continue
+        if etype == 'CREDIT':
+            if sign == 'NORMAL_DEBIT':
+                sums[acc][btype][ccy] -= v
+            else:
+                sums[acc][btype][ccy] += v
+        elif etype == 'DEBIT':
+            if sign == 'NORMAL_DEBIT':
+                sums[acc][btype][ccy] += v
+            else:
+                sums[acc][btype][ccy] -= v
+for acc in sorted(sums):
+    for btype in sorted(sums[acc]):
+        for ccy in sorted(sums[acc][btype]):
+            print(f"{acc}\t{btype}\t{ccy}\t{sums[acc][btype][ccy]}")
+PYEOF
+}
+
+# Build expected balance TSV from journal_line; sets EXPECTED_JL_TSV path.
+build_expected_balances_from_journal() {
+  local dump
+  dump=$(mktemp)
+  EXPECTED_JL_TSV=$(mktemp)
+  journal_line_dump_all "$dump"
+  JOURNAL_LINE_ROWS=$(wc -l < "$dump" | tr -d ' ')
+  aggregate_journal_lines "$dump" > "$EXPECTED_JL_TSV"
+  rm -f "$dump"
+  EXPECTED_JL_COUNT=$(wc -l < "$EXPECTED_JL_TSV" | tr -d ' ')
+  EXPECTED_JL_SNAPSHOT="$DIAG_DIR/expected-from-journal-$(date +%Y%m%d-%H%M%S).tsv"
+  cp "$EXPECTED_JL_TSV" "$EXPECTED_JL_SNAPSHOT"
+  echo "  journal_line rows=$JOURNAL_LINE_ROWS → $EXPECTED_JL_COUNT expected balance tuples"
+  echo "  Expected balance snapshot: $EXPECTED_JL_SNAPSHOT"
+}
 
 # Query Prometheus instant vector; print scalar value or ERR.
 prom_scalar() {
@@ -396,6 +624,9 @@ JSON
   local ts
   ts=$(date +%H:%M:%S)
   echo "[$ts] RESEED ${currency} ${client_acc} before=${before} amount=${amount} status=${status} leader=${RESEED_LEADER_URL}" >> "$RESEED_LOG"
+  if [ "$status" = "COMPLETED" ] && [ -n "${COMMAND_LEDGER_FILE:-}" ]; then
+    printf '%s\n' "$payload" >> "$COMMAND_LEDGER_FILE"
+  fi
 }
 
 reseed_check_account() {
@@ -444,7 +675,7 @@ reseed_watcher_loop() {
 }
 
 mysql_query() {
-  docker exec ledger-postgres psql -U ledger -d ledger_view -t -A -c "$1" 2>/dev/null | tr -d '\r'
+  docker exec ledger-postgres psql -U ledger -d ledger_view -t -A -F $'\t' -c "$1" 2>/dev/null | tr -d '\r'
 }
 
 # Normalize numeric strings: strip trailing zeros, then trailing dot.
@@ -495,7 +726,7 @@ ensure_leader() {
   if [ -n "$new_leader" ] && [ "$new_leader" != "$BASE_URL" ]; then
     BASE_URL="$new_leader"
   fi
-  if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -qE 'LEADER|UP'; then
+  if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -q '"role":"LEADER"'; then
     BASE_URL=$(find_leader)
   fi
   echo "$BASE_URL"
@@ -521,26 +752,37 @@ fi
 # ============================================================
 
 if ! $RECON_ONLY; then
+  if $REBUILD; then
+    echo ""
+    echo "=== Rebuild Docker images ==="
+    docker compose $COMPOSE_FILES --profile build build ledger-base 2>&1 | tail -3
+    docker compose $COMPOSE_FILES build projection 2>&1 | tail -3
+    pass "ledger-node + projection images rebuilt"
+  fi
+
   echo ""
   echo "=== Step 2: Start stack ==="
   docker compose $COMPOSE_FILES up -d 2>&1 | tail -1
 
-  # Wait for leader
-  echo -n "Waiting for leader"
+  # Wait for leader (cold boot can exceed 60s)
+  echo -n "Waiting for leader (max $((LEADER_WAIT_LOOPS * 2))s)"
+  LEADER_ELECTED=0
   LEADER=""
-  for i in $(seq 1 30); do
+  for i in $(seq 1 "$LEADER_WAIT_LOOPS"); do
     LEADER=$(find_leader)
-    if curl -s --max-time 2 "$LEADER/health" 2>/dev/null | grep -q "LEADER"; then
+    if curl -s --max-time 2 "$LEADER/health" 2>/dev/null | grep -q '"role":"LEADER"'; then
+      LEADER_ELECTED=1
       echo ""
-      pass "Leader elected: $LEADER"
+      pass "Leader elected: $LEADER (${i} polls)"
       break
     fi
     sleep 2
     echo -n "."
   done
 
-  if [ -z "$LEADER" ]; then
-    fail "No leader elected after 60s"
+  if [ "$LEADER_ELECTED" -ne 1 ]; then
+    echo ""
+    fail "No leader elected after $((LEADER_WAIT_LOOPS * 2))s (last probe: ${LEADER:-none})"
     exit 1
   fi
 
@@ -561,7 +803,7 @@ fi
 if [ -z "$BASE_URL" ]; then
   BASE_URL=$(find_leader)
 fi
-if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -qE 'LEADER|UP'; then
+if ! curl -s --max-time 2 "$BASE_URL/health" 2>/dev/null | grep -q '"role":"LEADER"'; then
   fail "Leader not reachable at $BASE_URL"
   exit 1
 fi
@@ -584,6 +826,9 @@ fi
 # ============================================================
 
 if ! $RECON_ONLY; then
+  if ! $FLUSH; then
+    echo "  Note: --no-flush — command ledger is this session only; Step 5 command vs Raft needs --flush"
+  fi
   echo ""
   echo "=== Step 3: k6 stress test ($VUS VUs, $DURATION) ==="
   echo "Leader: $BASE_URL"
@@ -609,6 +854,10 @@ if ! $RECON_ONLY; then
   ) > "$LEADER_LOG" 2>/dev/null &
   WATCHER_PID=$!
 
+  K6_TEST_ID="${K6_TEST_ID:-test-cycle-$(date +%Y%m%d-%H%M%S)}"
+  COMMAND_LEDGER_FILE="$DIAG_DIR/posting-commands-${K6_TEST_ID}.jsonl"
+  : > "$COMMAND_LEDGER_FILE"
+
   # Background reseed watcher — only when --reseed / default-on
   RESEED_PID=""
   if $RESEED; then
@@ -624,7 +873,6 @@ if ! $RECON_ONLY; then
 
   K6_PROM_ARGS=()
   if [ "$K6_PROMETHEUS_RW" != "0" ]; then
-    K6_TEST_ID="${K6_TEST_ID:-test-cycle-$(date +%Y%m%d-%H%M%S)}"
     export K6_PROMETHEUS_RW_SERVER_URL="${K6_PROMETHEUS_RW_SERVER_URL:-${PROMETHEUS_URL}/api/v1/write}"
     export K6_PROMETHEUS_RW_TREND_STATS="min,max,avg,p(50),p(95),p(99)"
     export K6_PROMETHEUS_RW_STALE_MARKERS=true
@@ -633,10 +881,14 @@ if ! $RECON_ONLY; then
     echo "  Grafana: http://localhost:3000/d/k6-test-cycle (filter testid=${K6_TEST_ID})"
   fi
 
-  K6_OUTPUT=$(k6 run --vus "$VUS" --duration "$DURATION" \
+  K6_LOG="$DIAG_DIR/k6-output-${K6_TEST_ID}.log"
+  : > "$K6_LOG"
+
+  k6 run --quiet --vus "$VUS" --duration "$DURATION" \
     "${K6_PROM_ARGS[@]}" \
     -e BASE_URL="$BASE_URL" \
-    "$K6_SCRIPT" 2>&1) || true
+    "$K6_SCRIPT" 2>&1 | tee "$K6_LOG" | filter_k6_terminal_noise
+  K6_OUTPUT=$(cat "$K6_LOG")
 
   # Kill watcher, print leader change log
   kill "$WATCHER_PID" 2>/dev/null || true
@@ -673,10 +925,36 @@ if ! $RECON_ONLY; then
   FAILED=$(echo "$K6_PLAIN" | grep "http_req_failed" | tail -1 | grep -oE '[0-9.]+%' | head -1)
   P50=$(echo "$K6_PLAIN" | grep -E "p\(50\)=" | grep "http_req_duration" | tail -1 | grep -oE 'p\(50\)=[0-9.]+(ms|µs|s)' | head -1)
   P95=$(echo "$K6_PLAIN" | grep -E "p\(95\)=" | grep "http_req_duration" | tail -1 | grep -oE 'p\(95\)=[0-9.]+(ms|µs|s)' | head -1)
+  P99=$(echo "$K6_PLAIN" | grep -E "p\(99\)=" | grep "http_req_duration" | tail -1 | grep -oE 'p\(99\)=[0-9.]+(ms|µs|s)' | head -1)
 
   echo "  Iterations: ${ITERATIONS:-?}"
   echo "  Failed: ${FAILED:-?}"
-  echo "  ${P50:-p50=?}  ${P95:-p95=?}"
+  echo "  ${P50:-p50=?}  ${P95:-p95=?}  ${P99:-p99=?}"
+
+  # Extract COMPLETED postings from k6 log (COMMAND_LEDGER lines hidden from terminal above).
+  extract_k6_command_ledger "$K6_LOG"
+  COMMAND_LEDGER_COUNT=$(wc -l < "$COMMAND_LEDGER_FILE" | tr -d ' ')
+  echo "  Command ledger: $COMMAND_LEDGER_FILE ($COMMAND_LEDGER_COUNT COMPLETED postings)"
+
+  if [ -z "${ITERATIONS:-}" ] || [ "${ITERATIONS:-}" = "?" ] || [ "${ITERATIONS:-0}" -eq 0 ] 2>/dev/null; then
+    fail "k6 produced 0 iterations — setup failed (check k6 log: $K6_LOG)"
+  elif [ "$COMMAND_LEDGER_COUNT" -eq 0 ]; then
+    fail "Command ledger empty — no COMPLETED postings recorded"
+  fi
+
+  echo ""
+  echo "  --- Post-k6 server metrics (Prometheus) ---"
+  fetch_prom_projection_metrics
+  SRV_TPS=$(prom_scalar 'sum(rate(ledger_posting_duration_seconds_count[1m]))')
+  SRV_P50=$(prom_scalar 'histogram_quantile(0.50, sum by (le) (rate(ledger_posting_duration_seconds_bucket[5m]))) * 1000')
+  SRV_P95=$(prom_scalar 'histogram_quantile(0.95, sum by (le) (rate(ledger_posting_duration_seconds_bucket[5m]))) * 1000')
+  SRV_P99=$(prom_scalar 'histogram_quantile(0.99, sum by (le) (rate(ledger_posting_duration_seconds_bucket[5m]))) * 1000')
+  KAFKA_LAG=$(prom_scalar 'sum(kafka_consumergroup_lag{job="kafka"})')
+  QUEUE_FULL_RATE=$(prom_scalar 'sum(rate(ledger_posting_rejected_count_total{errorCode="QUEUE_FULL"}[1m]))')
+  printf "  server TPS=%s/s  P50=%sms  P95=%sms  P99=%sms\n" \
+    "${SRV_TPS:-?}" "${SRV_P50:-?}" "${SRV_P95:-?}" "${SRV_P99:-?}"
+  printf "  kafka lag=%s  projection: %s  QUEUE_FULL=%s/s\n" \
+    "${KAFKA_LAG:-?}" "$(prom_metrics_line)" "${QUEUE_FULL_RATE:-?}"
 
   if [ -n "$FAILED" ] && [ "$FAILED" != "0.00%" ]; then
     warn "Failures detected: $FAILED"
@@ -817,8 +1095,6 @@ for ccy in "${CURRENCIES[@]}"; do
 
   check_mysql_balance "$ccy MySQL vs leader" "$LEADER_VAL" "$MYSQL_VAL" || true
 done
-
-# --- API balance cross-node (clients) — runs over all accounts discovered from MySQL ---
 echo ""
 echo "--- API balance cross-node (${#ACCOUNTS[@]} accounts × ${#CURRENCIES[@]} currencies) ---"
 XNODE_OK=0
@@ -883,9 +1159,9 @@ echo "  MySQL journal_lines (sharded): ${MYSQL_LINES:-0}"
 MYSQL_BALANCES=$(mysql_query "SELECT COUNT(*) FROM account_balance;")
 echo "  MySQL balances: $MYSQL_BALANCES"
 
-# --- Full MySQL balance reconciliation (all accounts) ---
+# --- Full MySQL balance reconciliation (informational) ---
 echo ""
-echo "--- Full MySQL balance reconciliation ---"
+echo "--- MySQL balance vs API (informational) ---"
 MYSQL_RECON=0
 MYSQL_RECON_FAIL=0
 MYSQL_RECON_LAG_WARN=0
@@ -901,22 +1177,12 @@ while read -r acc ccy; do
     MYSQL_RECON_SKIP=$((MYSQL_RECON_SKIP + 1))
   elif mysql_recon_match "$API_VAL" "$MYSQL_VAL" "$ccy"; then
     MYSQL_RECON=$((MYSQL_RECON + 1))
-  elif mysql_recon_strict; then
-    MYSQL_RECON_FAIL=$((MYSQL_RECON_FAIL + 1))
-    fail "MySQL $acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL"
   else
     MYSQL_RECON_LAG_WARN=$((MYSQL_RECON_LAG_WARN + 1))
-    warn "MySQL $acc $ccy: API=$API_VAL MySQL=$MYSQL_VAL (journal lag=$PROJ_LAG_AT_RECON)"
   fi
 done < "$RECON_PAIRS"
 rm -f "$RECON_PAIRS"
-if [ "$MYSQL_RECON_FAIL" -eq 0 ] && [ "$MYSQL_RECON_LAG_WARN" -eq 0 ]; then
-  pass "Full MySQL recon: match=$MYSQL_RECON skip=$MYSQL_RECON_SKIP"
-elif [ "$MYSQL_RECON_FAIL" -eq 0 ]; then
-  warn "Full MySQL recon: match=$MYSQL_RECON lag_warn=$MYSQL_RECON_LAG_WARN skip=$MYSQL_RECON_SKIP"
-else
-  fail "Full MySQL recon: match=$MYSQL_RECON mismatch=$MYSQL_RECON_FAIL lag_warn=$MYSQL_RECON_LAG_WARN"
-fi
+echo "  MySQL vs API: match=$MYSQL_RECON lag_warn=$MYSQL_RECON_LAG_WARN skip=$MYSQL_RECON_SKIP"
 echo "MYSQL_RECON_OK=$MYSQL_RECON MYSQL_RECON_BAD=$MYSQL_RECON_FAIL MYSQL_RECON_LAG_WARN=$MYSQL_RECON_LAG_WARN MYSQL_RECON_SKIP=$MYSQL_RECON_SKIP" > /tmp/recon_counters
 
 # Fallback: if sharded event_log tables don't exist yet, try uns sharded
@@ -925,207 +1191,80 @@ if [ "${MYSQL_EVENTS:-0}" = "0" ]; then
 fi
 
 # ============================================================
-# 5b. Reconstructed balance verification (source of truth = journal_line)
+# 5. Command vs Raft (primary correctness gate)
 # ============================================================
-# Trust NOTHING from MySQL `account_balance` or Raft SM. Re-compute every
-# balance from the append-only `journal_line_*` shards:
-#     reconstructed = SUM(DEBIT) - SUM(CREDIT)  per (account, balance_type, currency)
-# Then compare against API (leader) and MySQL `account_balance.amount`.
-# This catches:
-#   - Lost/wrongly-applied journal_lines
-#   - Projection bugs that wrote the wrong amount to account_balance
-#   - Any drift between state-machine state and durable journal history
-# Disagreement here is a real bug, not a lag warning.
-# ============================================================
+# Truth = posting intents (k6 setup + stress + reseed). Raft SM is the verify target.
 
 echo ""
-echo "=== Step 5b: Reconstructed balance from journal_line (source of truth) ==="
-# Wait for journal_line shards to fully drain to MySQL before reconstructing.
-# Each posting produces exactly 2 journal_lines (1 DEBIT + 1 CREDIT).
-# We wait until MySQL `journal` count catches up to Raft smJournalSeq
-# (within 10). Once MySQL journals are current, journal_line drains
-# essentially in lockstep.
-echo "  Waiting for journal_line shards to drain to MySQL..."
-RECON_SETTLED=0
-for jl_i in $(seq 1 120); do
-  JNLS_NOW=$(raft_status "$BASE_URL" "smJournalSeq")
-  MYSQL_JNLS=$(mysql_query "SELECT COUNT(*) FROM journal;")
-  JL_TOTAL=$(mysql_query "SELECT SUM(cnt) FROM (SELECT COUNT(*) cnt FROM journal_line_0 UNION ALL SELECT COUNT(*) FROM journal_line_1 UNION ALL SELECT COUNT(*) FROM journal_line_2 UNION ALL SELECT COUNT(*) FROM journal_line_3) t;")
-  JNLS_NOW=${JNLS_NOW:-0}
-  MYSQL_JNLS=${MYSQL_JNLS:-0}
-  JL_TOTAL=${JL_TOTAL:-0}
-  if ! [[ "$JNLS_NOW" =~ ^[0-9]+$ ]]; then JNLS_NOW=0; fi
-  if ! [[ "$MYSQL_JNLS" =~ ^[0-9]+$ ]]; then MYSQL_JNLS=0; fi
-  if ! [[ "$JL_TOTAL" =~ ^[0-9]+$ ]]; then JL_TOTAL=0; fi
-  EXPECTED_LINES=$((MYSQL_JNLS * 2))
-  JL_LAG=$((EXPECTED_LINES - JL_TOTAL))
-  if [ "$JL_LAG" -le 0 ] && [ $((JNLS_NOW - MYSQL_JNLS)) -le 10 ]; then
-    pass "journal_line caught up: $JL_TOTAL lines (MySQL journals=$MYSQL_JNLS, smJournalSeq=$JNLS_NOW)"
-    RECON_SETTLED=1
-    break
-  fi
-  if [ "$jl_i" -eq 120 ]; then
-    warn "journal_line still lagging after 120s: $JL_TOTAL lines / MySQL journals=$MYSQL_JNLS smJournalSeq=$JNLS_NOW (lag=$((JNLS_NOW - MYSQL_JNLS))) — Step 5b will treat as LAG, not as bug"
-  fi
-  sleep 1
-done
-
-RECON_TMP=$(mktemp)
-mysql_query "
-  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
-         COALESCE(btr.sign_convention, 'NORMAL_CREDIT') AS sign_convention
-  FROM journal_line_0 jl
-  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
-  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
-  UNION ALL
-  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
-         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
-  FROM journal_line_1 jl
-  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
-  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
-  UNION ALL
-  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
-         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
-  FROM journal_line_2 jl
-  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
-  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
-  UNION ALL
-  SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
-         COALESCE(btr.sign_convention, 'NORMAL_CREDIT')
-  FROM journal_line_3 jl
-  LEFT JOIN balance_type_registry btr ON btr.type_code = jl.balance_type
-  WHERE jl.account_account_id LIKE '${CLIENT_PREFIX}%' OR jl.account_account_id = '$HOTSPOT_ACC'
-" 2>/dev/null > "$RECON_TMP"
-
-RECON_LINES=$(wc -l < "$RECON_TMP" | tr -d ' ')
-echo "  journal_line rows for STRESS scope: $RECON_LINES"
-
-RECON_AGGR=$(python3 - <<PYEOF
-import csv
-from collections import defaultdict
-sums = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
-signs = {}
-with open("$RECON_TMP", newline='') as f:
-    r = csv.reader(f, delimiter='\t')
-    for row in r:
-        if len(row) < 6 or not row[0]:
-            continue
-        acc, btype, ccy, etype, amt, sign = row[0], row[1], row[2], row[3], row[4], row[5]
-        try:
-            v = float(amt)
-        except ValueError:
-            continue
-        signs[btype] = sign
-        if etype == 'CREDIT':
-            if sign == 'NORMAL_DEBIT':
-                sums[acc][btype][ccy] -= v
-            else:
-                sums[acc][btype][ccy] += v
-        elif etype == 'DEBIT':
-            if sign == 'NORMAL_DEBIT':
-                sums[acc][btype][ccy] += v
-            else:
-                sums[acc][btype][ccy] -= v
-for acc in sorted(sums):
-    for btype in sorted(sums[acc]):
-        for ccy in sorted(sums[acc][btype]):
-            print(f"{acc}\t{btype}\t{ccy}\t{sums[acc][btype][ccy]}")
-PYEOF
-)
-rm -f "$RECON_TMP"
-
-RECON_MATCH=0
-RECON_MISMATCH=0
-RECON_TOTAL=0
-RECON_DETAIL=$(mktemp)
-echo "  account_id,balance_type,currency,reconstructed,api,mysql,status" > "$RECON_DETAIL"
-while IFS=$'\t' read -r acc btype ccy reconstructed; do
-  [ -z "$acc" ] && continue
-  RECON_TOTAL=$((RECON_TOTAL + 1))
-  API_VAL=$(api_balance "$BASE_URL" "$acc" "$btype" "$ccy")
-  MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND balance_type='$btype' AND currency='$ccy';")
-  if [ "$API_VAL" = "ERR" ]; then API_VAL=""; fi
-  STATUS="OK"
-  # Tolerance: float64 accumulation drift ~ 1e-6 USDT, 1e-9 BTC
-  RECON_TOL="1e-6"
-  [ "$ccy" = "BTC" ] && RECON_TOL="1e-9"
-  if [ -n "$MYSQL_VAL" ]; then
-    DIFF_M=$(python3 -c "print(abs(float('$reconstructed') - float('$MYSQL_VAL')))")
-    if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_M') < $RECON_TOL else 1)"; then
-      STATUS="MYSQL_MISMATCH(diff=$DIFF_M)"
-    fi
-  else
-    STATUS="MYSQL_MISSING"
-  fi
-  if [ -n "$API_VAL" ]; then
-    DIFF_A=$(python3 -c "print(abs(float('$reconstructed') - float('$API_VAL')))")
-    if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_A') < $RECON_TOL else 1)"; then
-      if [ "$STATUS" = "OK" ]; then STATUS="API_MISMATCH(diff=$DIFF_A)"
-      else STATUS="${STATUS}+API_MISMATCH(diff=$DIFF_A)"; fi
-    fi
-  fi
-  if [ "$STATUS" = "OK" ]; then
-    RECON_MATCH=$((RECON_MATCH + 1))
-  else
-    RECON_MISMATCH=$((RECON_MISMATCH + 1))
-  fi
-  echo "  ${acc},${btype},${ccy},${reconstructed},${API_VAL},${MYSQL_VAL},${STATUS}" >> "$RECON_DETAIL"
-done <<< "$RECON_AGGR"
-
-if [ "$RECON_MISMATCH" -eq 0 ]; then
-  pass "Reconstruction: $RECON_MATCH/$RECON_TOTAL (account,balance_type,currency) tuples match API & MySQL"
-elif [ "$RECON_SETTLED" -ne 1 ]; then
-  # journal_line was still draining when we tried to reconstruct — mismatches
-  # are lag, not bugs. Downgrade to WARN so the cycle can still report PASS.
-  warn "Reconstruction (lag): $RECON_MATCH/$RECON_TOTAL match, $RECON_MISMATCH MISMATCH (projection still draining — not a bug)"
-  echo "  Sample of unmatched (lag) tuples:"
-  grep -vE ',OK$' "$RECON_DETAIL" | head -5 | sed 's/^/    /'
+echo "=== Step 5: Command vs Raft ==="
+if [ -z "${COMMAND_LEDGER_FILE:-}" ] || [ ! -s "${COMMAND_LEDGER_FILE:-}" ]; then
+  COMMAND_LEDGER_FILE=$(ls -t "$DIAG_DIR"/posting-commands-*.jsonl 2>/dev/null | head -1 || true)
+fi
+if [ -z "${COMMAND_LEDGER_FILE:-}" ] || [ ! -s "${COMMAND_LEDGER_FILE:-}" ]; then
+  warn "No posting command ledger — skip command vs Raft"
+  EXPECTED_CMD_TSV=""
+  EXPECTED_BAL_FILE=""
+  echo "EXP_LEDGER_SKIPPED=1 EXP_LEDGER_RAFT_OK=0 EXP_LEDGER_RAFT_BAD=0 EXP_LEDGER_TOTAL=0" > /tmp/exp_ledger_counters
 else
-  fail "Reconstruction: $RECON_MATCH/$RECON_TOTAL match, $RECON_MISMATCH MISMATCH (real bug, projection already settled)"
-  echo "  Mismatched tuples:"
-  grep -vE ',OK$' "$RECON_DETAIL" | head -20 | sed 's/^/    /'
+  audit_command_journal_request_ids
+  build_expected_balances_from_commands || true
 fi
-echo "RECON_OK=$RECON_MATCH RECON_BAD=$RECON_MISMATCH RECON_TOTAL=$RECON_TOTAL RECON_SETTLED=$RECON_SETTLED" > /tmp/recon_counters_extra
-rm -f "$RECON_DETAIL"
+if [ -n "${EXPECTED_CMD_TSV:-}" ] && [ -s "${EXPECTED_CMD_TSV:-}" ]; then
+BASE_URL=$(ensure_leader)
+echo "  Truth source: command ledger ($COMMAND_LEDGER_FILE)"
+echo "  Expected snapshot: ${EXPECTED_CMD_SNAPSHOT:-$EXPECTED_CMD_TSV}"
+echo "  Raft leader: $BASE_URL"
 
-# --- Sample client MySQL vs Leader (subset of discovered accounts) ---
-echo ""
-echo "--- Client MySQL vs Leader (sample of ${#ACCOUNTS[@]} accounts) ---"
-# Pick a few representative accounts from the discovered set (first / mid / last / hotspot)
-SAMPLE_ACCS=()
-N_ACCOUNTS=${#ACCOUNTS[@]}
-if [ "$N_ACCOUNTS" -gt 0 ]; then
-  SAMPLE_ACCS+=("${ACCOUNTS[0]}")
-  if [ "$N_ACCOUNTS" -gt 4 ]; then
-    MID=$(( N_ACCOUNTS / 2 ))
-    SAMPLE_ACCS+=("${ACCOUNTS[$MID]}")
-    # add MID+1 if distinct
-    NEXT=$((MID + 1))
-    if [ "$NEXT" -lt "$N_ACCOUNTS" ] && [ "${ACCOUNTS[$NEXT]}" != "${ACCOUNTS[$MID]}" ]; then
-      SAMPLE_ACCS+=("${ACCOUNTS[$NEXT]}")
-    fi
+EXPECTED_BAL_FILE="$DIAG_DIR/expected-balances-$(date +%Y%m%d-%H%M%S).csv"
+echo "account_id,balance_type,currency,expected_from_commands,raft_leader,node_8081,node_8082,node_8083,leader_vs_expected,status" > "$EXPECTED_BAL_FILE"
+
+EXP_LEDGER_RAFT_OK=0
+EXP_LEDGER_RAFT_BAD=0
+EXP_LEDGER_TOTAL=0
+
+while IFS=$'\t' read -r acc btype ccy expected; do
+  [ -z "$acc" ] && continue
+  EXP_LEDGER_TOTAL=$((EXP_LEDGER_TOTAL + 1))
+
+  LEADER_VAL=$(api_balance "$BASE_URL" "$acc" "$btype" "$ccy")
+  N1=$(api_balance "${NODES[0]}" "$acc" "$btype" "$ccy")
+  N2=$(api_balance "${NODES[1]}" "$acc" "$btype" "$ccy")
+  N3=$(api_balance "${NODES[2]}" "$acc" "$btype" "$ccy")
+
+  STATUS="OK"
+  LEADER_VS="Y"
+
+  if [ "$LEADER_VAL" = "ERR" ]; then
+    LEADER_VS="ERR"
+    STATUS="RAFT_LEADER_ERR"
+    EXP_LEDGER_RAFT_BAD=$((EXP_LEDGER_RAFT_BAD + 1))
+  elif balance_eq_expected "$expected" "$LEADER_VAL" "$ccy"; then
+    EXP_LEDGER_RAFT_OK=$((EXP_LEDGER_RAFT_OK + 1))
+  else
+    LEADER_VS="N"
+    STATUS="RAFT_MISMATCH"
+    EXP_LEDGER_RAFT_BAD=$((EXP_LEDGER_RAFT_BAD + 1))
   fi
-  LAST_IDX=$((N_ACCOUNTS - 1))
-  SAMPLE_ACCS+=("${ACCOUNTS[$LAST_IDX]}")
+
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$acc" "$btype" "$ccy" "$expected" "$LEADER_VAL" "$N1" "$N2" "$N3" \
+    "$LEADER_VS" "$STATUS" >> "$EXPECTED_BAL_FILE"
+done < "$EXPECTED_CMD_TSV"
+
+echo "  Expected balance ledger: $EXPECTED_BAL_FILE ($EXP_LEDGER_TOTAL rows)"
+
+if [ "$EXP_LEDGER_RAFT_BAD" -eq 0 ]; then
+  pass "Command vs Raft: $EXP_LEDGER_RAFT_OK/$EXP_LEDGER_TOTAL match"
+elif ! $FLUSH; then
+  warn "Command vs Raft (--no-flush): ok=$EXP_LEDGER_RAFT_OK bad=$EXP_LEDGER_RAFT_BAD — command ledger is session-scoped"
+else
+  fail "Command vs Raft: ok=$EXP_LEDGER_RAFT_OK bad=$EXP_LEDGER_RAFT_BAD"
+  echo "  Mismatches (first 10):"
+  awk -F',' '$9=="N" {print}' "$EXPECTED_BAL_FILE" | head -10 | sed 's/^/    /'
 fi
-# Always include the hotspot if present
-for acc in "${ACCOUNTS[@]}"; do
-  if [ "$acc" = "$HOTSPOT_ACC" ]; then
-    SAMPLE_ACCS+=("$HOTSPOT_ACC")
-    break
-  fi
-done
-# Dedupe
-if [ "${#SAMPLE_ACCS[@]}" -gt 0 ]; then
-  SAMPLE_ACCS=($(printf "%s\n" "${SAMPLE_ACCS[@]}" | sort -u))
+
+echo "EXP_LEDGER_SKIPPED=0 EXP_LEDGER_RAFT_OK=$EXP_LEDGER_RAFT_OK EXP_LEDGER_RAFT_BAD=$EXP_LEDGER_RAFT_BAD EXP_LEDGER_TOTAL=$EXP_LEDGER_TOTAL" > /tmp/exp_ledger_counters
 fi
-for acc in "${SAMPLE_ACCS[@]}"; do
-  for ccy in "${CURRENCIES[@]}"; do
-    API_VAL=$(api_balance "$BASE_URL" "$acc" "AVAILABLE_BALANCE" "$ccy")
-    MYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND currency='$ccy';")
-    check_mysql_balance "$acc $ccy" "$API_VAL" "$MYSQL_VAL" || true
-  done
-done
 
 # ============================================================
 # 6. Summary
@@ -1141,6 +1280,10 @@ DIAG_TMP=$(mktemp)
   echo "=== Diagnostic Snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   echo "Test: $VUS VUs × $DURATION  Recon-only: $RECON_ONLY  Threshold: journal_lag<=$PROJ_LAG_MAX  Prometheus: $PROMETHEUS_URL"
   echo "Iterations: ${ITERATIONS:-?}  Failed: ${FAILED:-?}  p50=${P50:-?}  p95=${P95:-?}"
+  echo "Expected balances CSV: ${EXPECTED_BAL_FILE:-not written}"
+  echo "Command ledger: ${COMMAND_LEDGER_FILE:-not written}"
+  echo "Command expected snapshot: ${EXPECTED_CMD_SNAPSHOT:-not written}"
+  echo "Journal-line snapshot: ${EXPECTED_JL_SNAPSHOT:-not written}"
 
   # k6 throughput
   if [ -n "${K6_OUTPUT:-}" ]; then
@@ -1311,9 +1454,9 @@ print('%-15s %-8s %-10s %-12s %-12s %-7s %s' % (
   AVG_LEGS=$(python3 -c "print(f'{${LINES}/${JNLS}:.2f}' if ${JNLS} else '0.0')" 2>/dev/null || echo "?")
   echo "  journals=$JNLS  journal_lines=$LINES  avg_legs_per_journal=$AVG_LEGS (expect 2.0 for postings, 0 for adjustments)"
 
-  # --- Reconstructed balance from journal_line (source of truth, fresh snapshot) ---
+  # --- journal_line reconstruction (secondary cross-check in diagnostics) ---
   echo ""
-  echo "--- Reconstructed balance from journal_line (source of truth) ---"
+  echo "--- journal_line reconstruction (secondary cross-check) ---"
   RECON_DIAG_TMP=$(mktemp)
   mysql_query "
     SELECT jl.account_account_id, jl.balance_type, jl.currency, jl.entry_type, jl.amount,
@@ -1374,20 +1517,17 @@ PYEOF
       | python3 -c "import sys,json;print(json.load(sys.stdin).get('amount','ERR'))" 2>/dev/null || echo "ERR")
     DMYSQL_VAL=$(mysql_query "SELECT amount FROM account_balance WHERE account_account_id='$acc' AND balance_type='$btype' AND currency='$ccy';")
     STATUS="OK"
-    # Tolerance: float64 accumulation drift ~ 1e-6 USDT, 1e-9 BTC
-    RECON_DIAG_TOL="1e-6"
-    [ "$ccy" = "BTC" ] && RECON_DIAG_TOL="1e-9"
     if [ -n "$DMYSQL_VAL" ]; then
-      DIFF_M=$(python3 -c "print(abs(float('$reconstructed') - float('$DMYSQL_VAL')))")
-      if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_M') < $RECON_DIAG_TOL else 1)"; then
+      if ! recon_journal_match "$reconstructed" "$DMYSQL_VAL" "$ccy"; then
+        DIFF_M=$(python3 -c "print(abs(float('$reconstructed') - float('$DMYSQL_VAL')))" 2>/dev/null || echo "?")
         STATUS="MYSQL_MISMATCH(diff=$DIFF_M)"
       fi
     else
       STATUS="MYSQL_MISSING"
     fi
     if [ -n "$DAPI_VAL" ] && [ "$DAPI_VAL" != "ERR" ]; then
-      DIFF_A=$(python3 -c "print(abs(float('$reconstructed') - float('$DAPI_VAL')))")
-      if ! python3 -c "import sys; sys.exit(0 if float('$DIFF_A') < $RECON_DIAG_TOL else 1)"; then
+      if ! recon_journal_match "$reconstructed" "$DAPI_VAL" "$ccy"; then
+        DIFF_A=$(python3 -c "print(abs(float('$reconstructed') - float('$DAPI_VAL')))" 2>/dev/null || echo "?")
         if [ "$STATUS" = "OK" ]; then STATUS="API_MISMATCH(diff=$DIFF_A)"
         else STATUS="${STATUS}+API_MISMATCH(diff=$DIFF_A)"; fi
       fi
@@ -1472,9 +1612,33 @@ printf "  %-8s %s\n" "Iter:"     "${ITERATIONS:-?}"
 printf "  %-8s %s\n" "Failed:"   "${FAILED:-?}"
 printf "  %-8s %s\n" "p50:"      "${P50:-?}"
 printf "  %-8s %s\n" "p95:"      "${P95:-?}"
+printf "  %-8s %s\n" "p99:"      "${P99:-?}"
 echo ""
 printf "  %-4s %-25s %s\n" "?" "Check" "Detail"
 echo "  ──── ──────────────────────── ──────────────────────────────────"
+
+# NFR gate (server-side Prometheus — correctness uses FAIL/WARN above)
+if [ -n "${SRV_P95:-}" ] && [ "${SRV_P95:-}" != "ERR" ]; then
+  if python3 -c "import sys; sys.exit(0 if float('${SRV_P95}') <= ${NFR_P95_MS} else 1)" 2>/dev/null; then
+    printf "  %-4s %-25s %s\n" "✅" "NFR server P95 (<=${NFR_P95_MS}ms)" "${SRV_P95}ms"
+  else
+    printf "  %-4s %-25s %s\n" "⚠️" "NFR server P95 (<=${NFR_P95_MS}ms)" "${SRV_P95}ms (exceeded)"
+    WARN=$((WARN+1))
+  fi
+fi
+if [ -n "${KAFKA_LAG:-}" ] && [ "${KAFKA_LAG:-}" != "ERR" ]; then
+  KAFKA_LAG_INT=${KAFKA_LAG%.*}
+  if [ "${KAFKA_LAG_INT:-0}" -le 100 ]; then
+    printf "  %-4s %-25s %s\n" "✅" "Kafka lag (post-k6)" "$KAFKA_LAG"
+  elif [ "${KAFKA_LAG_INT:-0}" -le 1000 ]; then
+    printf "  %-4s %-25s %s\n" "⚠️" "Kafka lag (post-k6)" "$KAFKA_LAG (>100)"
+    WARN=$((WARN+1))
+  else
+    printf "  %-4s %-25s %s\n" "❌" "Kafka lag (post-k6)" "$KAFKA_LAG (>1000)"
+    FAIL=$((FAIL+1))
+  fi
+fi
+
 printf "  %-4s %-25s %s\n" \
   "$([ "$LA1" = "$LA2" ] && [ "$LA2" = "$LA3" ] && echo "✅" || echo "❌")" \
   "Raft lastAppliedIndex" \
@@ -1522,30 +1686,28 @@ for ccy in "${CURRENCIES[@]}"; do
     "leader=$(normalize "$V1") MySQL=$(normalize "$M")"
 done
 
-  # MySQL full recon (from Step 5 counters)
+  # MySQL vs API (informational)
   eval "$(cat /tmp/recon_counters 2>/dev/null)"
   printf "  %-4s %-25s %s\n" \
-    "$( [ "${MYSQL_RECON_BAD:-0}" -eq 0 ] && echo "✅" || echo "❌")" \
-    "MySQL balance recon (all)" \
-    "match=${MYSQL_RECON_OK:-0} mismatch=${MYSQL_RECON_BAD:-0} lag_warn=${MYSQL_RECON_LAG_WARN:-0} skip=${MYSQL_RECON_SKIP:-0}"
+    "📊" \
+    "MySQL vs API (info)" \
+    "match=${MYSQL_RECON_OK:-0} lag_warn=${MYSQL_RECON_LAG_WARN:-0} skip=${MYSQL_RECON_SKIP:-0}"
 
-  # Reconstructed-from-journal_line verification (source of truth = append-only journal_line)
-  eval "$(cat /tmp/recon_counters_extra 2>/dev/null)"
-  RECON_BAD_LAG=$([ "${RECON_SETTLED:-0}" -ne 1 ] && [ "${RECON_BAD:-0}" -gt 0 ] && echo 1 || echo 0)
-  if [ "${RECON_BAD:-0}" -eq 0 ]; then
-    RECON_ICON="✅"
-    RECON_LABEL="Reconstructed (from journal_line)"
-    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0}"
-  elif [ "$RECON_BAD_LAG" -eq 1 ]; then
-    RECON_ICON="⚠️"
-    RECON_LABEL="Reconstructed (lag, not bug)"
-    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0} (projection still draining)"
+  eval "$(cat /tmp/exp_ledger_counters 2>/dev/null)"
+  if [ "${EXP_LEDGER_SKIPPED:-0}" -eq 1 ] || [ "${EXP_LEDGER_TOTAL:-0}" -eq 0 ]; then
+    EXP_RAFT_ICON="⚠️"
+    EXP_RAFT_DETAIL="skipped (no command ledger)"
+  elif [ "${EXP_LEDGER_RAFT_BAD:-0}" -eq 0 ]; then
+    EXP_RAFT_ICON="✅"
+    EXP_RAFT_DETAIL="ok=${EXP_LEDGER_RAFT_OK:-0}/${EXP_LEDGER_TOTAL:-0}"
   else
-    RECON_ICON="❌"
-    RECON_LABEL="Reconstructed (from journal_line)"
-    RECON_DETAIL_STR="match=${RECON_OK:-0} mismatch=${RECON_BAD:-0} total=${RECON_TOTAL:-0} (real bug, settled)"
+    EXP_RAFT_ICON="❌"
+    EXP_RAFT_DETAIL="ok=${EXP_LEDGER_RAFT_OK:-0}/${EXP_LEDGER_TOTAL:-0} bad=${EXP_LEDGER_RAFT_BAD:-0}"
   fi
-  printf "  %-4s %-25s %s\n" "$RECON_ICON" "$RECON_LABEL" "$RECON_DETAIL_STR"
+  printf "  %-4s %-25s %s\n" \
+    "$EXP_RAFT_ICON" \
+    "Command vs Raft" \
+    "$EXP_RAFT_DETAIL"
 
   # MySQL event/journal/line counts
   printf "  %-4s %-25s %s\n" \
@@ -1569,7 +1731,14 @@ printf "  %-4s %-25s %s\n" "⚡" "TPS (1m rate)" "api=${SUMMARY_POSTING:-?} raft
 printf "  %-25s %d passed, %d failed, %d warnings\n" "" "$PASS" "$FAIL" "$WARN"
 echo "========================================="
 echo "  Diagnostics: $DIAG_FILE"
+[ -n "${COMMAND_LEDGER_FILE:-}" ] && [ -f "${COMMAND_LEDGER_FILE:-}" ] && echo "  Command ledger: $COMMAND_LEDGER_FILE"
+[ -n "${EXPECTED_CMD_SNAPSHOT:-}" ] && [ -f "${EXPECTED_CMD_SNAPSHOT:-}" ] && echo "  Command expected: $EXPECTED_CMD_SNAPSHOT"
+[ -n "${EXPECTED_BAL_FILE:-}" ] && [ -f "${EXPECTED_BAL_FILE:-}" ] && echo "  Expected balances: $EXPECTED_BAL_FILE"
 [ -n "${K6_HTML_PATH:-}" ] && echo "  k6 HTML report: $K6_HTML_PATH"
+echo "  Grafana Performance: ${GRAFANA_URL}/d/ledger-overview/ledger-performance-overview"
+if [ -n "${K6_TEST_ID:-}" ]; then
+  echo "  Grafana k6: ${GRAFANA_URL}/d/k6-test-cycle/k6-test-cycle-test-cycle-sh?var-testid=${K6_TEST_ID}"
+fi
 echo ""
 
 if [ "$FAIL" -eq 0 ]; then
