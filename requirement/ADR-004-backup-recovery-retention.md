@@ -5,6 +5,7 @@
 **決策人**: Ledger Platform Team
 **影響範圍**: F-008 State Machine, F-009 Accounting Period / EOD, F-011 BalanceChangeEvent / Outbox, ADR-001 (Raft + CQRS)
 
+> **v0.2 (2026-07-21)**：修正派生讀模型引用 — projection 已遷移 PostgreSQL（PR #28），MySQL / `mysqldump` → PostgreSQL / `pg_dump`。
 > **v0.1 初版**：定義備份分層策略、恢復鏈路劃分（權威 vs 派生）、RocksDB 保留窗口 + EOD 歸檔。承接 2026-07-06/07 24h soak（259M postings）暴露的容量問題：帳本狀態以 ~8GB/h @3k TPS 線性增長，217GB NVMe 24h 即達 189GB。
 
 ---
@@ -28,15 +29,15 @@
 系統的資料流是單向下游派生：
 
 ```
-Raft log (①權威)  →  apply  →  state RocksDB (②權威快取)  →  outbox → Kafka → projection → MySQL/PG (③派生讀模型)
+Raft log (①權威)  →  apply  →  state RocksDB (②權威快取)  →  outbox → Kafka → projection → PostgreSQL (③派生讀模型)
 ```
 
 | 鏈路 | 組成 | 恢復語義 | 用途 |
 | --- | --- | --- | --- |
 | **權威恢復鏈** | Raft log + RocksDB checkpoint | 確定性重放，位級重現 | 節點崩潰/資料損毀後重建帳本狀態 |
-| **派生災備鏈** | MySQL projection dump + S3 歸檔 | 最終一致、經投影轉換、有 lag | 查詢側災備、審計留存、離線分析 |
+| **派生災備鏈** | PostgreSQL projection dump + S3 歸檔 | 最終一致、經投影轉換、有 lag | 查詢側災備、審計留存、離線分析 |
 
-**鐵律**：帳本狀態的權威恢復**只走權威鏈**（Raft log 重放 / checkpoint 還原 / InstallSnapshot）。派生鏈（MySQL/S3）**永遠不作為帳本恢復源** —— 它可能比帳本落後數秒，且經過投影轉換，用它恢復會引入錯位。派生鏈只服務查詢與審計。
+**鐵律**：帳本狀態的權威恢復**只走權威鏈**（Raft log 重放 / checkpoint 還原 / InstallSnapshot）。派生鏈（PostgreSQL/S3）**永遠不作為帳本恢復源** —— 它可能比帳本落後數秒，且經過投影轉換，用它恢復會引入錯位。派生鏈只服務查詢與審計。
 
 ### 2.2 為什麼 checkpoint 是備份基礎單元
 
@@ -56,7 +57,7 @@ PR #31 已實現 RocksDB Checkpoint 快照（硬鏈結 SST，IO O(1)，含 `last
 | --- | --- | --- | --- | --- |
 | **每小時** | state RocksDB checkpoint | 硬鏈結到本地備份目錄（復用 PR #31 checkpoint） | 本地 NVMe | 24 小時 |
 | **每日** | jraft snapshot 產物（在 follower 上取，不干擾 leader） | 取 **jraft 每 600s 已產生的 snapshot**（含一致點），壓縮上傳 | S3 Standard-IA | 7 天 |
-| **每週** | MySQL projection 全量 dump | `mysqldump` 唯讀 view（journal/balance） | S3 Glacier | 4 週 |
+| **每週** | PostgreSQL projection 全量 dump | `pg_dump` 唯讀 view（journal/balance）；Aurora 環境可改用叢集快照導出 | S3 Glacier | 4 週 |
 | **每月** | **完整還原驗證**（restore drill） | 真跑一次 checkpoint → 全新節點恢復 → 對帳 | Glacier Deep Archive | 12 個月 |
 
 ### 3.1 每小時 — 本地快速恢復點
@@ -71,7 +72,7 @@ Checkpoint 到本地另一目錄（硬鏈結，秒級、近零 IO）。用途：
 
 ### 3.3 每週 — 派生讀模型 dump（僅查詢/審計）
 
-MySQL projection 是 `RocksDB → Kafka → projection → MySQL` 末端，最終一致、有 lag、經投影轉換。全量 dump **定位為查詢側災備 + 審計留存，非權威恢復源**。
+PostgreSQL projection 是 `RocksDB → Kafka → projection → PostgreSQL` 末端，最終一致、有 lag、經投影轉換。全量 dump **定位為查詢側災備 + 審計留存，非權威恢復源**。
 
 成本警示：journal 是雙入帳明細，按 24h soak 實測 ~8GB/h 增長，全量 dump 體量與時長需按真實 TPS 核算；建議 dump 前先確認 projection lag 已收斂（避免 dump 到追趕中的部分狀態）。
 
@@ -79,7 +80,7 @@ MySQL projection 是 `RocksDB → Kafka → projection → MySQL` 末端，最�
 
 > **「沒驗證過恢復的備份 = 沒有備份」** —— 本專案 2026-07 的血淚教訓：不實測的性能結論全是假象；備份同理。
 
-每月真跑一次完整 restore：取一份 checkpoint → 在全新節點恢復 → 與同期 MySQL 對帳（Σ DEBIT − Σ CREDIT = 0、per-node seq 一致、抽樣餘額比對）。驗證通過的備份存 Glacier Deep Archive 留 12 個月（合規/審計）。這是唯一必須端到端跑通的環節,其餘備份可只驗完整性（checksum + 行數）。
+每月真跑一次完整 restore：取一份 checkpoint → 在全新節點恢復 → 與同期 PostgreSQL 對帳（Σ DEBIT − Σ CREDIT = 0、per-node seq 一致、抽樣餘額比對）。驗證通過的備份存 Glacier Deep Archive 留 12 個月（合規/審計）。這是唯一必須端到端跑通的環節,其餘備份可只驗完整性（checksum + 行數）。
 
 ---
 
@@ -109,7 +110,7 @@ EOD 任務（leader-only，同 outbox drain 模式）:
        checkpointTo(tmpDir)                    ← 復用 PR #31 O(1) checkpoint（唯讀一致點）
        從只讀 checkpoint 流式導出 cutoff 前的
        journal/journal_line → S3（Parquet + SHA256 manifest）
-       回讀校驗 + 行數 vs MySQL 對帳
+       回讀校驗 + 行數 vs PostgreSQL 對帳
   3. 驗證通過 → leader 提議 Raft 命令:
        ArchiveTruncate(cutoffJournalId, s3ManifestRef)
                           │
@@ -126,7 +127,7 @@ EOD 任務（leader-only，同 outbox drain 模式）:
 ### 4.3 語義收口
 
 - **Reversal 門檻**：apply 先查 `journalId >= archivedWatermark`，否則回 `REVERSAL_WINDOW_EXPIRED`。watermark 是複製狀態 → 三節點判定一致
-- **查詢**：F-006 journal query 本來就走 MySQL；更老走 S3/Athena（低頻審計）
+- **查詢**：F-006 journal query 本來就走 PostgreSQL；更老走 S3/Athena（低頻審計）
 - **窗口長度**：`ledger.retention.reversal-window-days` properties（ADR-001 §2.11 config 規範）
 - **完整性**：全史 = S3 歸檔 + RocksDB 熱窗口，審計可重建
 
@@ -149,7 +150,7 @@ idempotency CF 不走 Raft 範圍刪除（它不是帳本，是去重快取）�
 
 ## 6. 決策後果
 
-✅ 權威恢復（Raft/checkpoint）與派生災備（MySQL/S3）清楚分離，杜絕從最終一致下游恢復帳本的錯位風險。磁碟從無限增長變有界常數。備份復用已驗證的 checkpoint 機制，不引第二套。每月強制 restore 演練杜絕「假備份」。
+✅ 權威恢復（Raft/checkpoint）與派生災備（PostgreSQL/S3）清楚分離，杜絕從最終一致下游恢復帳本的錯位風險。磁碟從無限增長變有界常數。備份復用已驗證的 checkpoint 機制，不引第二套。每月強制 restore 演練杜絕「假備份」。
 
 ❌ EOD 歸檔 + ArchiveTruncate 是新的狀態機命令 + S3 導出器 + 門禁邏輯，需實作與測試（~3-4 天，關鍵零件 checkpoint / 時間有序 key / rate limiter / 會計期門禁均已存在）。歸檔窗口外的查詢延遲較高（S3/Athena 路徑，可接受，屬低頻審計）。跨檔案系統 checkpoint 退化為 copy，本地備份目錄應與資料同盤。
 
@@ -162,7 +163,7 @@ idempotency CF 不走 Raft 範圍刪除（它不是帳本，是去重快取）�
 | RocksDB Checkpoint 快照（O(1)、含一致點、並發讀者鎖保護） | ✅ Done — PR #31 |
 | 每小時本地 checkpoint 備份 | Open |
 | 每日 follower snapshot → S3-IA | Open |
-| 每週 MySQL dump → Glacier | Open |
+| 每週 PostgreSQL dump → Glacier | Open |
 | 每月 restore 演練 | Open |
 | Idempotency CF `setTtl` | Open — backlog（兩層設計） |
 | EOD 歸檔 + `ArchiveTruncate` + `archivedWatermark` + `REVERSAL_WINDOW_EXPIRED` | Open — 本 ADR 核心待實作項 |
