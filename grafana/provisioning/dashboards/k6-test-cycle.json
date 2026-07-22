@@ -1,0 +1,896 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Ledger Performance Overview",
+      "type": "link",
+      "url": "/d/ledger-overview/ledger-performance-overview",
+      "icon": "dashboard",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "k6 Client E2E (test-cycle.sh)",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Client-side **end-to-end** metrics from k6 (`experimental-prometheus-rw`). Pick a **testid** from the dropdown (latest at top). **All** aggregates across runs. Latency: min / avg / max / P50 / P95 / P99 for `POST /ledger/postings`, successful responses only. **No data?** Widen time range or re-run `./scripts/test-cycle.sh` (min/avg/max need a new run)."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Posting Request Rate",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\", name=~\".*/ledger/postings\"}[1m]))",
+          "legendFormat": "req/s"
+        }
+      ],
+      "description": "HTTP requests/s to /ledger/postings"
+    },
+    {
+      "id": 3,
+      "title": "Virtual Users",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(k6_vus{testid=~\"$testid\"})",
+          "legendFormat": "VUs"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Posting Failed Rate",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(k6_http_req_failed_rate{testid=~\"$testid\", name=~\".*/ledger/postings\"})",
+          "legendFormat": "failed"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Iteration Rate",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 3
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(k6_iterations_total{testid=~\"$testid\"}[1m]))",
+          "legendFormat": "iter/s"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Posting E2E Latency (min / avg / max / P50 / P95 / P99)",
+      "description": "k6 http_req_duration for POST /ledger/postings, successful responses only. avg = mean.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "min",
+          "expr": "max(k6_http_req_duration_min{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "avg (mean)",
+          "expr": "max(k6_http_req_duration_avg{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "max",
+          "expr": "max(k6_http_req_duration_max{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "D",
+          "legendFormat": "P50",
+          "expr": "max(k6_http_req_duration_p50{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "E",
+          "legendFormat": "P95",
+          "expr": "max(k6_http_req_duration_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        },
+        {
+          "refId": "F",
+          "legendFormat": "P99",
+          "expr": "max(k6_http_req_duration_p99{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Posting Request Rate",
+      "description": "Requests/s to /ledger/postings.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "req/s",
+          "expr": "sum(rate(k6_http_reqs_total{testid=~\"$testid\", name=~\".*/ledger/postings\"}[1m]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Virtual Users",
+      "description": "Active VUs.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "VUs",
+          "expr": "max(k6_vus{testid=~\"$testid\"})"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Posting Failed Rate",
+      "description": "Failed /ledger/postings requests.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "failed rate",
+          "expr": "max(k6_http_req_failed_rate{testid=~\"$testid\", name=~\".*/ledger/postings\"})"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Checks Pass Rate",
+      "description": "k6 check() success rate.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "checks rate",
+          "expr": "max(k6_checks_rate{testid=~\"$testid\"})"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Posting TTFB (P95)",
+      "description": "Time waiting for first byte on successful postings.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "waiting P95",
+          "expr": "max(k6_http_req_waiting_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Posting Receive (P95)",
+      "description": "Response body read time on successful postings.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "receiving P95",
+          "expr": "max(k6_http_req_receiving_p95{testid=~\"$testid\", name=~\".*/ledger/postings\", expected_response=\"true\"}) * 1000"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Dropped Iterations",
+      "description": "k6 could not schedule iterations (VU saturation).",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "dropped/s",
+          "expr": "sum(rate(k6_dropped_iterations_total{testid=~\"$testid\"}[1m]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "dropped total",
+          "expr": "max(k6_dropped_iterations_total{testid=~\"$testid\"})"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Iteration Duration (P95)",
+      "description": "Full iteration wall time including think time.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "pluginVersion": "12.0.1+security-01",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow"
+              },
+              {
+                "color": "red"
+              }
+            ]
+          },
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "iteration P95",
+          "expr": "max(k6_iteration_duration_p95{testid=~\"$testid\"}) * 1000"
+        }
+      ]
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "k6",
+    "test-cycle",
+    "e2e",
+    "client"
+  ],
+  "templating": {
+    "list": [
+      {
+        "datasource": "Prometheus",
+        "definition": "label_values(k6_vus, testid)",
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false,
+        "name": "testid",
+        "query": "label_values(k6_vus, testid)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 2,
+        "type": "query",
+        "label": "testid"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "k6 Test Cycle (test-cycle.sh)",
+  "uid": "k6-test-cycle",
+  "version": 5
+}

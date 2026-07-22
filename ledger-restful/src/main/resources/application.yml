@@ -1,0 +1,123 @@
+spring:
+  application:
+    name: ledger-platform
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/ledger_view}
+    username: ${SPRING_DATASOURCE_USERNAME:ledger}
+    password: ${SPRING_DATASOURCE_PASSWORD:ledger123}
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: never
+  # Spring-Kafka producer config — documentation only. The actual producer is built
+  # programmatically in com.tomma8.ledger.event.KafkaEventPublisher (raw Apache
+  # Kafka client). Keep both in sync if you tune either side.
+  kafka:
+    producer:
+      acks: all
+      retries: 2147483647          # Integer.MAX_VALUE — retry forever with idempotence on
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+        linger.ms: 5
+        batch.size: 65536          # 64 KiB
+        compression.type: lz4
+        buffer.memory: 268435456   # 256 MiB
+        client.id: ledger-node-${HOSTNAME}
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+ledger:
+  node:
+    id: ${NODE_ID:}
+    hostname: ${HOSTNAME:}
+  advertise-url: ${LEDGER_ADVERTISE_URL:}
+  rocksdb:
+    path: ${LEDGER_ROCKSDB_PATH:/tmp/ledger/rocksdb}
+    cache-mb: ${LEDGER_ROCKSDB_CACHE_MB:256}
+    write-buffer-mb: ${LEDGER_ROCKSDB_WRITE_BUFFER_MB:32}
+    # fsync=true (default; production). Each RocksDB write flushes to disk.
+    # fsync=false is ONLY safe when the Raft log (LogStorage) is the durable record
+    # and RocksDB is treated as a deterministic-replay cache. Disabling is faster but
+    # a crash between Raft commit and RocksDB write loses the in-flight journal.
+    fsync: ${LEDGER_ROCKSDB_FSYNC:true}
+    # disable-wal=true skips the RocksDB WAL (halves data-disk write IO). Same safety
+    # precondition as fsync=false: the Raft log must be the durable record.
+    disable-wal: ${LEDGER_ROCKSDB_DISABLE_WAL:false}
+    # Cap background flush/compaction IO in MB/s (0 = unlimited). Prevents burst
+    # saturation of a disk shared with the latency-critical raft-log fsync.
+    rate-limit-mbps: ${LEDGER_ROCKSDB_RATE_LIMIT_MBPS:0}
+  raft:
+    group-id: ledger-group-1
+    data-path: ${LEDGER_RAFT_DATA_PATH:/tmp/ledger/raft}
+    server-port: ${RAFT_SERVER_PORT:28080}
+    peers: ${PEER_NODES:}
+    engine: ${CONSENSUS_ENGINE:jraft}
+    # fsync=true (default; production). SOFAJRaft LogStorage fsyncs the WAL on every
+    # append. Disable ONLY for ephemeral/dev runs; production clusters MUST keep this on
+    # so a leader crash before replication is detectable via the log.
+    log-fsync: ${LEDGER_RAFT_LOG_FSYNC:true}
+  kafka:
+    # required=false (default; dev/local): if Kafka is unreachable at startup the node degrades to
+    # no-Kafka mode (writes + live reads still work; projection not produced). Production overrides this
+    # to true in application-prod.yml so a missing broker FAILS STARTUP instead of silently losing the
+    # CQRS projection. Override per-env via LEDGER_KAFKA_REQUIRED.
+    required: ${LEDGER_KAFKA_REQUIRED:false}
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topics:
+      balance-change: ledger.balance.change.v1
+      posting-completion: ledger.posting.completion.v1
+  command-queue:
+    enabled: ${LEDGER_COMMAND_QUEUE_ENABLED:true}
+    max-size: ${LEDGER_COMMAND_QUEUE_MAX_SIZE:50000}
+    batch-size: ${LEDGER_COMMAND_QUEUE_BATCH_SIZE:16}
+    batch-wait-ms: ${LEDGER_COMMAND_QUEUE_BATCH_WAIT_MS:1}
+    pipeline-depth: ${LEDGER_RAFT_PIPELINE_DEPTH:1}
+    posting:
+    max-inflight: ${LEDGER_MAX_INFLIGHT_POSTINGS:256}
+    inflight-acquire-ms: ${LEDGER_INFLIGHT_ACQUIRE_MS:100}
+    trace-sample-n: ${LEDGER_POSTING_TRACE_SAMPLE:0}
+  idempotency:
+    ttl: ${LEDGER_IDEMPOTENCY_TTL:30d}
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:}
+
+outbox:
+  poll-interval-secs: ${OUTBOX_POLL_INTERVAL_SECS:10}
+  batch-size: ${OUTBOX_BATCH_SIZE:100}
+  # Async tier-1: in-process queue + drain threads that absorb the
+  # FSM-apply → producer.send() critical path. Tier-2 (this) RocksDB
+  # scanner is the durable safety net for crash recovery.
+  async:
+    queue-capacity: ${OUTBOX_ASYNC_QUEUE_CAPACITY:10000}
+    drain-threads: ${OUTBOX_ASYNC_DRAIN_THREADS:2}
+
+server:
+  port: ${SERVER_PORT:8080}
+  tomcat:
+    threads:
+      max: 250
+      min-spare: 50
+    accept-count: 200
+    max-connections: 4096
+    connection-timeout: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics,info
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}

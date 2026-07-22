@@ -1,0 +1,84 @@
+spring:
+  application:
+    name: ledger-projection
+  datasource:
+    url: jdbc:shardingsphere:classpath:sharding-config.yaml
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    hikari:
+      # Outer Spring HikariPool — was defaulting to 10, capping throughput.
+      # Inner ShardingSphere ds_0 is already 30, so 10 here was the real bottleneck.
+      pool-name: ledger-projection-outer
+      maximum-pool-size: 30
+      minimum-idle: 10
+      connection-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ledger-projection
+      auto-offset-reset: latest
+      enable-auto-commit: false
+      # Bigger polls amortize the poll→flush→commit round-trip (the measured consume
+      # bottleneck) and conflate more balance rows per upsert. 2000 rows / 4 shards =
+      # ≤500 rows per shard flush (chunked into ≤128-row INSERTs) — well under the 30s
+      # flushPollBatch latch. Env-overridable for A/B (KAFKA_MAX_POLL_RECORDS=500 restores old).
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:2000}
+      fetch-min-size: 1048576
+      fetch-max-wait: 200ms
+    listener:
+      type: single
+      ack-mode: manual
+      # NOTE: hand-built factories don't inherit this key; effective concurrency is set from
+      # ledger.projection.kafka.concurrency below (ProjectionConfig.setConcurrency).
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    ShardingSphere-SQL: warn
+
+ledger:
+  projection:
+    journal:
+      flush-interval-ms: 50
+      max-buffer: 4000
+      # projection_event_log audit trail. Default OFF — skips the sharded event_log INSERT +
+      # UNIQUE-index maintenance per event (the dominant consume bottleneck). Idempotency
+      # unaffected (account_balance seq-guard + journal_line_id UNIQUE). Set true only if the
+      # audit table is actually consumed by something.
+      event-log-enabled: ${PROJECTION_EVENT_LOG_ENABLED:false}
+    kafka:
+      # Listener concurrency applied by ProjectionConfig to the hand-built factories.
+      # Capped at the topic partition count — raise ledger.balance.change.v1 partitions to scale past it.
+      concurrency: ${KAFKA_CONSUMER_CONCURRENCY:6}
+    balance:
+      async:
+        # Bounded queue for in-flight balance upsert batches. Each batch holds
+        # one conflated set of account_balance rows from a Kafka poll. 64
+        # batches × 2000 msgs/poll = ~128k messages worth of buffer before
+        # backpressure fires. Tune lower to fail-fast under sustained pressure.
+        queue-capacity: 64
+        # How long a consumer thread will block on the queue before the submit
+        # throws. Acts as the upper bound on consumer-thread idle time per poll
+        # batch — keep below Kafka max.poll.interval.ms (default 5min).
+        submit-timeout-ms: 2000
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:}
+
+server:
+  port: 8089
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics,info
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}

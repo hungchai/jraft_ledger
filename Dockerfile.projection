@@ -1,0 +1,24 @@
+FROM maven:3.9-amazoncorretto-21 AS build
+WORKDIR /build
+COPY pom.xml .
+COPY ledger-core/pom.xml ledger-core/pom.xml
+COPY ledger-dao/pom.xml ledger-dao/pom.xml
+COPY ledger-projection/pom.xml ledger-projection/pom.xml
+RUN mvn dependency:go-offline -pl ledger-projection -am -q || true
+COPY . .
+RUN mvn package -pl ledger-projection -am -DskipTests -q
+
+FROM amazoncorretto:21
+RUN yum install -y shadow-utils && yum clean all
+RUN groupadd -r ledger && useradd -r -g ledger ledger
+RUN mkdir -p /var/lib/projection && chown ledger:ledger /var/lib/projection
+COPY scripts/projection-oom-handler.sh /app/oom-handler.sh
+COPY scripts/projection-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/oom-handler.sh /app/entrypoint.sh \
+    && chown ledger:ledger /app/oom-handler.sh /app/entrypoint.sh
+COPY --from=build /build/ledger-projection/target/ledger-projection-*.jar /app/projection.jar
+USER ledger
+EXPOSE 8089
+
+ENV JAVA_OPTS=""
+ENTRYPOINT ["/app/entrypoint.sh"]

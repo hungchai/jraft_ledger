@@ -1,0 +1,334 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ledger-postgres
+    hostname: ledger-postgres
+    environment:
+      POSTGRES_DB: ledger_view
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger123
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./jraft_ledger/postgres:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ledger-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger_view"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command: ["postgres", "-c", "max_connections=1000"]
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: ledger-kafka
+    hostname: ledger-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://ledger-kafka:9092,CONTROLLER://ledger-kafka:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://ledger-kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@ledger-kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 4
+      # Single-broker dev cluster: keep min-ISR = 1 so acks=all producers don't stall.
+      # Transaction-state log uses the same single-broker constraint.
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - ./jraft_ledger/kafka:/var/lib/kafka/data
+    networks:
+      - ledger-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ledger-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ledger
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ledger-kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - ledger-net
+
+  ledger-base:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ledger-node:latest
+    profiles: ["build"]
+
+  ledger1:
+    image: ledger-node:latest
+    container_name: ledger-node-1
+    hostname: ledger-node-1
+    ports:
+      - "8081:8080"
+      - "28081:28080"
+    environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
+      NODE_ID: ledger-node-1
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_view
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
+      LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_ADVERTISE_URL: http://localhost:8081
+      LEDGER_IDEMPOTENCY_TTL: 3m
+      LEDGER_ROCKSDB_FSYNC: "false"
+      LEDGER_RAFT_LOG_FSYNC: "true"
+      JAVA_OPTS: >-
+        -Xms3g
+        -Xmx3g
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
+        -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - ./jraft_ledger/node1:/var/lib/ledger
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
+  ledger2:
+    image: ledger-node:latest
+    container_name: ledger-node-2
+    hostname: ledger-node-2
+    ports:
+      - "8082:8080"
+      - "28082:28080"
+    environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
+      NODE_ID: ledger-node-2
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_view
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
+      LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_ADVERTISE_URL: http://localhost:8082
+      LEDGER_IDEMPOTENCY_TTL: 3m
+      LEDGER_ROCKSDB_FSYNC: "false"
+      LEDGER_RAFT_LOG_FSYNC: "true"
+      JAVA_OPTS: >-
+        -Xms3g
+        -Xmx3g
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
+        -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+    depends_on:
+      ledger1:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - ./jraft_ledger/node2:/var/lib/ledger
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
+  ledger3:
+    image: ledger-node:latest
+    container_name: ledger-node-3
+    hostname: ledger-node-3
+    ports:
+      - "8083:8080"
+      - "28083:28080"
+    environment:
+      SERVER_PORT: 8080
+      RAFT_SERVER_PORT: 28080
+      NODE_ID: ledger-node-3
+      PEER_NODES: ledger-node-1:28080,ledger-node-2:28080,ledger-node-3:28080
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ledger-postgres:5432/ledger_view
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      LEDGER_ROCKSDB_PATH: /var/lib/ledger/rocksdb
+      LEDGER_RAFT_DATA_PATH: /var/lib/ledger/raft
+      LEDGER_ADVERTISE_URL: http://localhost:8083
+      LEDGER_IDEMPOTENCY_TTL: 3m
+      LEDGER_ROCKSDB_FSYNC: "false"
+      LEDGER_RAFT_LOG_FSYNC: "true"
+      JAVA_OPTS: >-
+        -Xms3g
+        -Xmx3g
+        -XX:+UseZGC
+        -XX:MaxGCPauseMillis=5
+
+        -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/ledger/
+        -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+        -XX:+UnlockDiagnosticVMOptions
+        -XX:+LogVMOutput
+        -XX:LogFile=/var/lib/ledger/vm.log
+        -Djdk.tracePinnedThreads=full
+        -XX:-OmitStackTraceInFastThrow
+        -Xcheck:jni
+        -Dserver.shutdown.grace-period=30s
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+    depends_on:
+      ledger2:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    volumes:
+      - ./jraft_ledger/node3:/var/lib/ledger
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: ledger-kafka-exporter
+    command:
+      - '--kafka.server=ledger-kafka:9092'
+    ports:
+      - "9308:9308"
+    depends_on:
+      - kafka
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ledger-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./jraft_ledger/prometheus:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-remote-write-receiver'
+    networks:
+      - ledger-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ledger-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./jraft_ledger/grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - ledger-net
+
+  projection:
+    build:
+      context: .
+      dockerfile: Dockerfile.projection
+    container_name: ledger-projection
+    hostname: ledger-projection
+    ports:
+      - "8089:8089"
+    environment:
+      SERVER_PORT: 8089
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: ledger123
+      KAFKA_BOOTSTRAP_SERVERS: ledger-kafka:9092
+      KAFKA_CONSUMER_CONCURRENCY: 4
+      SNOWFLAKE_WORKER_ID: 1
+      JAVA_OPTS: >-
+        -Xms3g
+        -Xmx3g
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=10
+        -XX:InitiatingHeapOccupancyPercent=35
+        -XX:G1ReservePercent=15
+        -XX:G1MixedGCCountTarget=8
+        -XX:+DisableExplicitGC
+        -XX:+UseStringDeduplication
+        -XX:StringDeduplicationAgeThreshold=3
+
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/var/lib/projection/
+        -XX:ErrorFile=/var/lib/projection/hs_err_pid_%p.log
+        -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+        -Dmanagement.metrics.export.prometheus.enabled=true
+        -Dserver.shutdown.grace-period=30s
+        -Xlog:gc*,safepoint:file=/var/lib/projection/gc.log:time,uptime,tags:filecount=10,filesize=50m
+    volumes:
+      - ./jraft_ledger/projection:/var/lib/projection
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - ledger-net
+    restart: unless-stopped
+
+networks:
+  ledger-net:
+    driver: bridge

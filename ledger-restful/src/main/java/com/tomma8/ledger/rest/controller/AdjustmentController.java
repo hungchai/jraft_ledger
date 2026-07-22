@@ -1,0 +1,192 @@
+package com.tomma8.ledger.rest.controller;
+
+import com.tomma8.ledger.domain.command.AdjustmentCommand;
+import com.tomma8.ledger.domain.command.CommandResult;
+import com.tomma8.ledger.domain.command.PostingCommand;
+import com.tomma8.ledger.domain.model.AdjustmentDraft;
+import com.tomma8.ledger.domain.model.EntryType;
+import com.tomma8.ledger.domain.model.LedgerErrorCode;
+import com.tomma8.ledger.queue.AccountQueueManager;
+import com.tomma8.ledger.queue.CommandQueueManager;
+import com.tomma8.ledger.raft.NodeRole;
+import com.tomma8.ledger.raft.ConsensusEngine;
+import com.tomma8.ledger.service.AdjustmentService;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+@RestController
+@RequestMapping("/ledger/adjustments")
+public class AdjustmentController {
+
+    private final AdjustmentService adjustmentService;
+    private final ConsensusEngine raftNodeManager;
+    private final CommandQueueManager commandQueueManager;
+    private final AccountQueueManager accountQueueManager;
+    private final NodeRole nodeRole;
+    private final MeterRegistry meterRegistry;
+
+    public AdjustmentController(AdjustmentService adjustmentService,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) ConsensusEngine raftNodeManager,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) CommandQueueManager commandQueueManager,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) AccountQueueManager accountQueueManager,
+                                 NodeRole nodeRole,
+                                 MeterRegistry meterRegistry) {
+        this.adjustmentService = adjustmentService;
+        this.raftNodeManager = raftNodeManager;
+        this.commandQueueManager = commandQueueManager;
+        this.accountQueueManager = accountQueueManager;
+        this.nodeRole = nodeRole;
+        this.meterRegistry = meterRegistry;
+    }
+
+    @PostMapping("/drafts")
+    public ResponseEntity<?> createDraft(@RequestBody Map<String, Object> body) {
+        long start = System.nanoTime();
+        String outcome = "COMPLETED";
+        try {
+            String requestId = (String) body.get("requestId");
+            String makerId = (String) body.get("makerId");
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> legMaps = (List<Map<String, Object>>) body.get("legs");
+            List<PostingCommand.Leg> legs = parseLegs(legMaps);
+
+            PostingCommand cmd = new PostingCommand(requestId, "MANUAL_ADJUSTMENT",
+                    "ADJ-" + requestId, LocalDate.now(), legs);
+
+            try {
+                AdjustmentDraft draft = adjustmentService.createDraft(cmd, makerId);
+                return ResponseEntity.ok(draft);
+            } catch (IllegalArgumentException e) {
+                outcome = "REJECTED";
+                var errBody = new HashMap<String, Object>();
+                errBody.put("error", e.getMessage());
+                return ResponseEntity.badRequest().body(errBody);
+            }
+        } catch (Exception e) {
+            outcome = "ERROR";
+            throw e;
+        } finally {
+            meterRegistry.timer("ledger.adjustment.duration",
+                            "outcome", outcome,
+                            "operation", "create-draft")
+                    .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    @PostMapping("/drafts/{draftId}/approve")
+    public ResponseEntity<?> approve(@PathVariable String draftId, @RequestBody Map<String, String> body) {
+        long start = System.nanoTime();
+        String outcome = "COMPLETED";
+        try {
+            if (!nodeRole.isLeader()) {
+                outcome = "REJECTED";
+                String leader = raftNodeManager != null ? raftNodeManager.getLeaderEndpoint() : "unknown";
+                var respBody = new HashMap<String, Object>();
+                respBody.put("status", "REJECTED");
+                respBody.put("errorCodes", List.of(LedgerErrorCode.NOT_LEADER.name()));
+                respBody.put("leaderHint", leader);
+                return ResponseEntity.status(503).body(respBody);
+            }
+
+            String checkerId = body.get("checkerId");
+            String approveRequestId = body.get("approveRequestId");
+
+            PostingCommand postingCmd = adjustmentService.validateDraftForApproval(draftId, checkerId);
+            AdjustmentCommand adjCmd = new AdjustmentCommand(
+                    postingCmd.requestId(), postingCmd.businessEventType(), postingCmd.businessEventRef(),
+                    postingCmd.valueDate(), postingCmd.legs(), "MANUAL_ADJUSTMENT", draftId);
+
+            CommandResult result;
+            if (commandQueueManager != null) {
+                try {
+                    result = commandQueueManager.submitAsync(adjCmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("CommandQueue submit failed for " + adjCmd.requestId(), e);
+                }
+            } else if (accountQueueManager != null) {
+                // Extract account anchor from adjustment legs (same structure as PostingCommand)
+                String anchorAccount = adjCmd.legs().stream()
+                        .flatMap(leg -> leg.lines().stream())
+                        .map(PostingCommand.Line::accountId)
+                        .sorted()
+                        .findFirst()
+                        .orElseThrow();
+                try {
+                    result = accountQueueManager.submitAsync(anchorAccount, adjCmd).get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new RuntimeException("AccountQueue submit failed for " + anchorAccount, e);
+                }
+            } else if (raftNodeManager != null) {
+                result = raftNodeManager.submit(adjCmd);
+            } else {
+                result = adjustmentService.approveDraft(draftId, checkerId, approveRequestId);
+                adjustmentService.recordApproveResult(draftId, approveRequestId, result);
+                return ResponseEntity.ok(toResponseMap(result));
+            }
+
+            adjustmentService.recordApproveResult(draftId, approveRequestId, result);
+
+            if (result.isRejected()) {
+                outcome = "REJECTED";
+                return ResponseEntity.badRequest().body(toResponseMap(result));
+            }
+            return ResponseEntity.ok(toResponseMap(result));
+        } catch (Exception e) {
+            outcome = "ERROR";
+            throw e;
+        } finally {
+            meterRegistry.timer("ledger.adjustment.duration",
+                            "outcome", outcome,
+                            "operation", "approve")
+                    .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
+        }
+    }
+
+    @PostMapping("/drafts/{draftId}/reject")
+    public ResponseEntity<?> reject(@PathVariable String draftId, @RequestBody Map<String, String> body) {
+        adjustmentService.rejectDraft(draftId, body.get("checkerId"),
+                body.getOrDefault("reason", "Rejected"));
+        var respBody = new HashMap<String, Object>();
+        respBody.put("status", "REJECTED");
+        return ResponseEntity.ok(respBody);
+    }
+
+    private List<PostingCommand.Leg> parseLegs(List<Map<String, Object>> legMaps) {
+        return legMaps.stream().map(legMap -> {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> lineMaps = (List<Map<String, Object>>) legMap.get("lines");
+            List<PostingCommand.Line> lines = lineMaps.stream().map(lineMap ->
+                    new PostingCommand.Line(
+                            (String) lineMap.get("accountId"),
+                            (String) lineMap.get("balanceType"),
+                            (String) lineMap.getOrDefault("position", "CURRENT"),
+                            EntryType.valueOf((String) lineMap.get("entryType")),
+                            (String) lineMap.getOrDefault("description", ""))
+            ).toList();
+            return new PostingCommand.Leg(
+                    (String) legMap.get("legId"),
+                    (String) legMap.get("postingType"),
+                    new BigDecimal(legMap.get("amount").toString()),
+                    (String) legMap.get("currency"),
+                    lines);
+        }).toList();
+    }
+
+    private Map<String, Object> toResponseMap(CommandResult result) {
+        var map = new HashMap<String, Object>();
+        map.put("status", result.status());
+        map.put("journalId", result.journalId() != null ? result.journalId() : "");
+        map.put("errorCodes", result.errorCodes().stream().map(LedgerErrorCode::name).toList());
+        map.put("errorDetails", result.errorDetails());
+        return map;
+    }
+}

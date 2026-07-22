@@ -1,0 +1,967 @@
+{
+  "info": {
+    "name": "Ledger Platform API",
+    "description": "Next-Gen Internal Ledger Platform — Raft + CQRS\n\nBase URL: http://localhost:8081\n\nVariables:\n- {{base_url}} = http://localhost:8081\n- {{node1}} = http://localhost:8081\n- {{node2}} = http://localhost:8082\n- {{node3}} = http://localhost:8083",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8081" },
+    { "key": "account_id", "value": "CLIENT_ACC_001" },
+    { "key": "company_id", "value": "COMPANY_FX_ACC" },
+    { "key": "request_id", "value": "{{$guid}}" },
+    { "key": "journal_id", "value": "" },
+    { "key": "draft_id", "value": "" },
+    { "key": "leader_url", "value": "http://localhost:8081" },
+    { "key": "projection_url", "value": "http://localhost:8089" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounts",
+      "item": [
+        {
+          "name": "Create Client Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status COMPLETED', () => pm.expect(pm.response.json().status).to.eql('COMPLETED'));",
+                  "pm.collectionVariables.set('account_id', 'CLIENT_ACC_001');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"CLIENT_ACC_001\",\n  \"accountType\": \"CLIENT\",\n  \"displayName\": \"Client Account 001\",\n  \"ownerId\": \"CUST-001\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" },\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"HKD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "Get Account",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "pm.test('Has accountId', () => pm.expect(pm.response.json().accountId).to.eql(pm.collectionVariables.get('account_id')));",
+                  "pm.test('Has accountType', () => pm.expect(pm.response.json().accountType).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Company Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"accountId\": \"COMPANY_TEST_001\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Company Test Account\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "Freeze Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/freeze", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "freeze"] }
+          }
+        },
+        {
+          "name": "Unfreeze Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/unfreeze", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "unfreeze"] }
+          }
+        },
+        {
+          "name": "Close Account (must have zero balance)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/close", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "close"] }
+          }
+        },
+        {
+          "name": "Add Balance Type",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"balanceType\": \"BROKERAGE_BALANCE\",\n  \"currency\": \"USD\",\n  \"requestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/accounts/{{account_id}}/balance-types", "host": ["{{base_url}}"], "path": ["ledger", "accounts", "{{account_id}}", "balance-types"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Posting",
+      "item": [
+        {
+          "name": "★ Seed Company Account ★ (run this FIRST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Seed COMPLETED', () => pm.expect(json.status).to.eql('COMPLETED'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"seed-company-001\",\n  \"businessEventType\": \"CAPITAL_INJECTION\",\n  \"businessEventRef\": \"SEED-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"CAPITAL\",\n    \"amount\": \"100000.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Seed capital\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Deposit (Company→Client)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status COMPLETED', () => pm.expect(json.status).to.eql('COMPLETED'));",
+                  "if (json.journalId) pm.collectionVariables.set('journal_id', json.journalId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"amount\": \"1000.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Company funds\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Client deposit\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Withdraw (Client→Company)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"WITHDRAWAL\",\n  \"businessEventRef\": \"WTH-{{$timestamp}}\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"WITHDRAWAL\",\n    \"amount\": \"300.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Client withdrawal\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Company receive\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Idempotent Resend (same requestId)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"idem-test-001\",\n  \"businessEventType\": \"DEPOSIT\",\n  \"businessEventRef\": \"DEP-IDEM\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"DEPOSIT\",\n    \"amount\": \"10.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Idem\" },\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"CREDIT\", \"description\": \"Idem\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Unbalanced Posting (400 error)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"UNBAL-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"amount\": \"100.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Test unbalanced - this will be rejected\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Insufficient Balance (400 error)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"INSF-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"999999.00\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"999999.00\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "Account Not Found — errorDetails",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Status REJECTED', () => pm.expect(json.status).to.eql('REJECTED'));",
+                  "pm.test('errorCode ACCOUNT_NOT_FOUND', () => pm.expect(json.errorCodes).to.include('ACCOUNT_NOT_FOUND'));",
+                  "pm.test('errorDetails.accountId present', () => pm.expect(json.errorDetails).to.have.property('accountId'));",
+                  "pm.test('errorDetails.accountId equals GHOST_ACC', () => pm.expect(json.errorDetails.accountId).to.eql('GHOST_ACC'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"businessEventType\": \"TEST\",\n  \"businessEventRef\": \"GHOST-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TEST\",\n    \"amount\": \"100.00\",\n    \"currency\": \"USD\",\n    \"lines\": [\n      { \"accountId\": \"GHOST_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"entryType\": \"DEBIT\", \"description\": \"Ghost\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Balance Query",
+      "item": [
+        {
+          "name": "Get Balance (aggregated positions)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has accountId', () => pm.expect(json.accountId).to.eql(pm.collectionVariables.get('account_id')));",
+                  "pm.test('Has balanceType', () => pm.expect(json.balanceType).to.eql('AVAILABLE_BALANCE'));",
+                  "pm.test('Has currency', () => pm.expect(json.currency).to.eql('USD'));",
+                  "pm.test('Has amount', () => pm.expect(json.amount).to.be.a('number'));",
+                  "pm.test('Has accountType', () => pm.expect(json.accountType).to.be.a('string').and.not.empty);",
+                  "pm.test('Has dataSource', () => pm.expect(json.dataSource).to.eql('STATE_MACHINE'));",
+                  "pm.test('Has positions', () => pm.expect(json.positions).to.be.an('object'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Balance by Position (single)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&position=CURRENT&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "position", "value": "CURRENT" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Company Balance (COMPANY_FX_ACC)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has accountId', () => pm.expect(json.accountId).to.eql(pm.collectionVariables.get('company_id')));",
+                  "pm.test('Has accountType COMPANY', () => pm.expect(json.accountType).to.eql('COMPANY'));",
+                  "pm.test('Has dataSource', () => pm.expect(json.dataSource).to.eql('STATE_MACHINE'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{company_id}}&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{company_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get HKD Balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=HKD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "HKD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Historical Balance (as-of)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances/as-of?accountId={{account_id}}&balanceType=AVAILABLE_BALANCE&currency=USD&asOf=2026-05-15",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances", "as-of"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" },
+                { "key": "asOf", "value": "2026-05-15" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Batch Balances",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" },\n  { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"LOCKED\", \"currency\": \"USD\" },\n  { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\" }\n]"
+            },
+            "url": { "raw": "{{base_url}}/ledger/balances/batch", "host": ["{{base_url}}"], "path": ["ledger", "balances", "batch"] }
+          }
+        },
+        {
+          "name": "Negative: Missing balanceType (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.expect(pm.response.code).to.eql(400));",
+                  "const json = pm.response.json();",
+                  "pm.test('Has error message', () => pm.expect(json.message).to.include('balanceType'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId={{account_id}}",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Journal Query",
+      "item": [
+        {
+          "name": "Get Journal by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/journals/{{journal_id}}", "host": ["{{base_url}}"], "path": ["ledger", "journals", "{{journal_id}}"] }
+          }
+        },
+        {
+          "name": "Get Journals by Account (paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals?accountId={{account_id}}&page=0&size=50",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals"],
+              "query": [
+                { "key": "accountId", "value": "{{account_id}}" },
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Journal by Request ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals/by-request-id?requestId={{request_id}}",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals", "by-request-id"],
+              "query": [{ "key": "requestId", "value": "{{request_id}}" }]
+            }
+          }
+        },
+        {
+          "name": "Get Journals by Business Ref",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/journals/by-business-ref?businessEventRef=RFQ-001",
+              "host": ["{{base_url}}"], "path": ["ledger", "journals", "by-business-ref"],
+              "query": [{ "key": "businessEventRef", "value": "RFQ-001" }]
+            }
+          }
+        },
+        {
+          "name": "Get Journal Chain",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/journals/chain/{{journal_id}}", "host": ["{{base_url}}"], "path": ["ledger", "journals", "chain", "{{journal_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Projection Read Path",
+      "description": "Read-path APIs served by ledger-projection (port 8089). Queries MySQL View Layer directly — bypasses Raft State Machine. Use these for read-heavy workloads.",
+      "item": [
+        {
+          "name": "Get Projected Balances",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/balances?balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "balances"],
+              "query": [
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Balances by Position",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/balances?balanceType=AVAILABLE_BALANCE&position=CURRENT&currency=USD",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "balances"],
+              "query": [
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "position", "value": "CURRENT" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journal by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has dataSource VIEW_LAYER', () => pm.expect(json.dataSource).to.eql('VIEW_LAYER'));",
+                  "pm.test('Has journal_id', () => pm.expect(json.journal_id).to.be.a('string'));",
+                  "pm.test('Has lines array', () => pm.expect(json.lines).to.be.an('array'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/journals/{{journal_id}}",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "journals", "{{journal_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journals by Account (paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/accounts/{{account_id}}/journals?page=0&size=50",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "accounts", "{{account_id}}", "journals"],
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "50" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Projected Journal by Request ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{projection_url}}/projection/journals/by-request-id?requestId={{request_id}}",
+              "host": ["{{projection_url}}"],
+              "path": ["projection", "journals", "by-request-id"],
+              "query": [
+                { "key": "requestId", "value": "{{request_id}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reversal",
+      "item": [
+        {
+          "name": "Reverse Journal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"reversalReason\": \"Test reversal\",\n  \"reversalReasonCode\": \"CANCELLATION\",\n  \"valueDate\": \"2026-05-18\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/journals/{{journal_id}}/reversal", "host": ["{{base_url}}"], "path": ["ledger", "journals", "{{journal_id}}", "reversal"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Manual Adjustment",
+      "item": [
+        {
+          "name": "Create Adjustment Draft",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.draftId) pm.collectionVariables.set('draft_id', json.draftId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"{{request_id}}\",\n  \"makerId\": \"maker-001\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"ADJUSTMENT\",\n    \"lines\": [\n      { \"accountId\": \"CLIENT_ACC_001\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"100.00\", \"description\": \"Adjustment credit\" },\n      { \"accountId\": \"COMPANY_FX_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"100.00\", \"description\": \"Adjustment debit\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts"] }
+          }
+        },
+        {
+          "name": "Approve Adjustment Draft",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkerId\": \"checker-001\",\n  \"approveRequestId\": \"{{request_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts/{{draft_id}}/approve", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts", "{{draft_id}}", "approve"] }
+          }
+        },
+        {
+          "name": "Reject Adjustment Draft",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkerId\": \"checker-001\",\n  \"reason\": \"Not valid\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/adjustments/drafts/{{draft_id}}/reject", "host": ["{{base_url}}"], "path": ["ledger", "adjustments", "drafts", "{{draft_id}}", "reject"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "item": [
+        {
+          "name": "Run L1 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2026-05-18\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l1", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l1"] }
+          }
+        },
+        {
+          "name": "Run L2 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-05-18\",\n  \"accountBalances\": {\n    \"CLIENT_001\": \"100.00\",\n    \"CLIENT_002\": \"200.00\"\n  },\n  \"controlAccountId\": \"CONTROL_CLIENT\",\n  \"controlBalance\": \"300.00\",\n  \"tolerance\": \"0.01\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l2", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l2"] }
+          }
+        },
+        {
+          "name": "Run L3 Reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-05-18\",\n  \"externalRecords\": [\n    { \"externalRef\": \"EXT-001\", \"amount\": \"800.00\" },\n    { \"externalRef\": \"EXT-002\", \"amount\": \"200.00\" }\n  ],\n  \"journalIds\": [\"JNL-0001\", \"JNL-0002\"]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/reconciliation/l3", "host": ["{{base_url}}"], "path": ["ledger", "reconciliation", "l3"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounting Period",
+      "item": [
+        {
+          "name": "Trigger EOD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2026-05-17\"\n}" },
+            "url": { "raw": "{{base_url}}/ledger/periods/eod", "host": ["{{base_url}}"], "path": ["ledger", "periods", "eod"] }
+          }
+        },
+        {
+          "name": "Get Period Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/periods?date=2026-05-17",
+              "host": ["{{base_url}}"], "path": ["ledger", "periods"],
+              "query": [{ "key": "date", "value": "2026-05-17" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cluster",
+      "item": [
+        {
+          "name": "Get Cluster Info (role + routing)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Has role', () => pm.expect(json.isLeader).to.be.oneOf([true, false]));",
+                  "if (json.isLeader) pm.collectionVariables.set('leader_url', pm.variables.get('base_url'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/info", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "info"] }
+          }
+        },
+        {
+          "name": "Get All Cluster Nodes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/nodes", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "nodes"] }
+          }
+        },
+        {
+          "name": "Raft Leader Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "pm.test('Returns leader URL', () => pm.expect(json.leader).to.be.a('string'));",
+                  "if (json.leader) pm.collectionVariables.set('leader_url', json.leader);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/raft/leader", "host": ["{{base_url}}"], "path": ["raft", "leader"] }
+          }
+        },
+        {
+          "name": "Get Raft Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/ledger/cluster/raft-status", "host": ["{{base_url}}"], "path": ["ledger", "cluster", "raft-status"] }
+          }
+        },
+        {
+          "name": "Health — Check Leader on All Nodes",
+          "item": [
+            {
+              "name": "Node 1 :8081",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8081/health", "host": ["localhost:8081"], "path": ["health"] }
+              }
+            },
+            {
+              "name": "Node 2 :8082",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8082/health", "host": ["localhost:8082"], "path": ["health"] }
+              }
+            },
+            {
+              "name": "Node 3 :8083",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": { "raw": "http://localhost:8083/health", "host": ["localhost:8083"], "path": ["health"] }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Full Flow (Run in Order)",
+      "item": [
+        {
+          "name": "STEP 1: Create Accounts",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-001\",\n  \"accountId\": \"ALICE_ACC\",\n  \"accountType\": \"CLIENT\",\n  \"displayName\": \"Alice\",\n  \"ownerId\": \"ALICE\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "STEP 2: Create Counterparty Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-002\",\n  \"accountId\": \"BANK_ACC\",\n  \"accountType\": \"COMPANY\",\n  \"displayName\": \"Bank\",\n  \"balanceInitializations\": [\n    { \"balanceType\": \"AVAILABLE_BALANCE\", \"currency\": \"USD\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/accounts", "host": ["{{base_url}}"], "path": ["ledger", "accounts"] }
+          }
+        },
+        {
+          "name": "STEP 3: Transfer 1000 USD to Alice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"flow-003\",\n  \"businessEventType\": \"TRANSFER\",\n  \"businessEventRef\": \"FLOW-001\",\n  \"valueDate\": \"2026-05-18\",\n  \"legs\": [{\n    \"legId\": \"leg-1\",\n    \"postingType\": \"TRANSFER\",\n    \"lines\": [\n      { \"accountId\": \"BANK_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"DEBIT\", \"amount\": \"1000.00\" },\n      { \"accountId\": \"ALICE_ACC\", \"balanceType\": \"AVAILABLE_BALANCE\", \"position\": \"CURRENT\", \"currency\": \"USD\", \"entryType\": \"CREDIT\", \"amount\": \"1000.00\" }\n    ]\n  }]\n}"
+            },
+            "url": { "raw": "{{base_url}}/ledger/postings", "host": ["{{base_url}}"], "path": ["ledger", "postings"] }
+          }
+        },
+        {
+          "name": "STEP 4: Check Alice Balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ledger/balances?accountId=ALICE_ACC&balanceType=AVAILABLE_BALANCE&currency=USD",
+              "host": ["{{base_url}}"], "path": ["ledger", "balances"],
+              "query": [
+                { "key": "accountId", "value": "ALICE_ACC" },
+                { "key": "balanceType", "value": "AVAILABLE_BALANCE" },
+                { "key": "currency", "value": "USD" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Observability",
+      "description": "Prometheus + Grafana monitoring endpoints per NFR-9",
+      "item": [
+        {
+          "name": "Prometheus UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:9090", "host": ["localhost"], "path": [], "port": "9090" }
+          }
+        },
+        {
+          "name": "Prometheus Targets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:9090/api/v1/targets", "host": ["localhost"], "path": ["api", "v1", "targets"], "port": "9090" }
+          }
+        },
+        {
+          "name": "Node 1 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8081/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8081" }
+          }
+        },
+        {
+          "name": "Node 2 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8082/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8082" }
+          }
+        },
+        {
+          "name": "Node 3 Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8083/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8083" }
+          }
+        },
+        {
+          "name": "Projection Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8089/actuator/prometheus", "host": ["localhost"], "path": ["actuator", "prometheus"], "port": "8089" }
+          }
+        },
+        {
+          "name": "Grafana UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:3000", "host": ["localhost"], "path": [], "port": "3000" }
+          }
+        },
+        {
+          "name": "Posting P95 Query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:9090/api/v1/query?query=histogram_quantile(0.95,rate(ledger_posting_duration_seconds_bucket[5m]))",
+              "host": ["localhost"],
+              "path": ["api", "v1", "query"],
+              "port": "9090",
+              "query": [{ "key": "query", "value": "histogram_quantile(0.95,rate(ledger_posting_duration_seconds_bucket[5m]))" }]
+            }
+          }
+        },
+        {
+          "name": "GC Pause Max Query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:9090/api/v1/query?query=max(jvm_gc_pause_seconds_max)",
+              "host": ["localhost"],
+              "path": ["api", "v1", "query"],
+              "port": "9090",
+              "query": [{ "key": "query", "value": "max(jvm_gc_pause_seconds_max)" }]
+            }
+          }
+        },
+        {
+          "name": "Raft Status Node 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8081/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8081" }
+          }
+        },
+        {
+          "name": "Raft Status Node 2",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8082/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8082" }
+          }
+        },
+        {
+          "name": "Raft Status Node 3",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "http://localhost:8083/ledger/cluster/raft-status", "host": ["localhost"], "path": ["ledger", "cluster", "raft-status"], "port": "8083" }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.tomma8</groupId>
+        <artifactId>ledger-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>ledger-raft-ratis</artifactId>
+    <name>Ledger Raft (Apache Ratis)</name>
+    <description>Apache Ratis consensus engine — alternative to SOFAJRaft (POC, ADR-003).
+        Implements ConsensusEngine over the shared engine-agnostic LedgerStateMachine.</description>
+
+    <dependencies>
+        <!-- Engine-agnostic core: LedgerStateMachine, RaftCommand, CommandSerializer, ConsensusEngine -->
+        <dependency>
+            <groupId>com.tomma8</groupId>
+            <artifactId>ledger-core</artifactId>
+        </dependency>
+
+        <!-- Apache Ratis: server + gRPC transport + embedded client -->
+        <dependency>
+            <groupId>org.apache.ratis</groupId>
+            <artifactId>ratis-server</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.ratis</groupId>
+            <artifactId>ratis-grpc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.ratis</groupId>
+            <artifactId>ratis-client</artifactId>
+        </dependency>
+        <!-- Runtime metrics SPI impl — required by RaftServer at startup -->
+        <dependency>
+            <groupId>org.apache.ratis</groupId>
+            <artifactId>ratis-metrics-default</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

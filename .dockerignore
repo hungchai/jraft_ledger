@@ -1,0 +1,19 @@
+.git
+.gitignore
+.idea
+*.iml
+target/
+**/target/
+*.md
+!prompt.md
+docker-compose.yml
+.DS_Store
+# Runtime data + test artifacts — must never enter the build context. jraft_ledger/ holds the node
+# RocksDB/raft/kafka/mysql volumes + diagnostics (tens of GB); shipping it made builds slow and caused
+# stale-layer cache hits. None of this belongs in the image.
+jraft_ledger/
+logs/
+loadtest/
+k6-report-*.html
+hs_err_pid*.log
+*.dump

@@ -1,4 +1,8 @@
-/target/
-.idea
-.vscode
-rocksdb_data
+*/target/
+/.idea/
+/jraft_ledger/
+/.tmp/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store

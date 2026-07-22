@@ -1,0 +1,38 @@
+# Override for the OOM / DR test: throttles each node's heap so sustained load drives an
+# OutOfMemoryError, then -XX:+ExitOnOutOfMemoryError kills the JVM and `restart: unless-stopped`
+# brings it back. The DR assertion is run by scripts/oom-dr-test.sh: 0 committed-write loss,
+# clean rejoin, balances reconcile vs RocksDB/MySQL.
+#
+#   # SOFAJRaft:
+#   docker compose -f docker-compose.yml -f docker-compose.oom.yml up -d ledger1 ledger2 ledger3
+#   # Apache Ratis:
+#   docker compose -f docker-compose.yml -f docker-compose.ratis.yml -f docker-compose.oom.yml up -d ledger1 ledger2 ledger3
+#
+# Heap is intentionally small (override LT_OOM_XMX via editing below). ZGC is dropped for a small
+# heap; G1 reproduces classic heap-exhaustion OOM more predictably at this size.
+x-oom-java-opts: &oom-java-opts >-
+  -Xms320m
+  -Xmx320m
+  -XX:+UseG1GC
+  -XX:+ExitOnOutOfMemoryError
+  -XX:+HeapDumpOnOutOfMemoryError
+  -XX:HeapDumpPath=/var/lib/ledger/
+  -XX:ErrorFile=/var/lib/ledger/hs_err_pid_%p.log
+  -Xlog:gc*:file=/var/lib/ledger/gc.log:time,uptime:filecount=10,filesize=50m
+  -Dmanagement.endpoints.web.exposure.include=health,prometheus,metrics,info
+  -Dmanagement.metrics.export.prometheus.enabled=true
+  -Dserver.shutdown.grace-period=10s
+  --add-opens=java.base/java.util=ALL-UNNAMED
+  --add-opens=java.base/java.lang=ALL-UNNAMED
+  --add-opens=java.base/java.nio=ALL-UNNAMED
+
+services:
+  ledger1:
+    environment:
+      JAVA_OPTS: *oom-java-opts
+  ledger2:
+    environment:
+      JAVA_OPTS: *oom-java-opts
+  ledger3:
+    environment:
+      JAVA_OPTS: *oom-java-opts

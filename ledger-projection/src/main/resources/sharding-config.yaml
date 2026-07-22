@@ -1,0 +1,65 @@
+# ShardingSphere-JDBC configuration: journal_line sharded by account_account_id (VARCHAR business key)
+# Docs: https://shardingsphere.apache.org/document/current/en/user-manual/shardingsphere-jdbc/yaml-config/
+#
+# Note: shardingColumn = account_account_id (VARCHAR, reliable hashCode()).
+# Do NOT shard by account_id (BIGINT surrogate FK) — INLINE algorithm may fail
+# on numeric hashCode().
+
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: org.postgresql.Driver
+    jdbcUrl: jdbc:postgresql://ledger-postgres:5432/ledger_view?reWriteBatchedInserts=true&prepareThreshold=1
+    username: ledger
+    password: ledger123
+    maximum-pool-size: 30
+    minimum-idle: 10
+    connection-timeout: 5000
+    idle-timeout: 600000
+    max-lifetime: 1800000
+    pool-name: ledger-projection-hikari-0
+
+rules:
+- !SINGLE
+  tables:
+    - "*.*"
+- !SHARDING
+  tables:
+    journal_line:
+      actualDataNodes: ds_0.journal_line_${0..3}
+      tableStrategy:
+        standard:
+          shardingColumn: account_account_id
+          shardingAlgorithmName: account-id-hash
+      keyGenerateStrategy:
+        column: id
+        keyGeneratorName: snowflake
+    projection_event_log:
+      actualDataNodes: ds_0.projection_event_log_${0..3}
+      tableStrategy:
+        standard:
+          shardingColumn: account_account_id
+          shardingAlgorithmName: event-log-account-hash
+      keyGenerateStrategy:
+        column: id
+        keyGeneratorName: snowflake
+
+  shardingAlgorithms:
+    account-id-hash:
+      type: INLINE
+      props:
+        algorithm-expression: journal_line_${Math.abs(account_account_id.hashCode()) % 4}
+    event-log-account-hash:
+      type: INLINE
+      props:
+        algorithm-expression: projection_event_log_${Math.abs(account_account_id.hashCode()) % 4}
+
+  keyGenerators:
+    snowflake:
+      type: SNOWFLAKE
+      props:
+        worker-id: 1
+
+props:
+  # Logging every Logic+Actual SQL at INFO crushes projection throughput. Keep off.
+  sql-show: false

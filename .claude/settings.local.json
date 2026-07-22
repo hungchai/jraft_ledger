@@ -1,0 +1,44 @@
+{
+  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+  "permissions": {
+    "allow": [
+      "Read(//Users/tomma/GIT/jraft_ledger/**)",
+      "Read(//Users/tomma/GIT/sofa-jraft/**)",
+      "Write(//Users/tomma/GIT/jraft_ledger/**)",
+      "Edit(//Users/tomma/GIT/jraft_ledger/**)",
+      "Read(//Users/tomma/.m2/repository/**)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Bash(mvn *)",
+      "Bash(java *)",
+      "Bash(git *)",
+      "Bash(docker *)",
+      "Bash(docker-compose *)",
+      "Bash(curl *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Bash(chmod +x *)",
+      "Bash(python3 *)",
+      "WebSearch",
+      "WebFetch(domain:*)",
+      "Bash(k6 run *)",
+      "Bash(jar tf *)",
+      "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-1.3.14-sources.jar com/alipay/sofa/jraft/option/NodeOptions.java)",
+      "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-)",
+      "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-1.3.14-sources.jar com/alipay/sofa/jraft/option/RaftOptions.java)",
+      "Bash(unzip -p /Users/tomma/.m2/repository/com/alipay/sofa/jraft-core/1.3.14/jraft-core-1.3.14-sources.jar com/alipay/sofa/jraft/core/NodeImpl.java)",
+      "Bash(mysql *)",
+      "Bash(bash *)",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\"; cat \"{}\"')",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"=== Raft Status — All Nodes ===\")",
+      "Bash(echo -n 'Port __TRACKED_VAR__: ')"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "worktree": {
+    "bgIsolation": "none"
+  }
+}
