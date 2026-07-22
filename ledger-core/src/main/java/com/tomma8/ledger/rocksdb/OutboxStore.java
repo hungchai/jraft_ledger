@@ -63,31 +63,36 @@ public class OutboxStore {
      */
     public List<BalanceChangeEvent> readPending(int limit) {
         if (rocksDBManager == null || !rocksDBManager.isOpen()) return List.of();
-        List<BalanceChangeEvent> events = new ArrayList<>();
-        try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
-                rocksDBManager.getHandle("outbox"))) {
-            iter.seek(OUTBOX_PREFIX);
-            while (iter.isValid() && events.size() < limit) {
-                byte[] key = iter.key();
-                if (key == null || !startsWith(key, OUTBOX_PREFIX)) break;
-                // Skip journal-envelope entries (different prefix)
-                if (startsWith(key, OUTBOX_JOURNAL_PREFIX)) { iter.next(); continue; }
-                byte[] value = iter.value();
-                if (value != null && value.length > 0) {
-                    try {
-                        BalanceChangeEvent event = mapper.readValue(value, BalanceChangeEvent.class);
-                        events.add(event);
-                    } catch (Exception e) {
-                        log.warn("Failed to deserialize outbox event, key={}",
-                                new String(key, StandardCharsets.UTF_8), e);
+        // readLocked: this iterator holds a raw handle/RocksDB reference across the whole
+        // scan — must be excluded from restoreFromCheckpoint's close/wipe/reopen window,
+        // not just checked with isOpen() beforehand (that check alone is TOCTOU-racy).
+        return rocksDBManager.readLocked(() -> {
+            List<BalanceChangeEvent> events = new ArrayList<>();
+            try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
+                    rocksDBManager.getHandle("outbox"))) {
+                iter.seek(OUTBOX_PREFIX);
+                while (iter.isValid() && events.size() < limit) {
+                    byte[] key = iter.key();
+                    if (key == null || !startsWith(key, OUTBOX_PREFIX)) break;
+                    // Skip journal-envelope entries (different prefix)
+                    if (startsWith(key, OUTBOX_JOURNAL_PREFIX)) { iter.next(); continue; }
+                    byte[] value = iter.value();
+                    if (value != null && value.length > 0) {
+                        try {
+                            BalanceChangeEvent event = mapper.readValue(value, BalanceChangeEvent.class);
+                            events.add(event);
+                        } catch (Exception e) {
+                            log.warn("Failed to deserialize outbox event, key={}",
+                                    new String(key, StandardCharsets.UTF_8), e);
+                        }
                     }
+                    iter.next();
                 }
-                iter.next();
+            } catch (Exception e) {
+                log.error("Failed to scan outbox", e);
             }
-        } catch (Exception e) {
-            log.error("Failed to scan outbox", e);
-        }
-        return events;
+            return events;
+        });
     }
 
     /**
@@ -98,29 +103,31 @@ public class OutboxStore {
      */
     public List<JournalEventEnvelope> readPendingJournals(int limit) {
         if (rocksDBManager == null || !rocksDBManager.isOpen()) return List.of();
-        List<JournalEventEnvelope> envelopes = new ArrayList<>();
-        try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
-                rocksDBManager.getHandle("outbox"))) {
-            iter.seek(OUTBOX_JOURNAL_PREFIX);
-            while (iter.isValid() && envelopes.size() < limit) {
-                byte[] key = iter.key();
-                if (key == null || !startsWith(key, OUTBOX_JOURNAL_PREFIX)) break;
-                byte[] value = iter.value();
-                if (value != null && value.length > 0) {
-                    try {
-                        JournalEventEnvelope env = mapper.readValue(value, JournalEventEnvelope.class);
-                        envelopes.add(env);
-                    } catch (Exception e) {
-                        log.warn("Failed to deserialize outbox envelope, key={}",
-                                new String(key, StandardCharsets.UTF_8), e);
+        return rocksDBManager.readLocked(() -> {
+            List<JournalEventEnvelope> envelopes = new ArrayList<>();
+            try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
+                    rocksDBManager.getHandle("outbox"))) {
+                iter.seek(OUTBOX_JOURNAL_PREFIX);
+                while (iter.isValid() && envelopes.size() < limit) {
+                    byte[] key = iter.key();
+                    if (key == null || !startsWith(key, OUTBOX_JOURNAL_PREFIX)) break;
+                    byte[] value = iter.value();
+                    if (value != null && value.length > 0) {
+                        try {
+                            JournalEventEnvelope env = mapper.readValue(value, JournalEventEnvelope.class);
+                            envelopes.add(env);
+                        } catch (Exception e) {
+                            log.warn("Failed to deserialize outbox envelope, key={}",
+                                    new String(key, StandardCharsets.UTF_8), e);
+                        }
                     }
+                    iter.next();
                 }
-                iter.next();
+            } catch (Exception e) {
+                log.error("Failed to scan outbox journals", e);
             }
-        } catch (Exception e) {
-            log.error("Failed to scan outbox journals", e);
-        }
-        return envelopes;
+            return envelopes;
+        });
     }
 
     /**
@@ -166,19 +173,22 @@ public class OutboxStore {
      */
     public long pendingCount() {
         if (rocksDBManager == null || !rocksDBManager.isOpen()) return pending.size();
-        long count = 0;
-        try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
-                rocksDBManager.getHandle("outbox"))) {
-            iter.seek(OUTBOX_PREFIX);
-            while (iter.isValid()) {
-                byte[] key = iter.key();
-                if (key == null || !startsWith(key, OUTBOX_PREFIX)) break;
-                count++;
-                iter.next();
+        long count = rocksDBManager.readLocked(() -> {
+            long n = 0;
+            try (RocksIterator iter = rocksDBManager.getRocksDB().newIterator(
+                    rocksDBManager.getHandle("outbox"))) {
+                iter.seek(OUTBOX_PREFIX);
+                while (iter.isValid()) {
+                    byte[] key = iter.key();
+                    if (key == null || !startsWith(key, OUTBOX_PREFIX)) break;
+                    n++;
+                    iter.next();
+                }
+            } catch (Exception e) {
+                log.error("Failed to count outbox events", e);
             }
-        } catch (Exception e) {
-            log.error("Failed to count outbox events", e);
-        }
+            return n;
+        });
         return count + pending.size();
     }
 

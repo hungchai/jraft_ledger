@@ -46,7 +46,7 @@ const RETRY_BACKOFF_MS = [100, 200, 400];
 // Shared mutable leader URL — refreshed on connection failure or TTL expiry
 let leaderUrl = __ENV.BASE_URL || null;
 let leaderUrlTimestamp = 0;
-const LEADER_TTL_MS = 3_000;  // 3s: fast refresh during Raft churn
+const LEADER_TTL_MS = 60_000;  // 60s: 3s TTL made every VU re-probe /health every 3s (2 GETs when leader is not first in NODES) — measurable scheduler drag on long runs
 
 // Multi-host driver support: set NODES to a comma-separated list of node base URLs
 // (e.g. http://10.0.0.1:8080,http://10.0.0.2:8080,...) when running k6 from a separate
@@ -62,13 +62,11 @@ function findLeader() {
       if (res.status === 200) {
         const body = JSON.parse(res.body);
         if (body.role === 'LEADER') {
-          console.log(`Leader found: ${url} (term ${body.term})`);
           return url;
         }
       }
     } catch (e) { /* try next */ }
   }
-  console.log(`No leader found, falling back to ${NODE_URLS[0]}`);
   return NODE_URLS[0];
 }
 
@@ -97,7 +95,13 @@ function refreshLeader() {
 
 let setupFailures = 0;
 
+// Recorded to k6 log; test-cycle extracts COMMAND_LEDGER lines (hidden from terminal).
+function recordCommandLedger(payloadJson) {
+  console.log(`COMMAND_LEDGER:${payloadJson}`);
+}
+
 function setupPost(path, payload, label) {
+  recordCommandLedger(payload);
   const res = http.post(`${getLeaderUrl()}${path}`, payload, {
     headers: { 'Content-Type': 'application/json' },
     timeout: '30s',
@@ -324,6 +328,9 @@ export default function () {
     });
   }
 
+  // Log intent before POST so lost responses (timeout after server apply) stay in the oracle.
+  recordCommandLedger(payload);
+
   // Retry with backoff for transient errors
   let res = null;
   let lastStatus = 0;
@@ -358,6 +365,7 @@ export default function () {
     'status is 200': (r) => r.status === 200,
     'outcome COMPLETED': (r) => r.json('status') === 'COMPLETED',
   });
+
   // Think-time per iteration. Default 50ms (caps each VU's rate). Set SLEEP_MS=0 to remove the
   // cap and drive the server toward saturation (find the real TPS ceiling).
   const sleepMs = __ENV.SLEEP_MS !== undefined ? Number(__ENV.SLEEP_MS) : 50;
